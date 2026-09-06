@@ -67,7 +67,7 @@ pub fn run(config: EncodeConfig) -> Result<(), Box<dyn std::error::Error>> {
     let frame_interval_us = 1_000_000 / u64::from(config.encoder.fps.max(1));
 
     for frame_id in 0..config.frames {
-        paint(&mut source, frame_id)?;
+        crate::pattern::paint(&mut source, frame_id as usize)?;
 
         let started = Instant::now();
         encoder.encode(
@@ -112,44 +112,6 @@ pub fn run(config: EncodeConfig) -> Result<(), Box<dyn std::error::Error>> {
         f64::from(summary.p99_us) / 1000.0,
         f64::from(summary.max_us) / 1000.0
     );
-
-    Ok(())
-}
-
-/// Paints a moving test pattern into an NV12 frame.
-///
-/// The pattern has to actually move, because a static image compresses to almost nothing
-/// and would make both the bitrate and the slice counts meaningless.
-///
-/// # Errors
-///
-/// Returns an error if the frame cannot be locked for writing.
-fn paint(frame: &mut Nv12Frame, frame_id: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let width = frame.width() as usize;
-    let height = frame.height() as usize;
-    let phase = frame_id as usize;
-
-    frame.fill(|luma, luma_stride, chroma, chroma_stride| {
-        for y in 0..height {
-            let row = &mut luma[y * luma_stride..y * luma_stride + width];
-            for (x, pixel) in row.iter_mut().enumerate() {
-                let bar = ((x + phase * 7) / 64) % 2;
-                let gradient = ((x + y + phase * 3) % 256) as u8;
-                *pixel = if bar == 0 { gradient } else { 255 - gradient };
-            }
-        }
-
-        for y in 0..height / 2 {
-            let row = &mut chroma[y * chroma_stride..y * chroma_stride + width];
-            for (x, pixel) in row.iter_mut().enumerate() {
-                *pixel = if x % 2 == 0 {
-                    (128 + ((y + phase) % 64) as i32 - 32) as u8
-                } else {
-                    (128 + ((x + phase) % 64) as i32 - 32) as u8
-                };
-            }
-        }
-    })?;
 
     Ok(())
 }
