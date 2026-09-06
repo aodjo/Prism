@@ -9,3 +9,10 @@ repository.workspace = true
 
 [dependencies]
 prism-core.workspace = true
+clap = { version = "4", features = ["derive"] }
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
