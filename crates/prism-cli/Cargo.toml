@@ -1,0 +1,11 @@
+[package]
+name = "prism-cli"
+description = "Headless Prism host and client, used for latency measurement and CI regression"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+prism-core.workspace = true

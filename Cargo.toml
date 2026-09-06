@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/prism-core", "crates/prism-napi", "crates/prism-cli"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/aodjo/Prism"
+
+[workspace.dependencies]
+prism-core = { path = "crates/prism-core" }
+thiserror = "2"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

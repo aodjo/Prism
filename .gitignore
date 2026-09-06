@@ -1,0 +1,9 @@
+node_modules/
+dist/
+target/
+*.node
+.DS_Store
+.env
+.env.*
+packages/native/index.js
+packages/native/index.d.ts

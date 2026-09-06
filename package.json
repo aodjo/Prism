@@ -1,0 +1,26 @@
+{
+  "name": "prism",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:native": "pnpm --filter @prism/native build",
+    "test": "pnpm -r test && cargo test --workspace",
+    "test:ts": "pnpm -r test",
+    "test:rs": "cargo test --workspace",
+    "lint": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
+    "build:native:debug": "pnpm --filter @prism/native build:debug",
+    "smoke:electron": "electron scripts/electron-smoke.cjs",
+    "smoke:node": "node scripts/node-smoke.cjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.5.0",
+    "electron": "^44.2.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "packageManager": "pnpm@11.18.0"
+}

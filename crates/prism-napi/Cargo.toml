@@ -1,0 +1,19 @@
+[package]
+name = "prism-napi"
+description = "Node-API surface over the Prism core: control calls and stats only, never frames"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+prism-core.workspace = true
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"

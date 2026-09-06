@@ -1,0 +1,422 @@
+//! Prism wire format.
+//!
+//! This module is the Rust half of a contract shared with the TypeScript control
+//! plane. Both sides are pinned by `packages/protocol/vectors.json`; changing a layout
+//! starts by editing the vectors, then updating this module and
+//! `packages/protocol/src/packet.ts` together.
+//!
+//! All multi-byte fields are little-endian. Encoding writes into a caller-supplied
+//! buffer and decoding borrows from the input, so nothing on the frame path allocates.
+
+use thiserror::Error;
+
+/// Wire format revision. Bumped on any incompatible layout change.
+pub const FORMAT_VERSION: u32 = 1;
+
+/// Maximum UDP payload in bytes, held under the safe PMTU floor so packets never fragment.
+pub const MAX_PACKET_SIZE: usize = 1200;
+
+/// Byte length of a video packet header, including the leading channel tag.
+pub const VIDEO_HEADER_LEN: usize = 20;
+
+/// Largest slice fragment that fits in one video packet.
+pub const MAX_VIDEO_PAYLOAD: usize = MAX_PACKET_SIZE - VIDEO_HEADER_LEN;
+
+/// Exact byte length of a feedback packet; it carries no variable-length payload.
+pub const FEEDBACK_PACKET_LEN: usize = 17;
+
+/// Reserved video flag bits; any packet setting one of these is rejected.
+pub const VIDEO_FLAGS_RESERVED_MASK: u8 = 0xf8;
+
+/// Slice belongs to an IDR frame.
+pub const FLAG_IDR: u8 = 0x01;
+
+/// Slice is the last one of its frame.
+pub const FLAG_LAST_OF_FRAME: u8 = 0x02;
+
+/// Frame is marked as a long-term reference.
+pub const FLAG_LTR_REF: u8 = 0x04;
+
+/// Channel tag carried in the first byte of every packet.
+///
+/// A single UDP flow multiplexes all five channels. The tag is read before anything
+/// else and decides which decoder handles the remaining bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Channel {
+    /// Session setup, codec negotiation, and cursor updates.
+    Control = 0,
+    /// Encoded video slices, host to client.
+    Video = 1,
+    /// Opus frames, host to client.
+    Audio = 2,
+    /// Keyboard, mouse, and gamepad events, client to host.
+    Input = 3,
+    /// Frame acknowledgements and clock sync samples, client to host.
+    Feedback = 4,
+}
+
+impl TryFrom<u8> for Channel {
+    type Error = ProtocolError;
+
+    /// Converts a raw tag byte into a [`Channel`].
+    ///
+    /// Unknown tags are rejected rather than ignored, so a channel added in a future
+    /// revision can never be silently misrouted into an existing decoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::UnknownChannel`] if the tag is not a defined channel.
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        match tag {
+            0 => Ok(Channel::Control),
+            1 => Ok(Channel::Video),
+            2 => Ok(Channel::Audio),
+            3 => Ok(Channel::Input),
+            4 => Ok(Channel::Feedback),
+            other => Err(ProtocolError::UnknownChannel(other)),
+        }
+    }
+}
+
+/// Reason a byte sequence was rejected as malformed.
+///
+/// Decoders return this instead of a partially populated packet, so a corrupt or
+/// hostile datagram can never reach the pipeline as if it were valid. Callers on the
+/// receive path count the error and drop the packet.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProtocolError {
+    /// Packet had no bytes at all, so not even the channel tag could be read.
+    #[error("packet is empty, no channel tag")]
+    Empty,
+
+    /// Leading byte was not one of the defined channel tags.
+    #[error("unknown channel tag {0}")]
+    UnknownChannel(u8),
+
+    /// Packet was routed to a decoder for a different channel.
+    #[error("expected channel {expected:?}, got tag {got}")]
+    WrongChannel {
+        /// Channel the decoder handles.
+        expected: Channel,
+        /// Tag actually found in the packet.
+        got: u8,
+    },
+
+    /// Packet was shorter than the fixed header it claims to carry.
+    #[error("packet is {actual} bytes, needs at least {needed}")]
+    TooShort {
+        /// Bytes actually present.
+        actual: usize,
+        /// Bytes the layout requires.
+        needed: usize,
+    },
+
+    /// Fixed-size packet did not have exactly the required length.
+    #[error("packet is {actual} bytes, expected exactly {expected}")]
+    WrongLength {
+        /// Bytes actually present.
+        actual: usize,
+        /// Bytes the layout requires.
+        expected: usize,
+    },
+
+    /// A reserved flag bit was set, meaning the sender speaks a format this build does not.
+    #[error("reserved video flag bits set in {0:#04x}")]
+    ReservedFlags(u8),
+
+    /// Slice fragment exceeded what one packet can carry.
+    #[error("payload is {actual} bytes, exceeds MAX_VIDEO_PAYLOAD of {MAX_VIDEO_PAYLOAD}")]
+    PayloadTooLarge {
+        /// Payload length that was rejected.
+        actual: usize,
+    },
+
+    /// Caller-supplied encode buffer was too small for the packet.
+    #[error("buffer is {actual} bytes, needs {needed}")]
+    BufferTooSmall {
+        /// Buffer length that was supplied.
+        actual: usize,
+        /// Buffer length required.
+        needed: usize,
+    },
+}
+
+/// One fragment of an encoded video slice, as carried on [`Channel::Video`].
+///
+/// A frame is split into slices by the encoder and each slice into packets of at most
+/// [`MAX_VIDEO_PAYLOAD`] bytes. `capture_ts_us` is stamped once per frame and copied
+/// into every packet of that frame, which is what anchors the end-to-end latency chain.
+///
+/// The payload borrows from the buffer it was decoded out of, so a decoded packet
+/// cannot outlive the reassembly buffer that owns its bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoPacket<'a> {
+    /// Monotonic frame counter, wraps at `u32::MAX`.
+    pub frame_id: u32,
+    /// Slice index within the frame.
+    pub slice_id: u16,
+    /// Packet index within the slice.
+    pub pkt_idx: u16,
+    /// Total packets making up this slice.
+    pub pkt_count: u16,
+    /// Bit flags; see [`FLAG_IDR`], [`FLAG_LAST_OF_FRAME`], and [`FLAG_LTR_REF`].
+    pub flags: u8,
+    /// Host clock at capture time, in microseconds.
+    pub capture_ts_us: u64,
+    /// Slice fragment carried by this packet.
+    pub payload: &'a [u8],
+}
+
+impl<'a> VideoPacket<'a> {
+    /// Returns the number of bytes [`Self::encode_into`] will write.
+    ///
+    /// Callers size their send buffer with this before encoding, which is why encoding
+    /// itself never needs to allocate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{VideoPacket, VIDEO_HEADER_LEN};
+    /// let packet = VideoPacket {
+    ///     frame_id: 1, slice_id: 0, pkt_idx: 0, pkt_count: 1,
+    ///     flags: 0, capture_ts_us: 0, payload: &[1, 2, 3],
+    /// };
+    /// assert_eq!(packet.encoded_len(), VIDEO_HEADER_LEN + 3);
+    /// ```
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        VIDEO_HEADER_LEN + self.payload.len()
+    }
+
+    /// Serialises this packet into `buf` and returns how many bytes were written.
+    ///
+    /// Writes the 20-byte header followed by the payload, all little-endian. Nothing is
+    /// allocated; the caller owns the buffer and reuses it across frames.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::ReservedFlags`] if a reserved flag bit is set,
+    /// [`ProtocolError::PayloadTooLarge`] if the payload exceeds [`MAX_VIDEO_PAYLOAD`],
+    /// or [`ProtocolError::BufferTooSmall`] if `buf` cannot hold the packet.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{VideoPacket, MAX_PACKET_SIZE};
+    /// let packet = VideoPacket {
+    ///     frame_id: 42, slice_id: 0, pkt_idx: 0, pkt_count: 1,
+    ///     flags: 0x03, capture_ts_us: 1_108_152_157_446, payload: &[0xaa],
+    /// };
+    /// let mut buf = [0u8; MAX_PACKET_SIZE];
+    /// assert_eq!(packet.encode_into(&mut buf).unwrap(), 21);
+    /// ```
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if self.flags & VIDEO_FLAGS_RESERVED_MASK != 0 {
+            return Err(ProtocolError::ReservedFlags(self.flags));
+        }
+
+        if self.payload.len() > MAX_VIDEO_PAYLOAD {
+            return Err(ProtocolError::PayloadTooLarge {
+                actual: self.payload.len(),
+            });
+        }
+
+        let needed = self.encoded_len();
+        if buf.len() < needed {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed,
+            });
+        }
+
+        buf[0] = Channel::Video as u8;
+        buf[1..5].copy_from_slice(&self.frame_id.to_le_bytes());
+        buf[5..7].copy_from_slice(&self.slice_id.to_le_bytes());
+        buf[7..9].copy_from_slice(&self.pkt_idx.to_le_bytes());
+        buf[9..11].copy_from_slice(&self.pkt_count.to_le_bytes());
+        buf[11] = self.flags;
+        buf[12..20].copy_from_slice(&self.capture_ts_us.to_le_bytes());
+        buf[VIDEO_HEADER_LEN..needed].copy_from_slice(self.payload);
+
+        Ok(needed)
+    }
+
+    /// Parses a video packet, validating every field before returning it.
+    ///
+    /// The returned payload borrows from `bytes` rather than copying, which is what
+    /// keeps the receive path allocation-free.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::Empty`] for a zero-length input,
+    /// [`ProtocolError::WrongChannel`] if the tag is not [`Channel::Video`],
+    /// [`ProtocolError::TooShort`] if fewer than [`VIDEO_HEADER_LEN`] bytes are present,
+    /// or [`ProtocolError::ReservedFlags`] if a reserved flag bit is set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::VideoPacket;
+    /// let bytes = [1, 42, 0, 0, 0, 0, 0, 0, 0, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0xaa];
+    /// let packet = VideoPacket::decode(&bytes).unwrap();
+    /// assert_eq!(packet.frame_id, 42);
+    /// assert_eq!(packet.payload, &[0xaa]);
+    /// ```
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, ProtocolError> {
+        let channel = channel_of(bytes)?;
+        if channel != Channel::Video {
+            return Err(ProtocolError::WrongChannel {
+                expected: Channel::Video,
+                got: bytes[0],
+            });
+        }
+
+        if bytes.len() < VIDEO_HEADER_LEN {
+            return Err(ProtocolError::TooShort {
+                actual: bytes.len(),
+                needed: VIDEO_HEADER_LEN,
+            });
+        }
+
+        let flags = bytes[11];
+        if flags & VIDEO_FLAGS_RESERVED_MASK != 0 {
+            return Err(ProtocolError::ReservedFlags(flags));
+        }
+
+        Ok(Self {
+            frame_id: u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
+            slice_id: u16::from_le_bytes([bytes[5], bytes[6]]),
+            pkt_idx: u16::from_le_bytes([bytes[7], bytes[8]]),
+            pkt_count: u16::from_le_bytes([bytes[9], bytes[10]]),
+            flags,
+            capture_ts_us: u64::from_le_bytes([
+                bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18],
+                bytes[19],
+            ]),
+            payload: &bytes[VIDEO_HEADER_LEN..],
+        })
+    }
+}
+
+/// Client-to-host receive report, as carried on [`Channel::Feedback`].
+///
+/// `recv_bitmap` drives long-term-reference invalidation on the encoder: the host
+/// encodes against the newest frame the client has confirmed, so packet loss never
+/// forces an IDR and never produces a visible hitch. `client_ts_us` doubles as the
+/// clock-sync sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedbackPacket {
+    /// Highest frame the client has fully reassembled.
+    pub last_frame_id: u32,
+    /// Bit `n` set means frame `last_frame_id - 1 - n` was also received.
+    pub recv_bitmap: u32,
+    /// Client clock when the report was produced, in microseconds.
+    pub client_ts_us: u64,
+}
+
+impl FeedbackPacket {
+    /// Serialises this report into `buf` and returns how many bytes were written.
+    ///
+    /// Feedback is sent for every received frame and is the highest-priority traffic on
+    /// the return path; it is never batched, because a late acknowledgement stalls the
+    /// encoder's long-term reference selection and costs a frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than
+    /// [`FEEDBACK_PACKET_LEN`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{FeedbackPacket, FEEDBACK_PACKET_LEN};
+    /// let report = FeedbackPacket { last_frame_id: 256, recv_bitmap: 0xffff_fff0, client_ts_us: 1_000_000 };
+    /// let mut buf = [0u8; FEEDBACK_PACKET_LEN];
+    /// assert_eq!(report.encode_into(&mut buf).unwrap(), FEEDBACK_PACKET_LEN);
+    /// ```
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < FEEDBACK_PACKET_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: FEEDBACK_PACKET_LEN,
+            });
+        }
+
+        buf[0] = Channel::Feedback as u8;
+        buf[1..5].copy_from_slice(&self.last_frame_id.to_le_bytes());
+        buf[5..9].copy_from_slice(&self.recv_bitmap.to_le_bytes());
+        buf[9..17].copy_from_slice(&self.client_ts_us.to_le_bytes());
+
+        Ok(FEEDBACK_PACKET_LEN)
+    }
+
+    /// Parses a feedback packet, requiring an exact length match.
+    ///
+    /// Unlike video packets, feedback carries no variable-length payload, so anything
+    /// other than exactly [`FEEDBACK_PACKET_LEN`] bytes indicates corruption or a
+    /// version mismatch and is rejected outright.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::Empty`] for a zero-length input,
+    /// [`ProtocolError::WrongChannel`] if the tag is not [`Channel::Feedback`], or
+    /// [`ProtocolError::WrongLength`] if the length is not exactly
+    /// [`FEEDBACK_PACKET_LEN`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::FeedbackPacket;
+    /// let bytes = [4, 0, 1, 0, 0, 0xf0, 0xff, 0xff, 0xff, 0x40, 0x42, 0x0f, 0, 0, 0, 0, 0];
+    /// let report = FeedbackPacket::decode(&bytes).unwrap();
+    /// assert_eq!(report.last_frame_id, 256);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let channel = channel_of(bytes)?;
+        if channel != Channel::Feedback {
+            return Err(ProtocolError::WrongChannel {
+                expected: Channel::Feedback,
+                got: bytes[0],
+            });
+        }
+
+        if bytes.len() != FEEDBACK_PACKET_LEN {
+            return Err(ProtocolError::WrongLength {
+                actual: bytes.len(),
+                expected: FEEDBACK_PACKET_LEN,
+            });
+        }
+
+        Ok(Self {
+            last_frame_id: u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
+            recv_bitmap: u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
+            client_ts_us: u64::from_le_bytes([
+                bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+                bytes[16],
+            ]),
+        })
+    }
+}
+
+/// Reads the channel tag from the first byte of a packet.
+///
+/// This is the only field that may be read before validation, and it decides which
+/// decoder handles the rest of the bytes.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::Empty`] if the packet has no bytes, or
+/// [`ProtocolError::UnknownChannel`] if the tag is not a defined channel.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::net::packet::{channel_of, Channel};
+/// assert_eq!(channel_of(&[1, 0, 0]).unwrap(), Channel::Video);
+/// assert!(channel_of(&[]).is_err());
+/// ```
+pub fn channel_of(bytes: &[u8]) -> Result<Channel, ProtocolError> {
+    let &tag = bytes.first().ok_or(ProtocolError::Empty)?;
+    Channel::try_from(tag)
+}

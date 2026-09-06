@@ -1,0 +1,81 @@
+{
+  "formatVersion": 1,
+  "constants": {
+    "maxPacketSize": 1200,
+    "videoHeaderLen": 20,
+    "maxVideoPayload": 1180,
+    "feedbackPacketLen": 17
+  },
+  "channels": {
+    "control": 0,
+    "video": 1,
+    "audio": 2,
+    "input": 3,
+    "feedback": 4
+  },
+  "videoFlags": {
+    "idr": 1,
+    "lastOfFrame": 2,
+    "ltrRef": 4,
+    "reservedMask": 248
+  },
+  "videoPackets": [
+    {
+      "name": "canonical",
+      "fields": {
+        "frameId": 16909060,
+        "sliceId": 258,
+        "pktIdx": 3,
+        "pktCount": 8,
+        "flags": 3,
+        "captureTsUs": "1108152157446",
+        "payloadHex": "aabbcc"
+      },
+      "hex": "0104030201020103000800030605040302010000aabbcc"
+    },
+    {
+      "name": "all-zero",
+      "fields": {
+        "frameId": 0,
+        "sliceId": 0,
+        "pktIdx": 0,
+        "pktCount": 0,
+        "flags": 0,
+        "captureTsUs": "0",
+        "payloadHex": ""
+      },
+      "hex": "0100000000000000000000000000000000000000"
+    },
+    {
+      "name": "max-values",
+      "fields": {
+        "frameId": 4294967295,
+        "sliceId": 65535,
+        "pktIdx": 65535,
+        "pktCount": 65535,
+        "flags": 7,
+        "captureTsUs": "18446744073709551615",
+        "payloadHex": ""
+      },
+      "hex": "01ffffffffffffffffffff07ffffffffffffffff"
+    }
+  ],
+  "feedbackPackets": [
+    {
+      "name": "canonical",
+      "fields": {
+        "lastFrameId": 256,
+        "recvBitmap": 4294967280,
+        "clientTsUs": "1000000"
+      },
+      "hex": "0400010000f0ffffff40420f0000000000"
+    }
+  ],
+  "rejects": [
+    { "name": "empty", "hex": "", "reason": "no channel tag" },
+    { "name": "unknown-channel", "hex": "09", "reason": "channel 9 is not defined" },
+    { "name": "video-truncated-header", "hex": "010403020102010300080003060504", "reason": "video packet shorter than VIDEO_HEADER_LEN" },
+    { "name": "video-reserved-flag", "hex": "0104030201020103000800080605040302010000", "reason": "reserved flag bit 3 is set" },
+    { "name": "feedback-wrong-length", "hex": "0400010000f0ffffff40420f00000000", "reason": "feedback packet is not exactly FEEDBACK_PACKET_LEN" }
+  ]
+}
