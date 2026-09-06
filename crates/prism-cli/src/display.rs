@@ -10,20 +10,22 @@
 //! showing.
 
 use std::error::Error;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use objc2_metal::MTLPixelFormat;
 use objc2_quartz_core::CAMetalLayer;
+use prism_core::net::packet::{InputEvent, MouseButton};
 use prism_core::render::metal::MetalRenderer;
 use prism_core::render::overlay::TextOverlay;
 use prism_core::render::pacing::PresentPacer;
 use prism_core::stats::LatencyRecorder;
 use sdl3::event::Event;
-use sdl3::keyboard::Keycode;
+use sdl3::keyboard::{Keycode, Mod};
+use sdl3::mouse::MouseButton as SdlMouseButton;
 use sdl3_sys::metal::{SDL_Metal_CreateView, SDL_Metal_DestroyView, SDL_Metal_GetLayer};
 
 use crate::client::{self, ClientConfig};
@@ -36,6 +38,85 @@ const PICTURE_QUEUE_DEPTH: usize = 2;
 /// Ten times a second. Faster would be unreadable and would put CPU text rasterisation on
 /// a path that exists to avoid exactly that kind of work.
 const HUD_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Returns whether an event should end the session.
+///
+/// Escape cannot be the way out once input is being forwarded — the host needs it. The
+/// combination below is deliberately awkward so that nothing a game or an application
+/// wants can trigger it by accident.
+fn is_quit(event: &Event) -> bool {
+    match event {
+        Event::Quit { .. } => true,
+        Event::KeyDown {
+            keycode: Some(Keycode::Q),
+            keymod,
+            ..
+        } => {
+            keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD)
+                && keymod.intersects(Mod::LALTMOD | Mod::RALTMOD)
+                && keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD)
+        }
+        _ => false,
+    }
+}
+
+/// Translates one SDL event into an input event for the host, if it is one.
+///
+/// Key repeats are dropped. The host's own operating system generates repeats from the
+/// key being held, so forwarding the client's as well would double them.
+fn to_input_event(event: &Event) -> Option<InputEvent> {
+    match event {
+        Event::MouseMotion { xrel, yrel, .. } => Some(InputEvent::MouseMove {
+            dx: *xrel as i16,
+            dy: *yrel as i16,
+        }),
+        Event::MouseButtonDown { mouse_btn, .. } => Some(InputEvent::MouseButton {
+            button: to_button(*mouse_btn)?,
+            pressed: true,
+        }),
+        Event::MouseButtonUp { mouse_btn, .. } => Some(InputEvent::MouseButton {
+            button: to_button(*mouse_btn)?,
+            pressed: false,
+        }),
+        Event::MouseWheel {
+            integer_x,
+            integer_y,
+            ..
+        } => Some(InputEvent::MouseScroll {
+            dx: *integer_x as i16,
+            dy: *integer_y as i16,
+        }),
+        Event::KeyDown {
+            scancode: Some(scancode),
+            repeat: false,
+            ..
+        } => Some(InputEvent::Key {
+            usage: *scancode as u16,
+            pressed: true,
+        }),
+        Event::KeyUp {
+            scancode: Some(scancode),
+            ..
+        } => Some(InputEvent::Key {
+            usage: *scancode as u16,
+            pressed: false,
+        }),
+        _ => None,
+    }
+}
+
+/// Maps an SDL pointer button onto the wire's three.
+///
+/// Buttons beyond the first three are dropped rather than guessed at: they mean different
+/// things on different mice and a wrong button is worse than none.
+fn to_button(button: SdlMouseButton) -> Option<MouseButton> {
+    match button {
+        SdlMouseButton::Left => Some(MouseButton::Left),
+        SdlMouseButton::Right => Some(MouseButton::Right),
+        SdlMouseButton::Middle => Some(MouseButton::Middle),
+        _ => None,
+    }
+}
 
 /// Builds the lines the overlay shows.
 ///
@@ -134,6 +215,8 @@ pub fn run(
     width: u32,
     height: u32,
     pacing_us: u32,
+    capture_input: bool,
+    synthetic_input: bool,
 ) -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
@@ -161,9 +244,20 @@ pub fn run(
 
     let (pictures_tx, pictures_rx) = sync_channel(PICTURE_QUEUE_DEPTH);
     let offset = Arc::new(AtomicI64::new(client::OFFSET_UNKNOWN));
+    let input_slot: Arc<OnceLock<client::InputSender>> = Arc::new(OnceLock::new());
     let worker = {
         let offset = Arc::clone(&offset);
-        thread::spawn(move || client::run(config, Some(pictures_tx), offset))
+        let input = Arc::clone(&input_slot);
+        thread::spawn(move || {
+            client::run(
+                config,
+                client::ClientHooks {
+                    pictures: Some(pictures_tx),
+                    offset: Some(offset),
+                    input: Some(input),
+                },
+            )
+        })
     };
 
     let mut events = sdl.event_pump()?;
@@ -174,16 +268,37 @@ pub fn run(
     let mut missed = 0u64;
     let mut last_hud = Instant::now();
     let mut hud_frames = 0u64;
+    let mut sent_input = 0u64;
+
+    if capture_input {
+        sdl.mouse().set_relative_mouse_mode(&window, true);
+        println!("display: forwarding input, control alt shift Q to quit");
+    }
 
     'main: loop {
         for event in events.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'main,
-                _ => {}
+            if is_quit(&event) {
+                break 'main;
+            }
+            if capture_input {
+                if let Some(sender) = input_slot.get() {
+                    if let Some(input) = to_input_event(&event) {
+                        if sender.send(input).is_ok() {
+                            sent_input += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if synthetic_input {
+            if let Some(sender) = input_slot.get() {
+                // A small back and forth rather than a drift, so a measurement run does
+                // not walk the host's pointer off the screen.
+                let dx = if sent_input % 2 == 0 { 2 } else { -2 };
+                if sender.send(InputEvent::MouseMove { dx, dy: 0 }).is_ok() {
+                    sent_input += 1;
+                }
             }
         }
 
@@ -228,6 +343,9 @@ pub fn run(
     unsafe { SDL_Metal_DestroyView(view) };
 
     println!("display: {shown} pictures shown, {missed} had no drawable available");
+    if capture_input {
+        println!("input  : {sent_input} events sent");
+    }
     report_pacing(&mut pacer);
     worker
         .join()

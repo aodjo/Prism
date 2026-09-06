@@ -6,8 +6,9 @@
 
 use prism_core::net::packet::{
     CLOCK_PING_LEN, CLOCK_PONG_LEN, CONTROL_HEADER_LEN, Channel, ClockPing, ClockPong, ControlType,
-    FEEDBACK_PACKET_LEN, FORMAT_VERSION, FeedbackPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD,
-    VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN, VideoPacket, channel_of, control_type_of,
+    FEEDBACK_PACKET_LEN, FORMAT_VERSION, FeedbackPacket, INPUT_PACKET_LEN, InputEvent, InputKind,
+    InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD, MouseButton, VIDEO_FLAGS_RESERVED_MASK,
+    VIDEO_HEADER_LEN, VideoPacket, channel_of, control_type_of,
 };
 use serde_json::Value;
 
@@ -123,6 +124,78 @@ fn constants_match_the_shared_vectors() {
         ControlType::ClockPong as u64,
         v["controlTypes"]["clockPong"].as_u64().unwrap()
     );
+}
+
+#[test]
+fn input_packets_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    assert_eq!(
+        INPUT_PACKET_LEN as u64,
+        v["constants"]["inputPacketLen"].as_u64().unwrap()
+    );
+    assert_eq!(
+        InputKind::MouseMove as u64,
+        v["inputKinds"]["mouseMove"].as_u64().unwrap()
+    );
+    assert_eq!(
+        InputKind::MouseButton as u64,
+        v["inputKinds"]["mouseButton"].as_u64().unwrap()
+    );
+    assert_eq!(
+        InputKind::MouseScroll as u64,
+        v["inputKinds"]["mouseScroll"].as_u64().unwrap()
+    );
+    assert_eq!(
+        InputKind::Key as u64,
+        v["inputKinds"]["key"].as_u64().unwrap()
+    );
+    assert_eq!(
+        MouseButton::Left as u64,
+        v["mouseButtons"]["left"].as_u64().unwrap()
+    );
+
+    for vector in v["inputPackets"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+
+        let x = fields["x"].as_i64().unwrap() as i16;
+        let pressed = fields["flags"].as_u64().unwrap() & 1 != 0;
+        let event = match fields["kind"].as_u64().unwrap() {
+            0 => InputEvent::MouseMove {
+                dx: x,
+                dy: fields["y"].as_i64().unwrap() as i16,
+            },
+            1 => InputEvent::MouseButton {
+                button: MouseButton::try_from(x).unwrap(),
+                pressed,
+            },
+            2 => InputEvent::MouseScroll {
+                dx: x,
+                dy: fields["y"].as_i64().unwrap() as i16,
+            },
+            _ => InputEvent::Key {
+                usage: x as u16,
+                pressed,
+            },
+        };
+
+        let packet = InputPacket {
+            origin_ts_us: u64_field(fields, "originTsUs"),
+            event,
+        };
+
+        let mut buf = [0u8; INPUT_PACKET_LEN];
+        let written = packet.encode_into(&mut buf).unwrap();
+        assert_eq!(written, INPUT_PACKET_LEN);
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            InputPacket::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            packet,
+            "decode {name}"
+        );
+    }
 }
 
 #[test]
@@ -259,6 +332,7 @@ fn malformed_packets_are_rejected() {
                 Ok(ControlType::ClockPing) => ClockPing::decode(&bytes).is_err(),
                 Ok(ControlType::ClockPong) => ClockPong::decode(&bytes).is_err(),
             },
+            Ok(Channel::Input) => InputPacket::decode(&bytes).is_err(),
             Ok(_) => false,
         };
 

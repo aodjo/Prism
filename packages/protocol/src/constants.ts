@@ -30,6 +30,31 @@ export const CLOCK_PING_LEN = 10;
 /** Exact byte length of a clock synchronisation pong. */
 export const CLOCK_PONG_LEN = 26;
 
+/** Exact byte length of an input event packet. */
+export const INPUT_PACKET_LEN = 15;
+
+/**
+ * What an input packet describes.
+ *
+ * The wire layout is one fixed size for all four, with the two coordinate fields
+ * reinterpreted per kind. A tagged union with per-kind lengths would save a few bytes on
+ * a packet that is already tiny, at the cost of a decoder that has to branch before it
+ * knows how much to read.
+ */
+export enum InputKind {
+  MouseMove = 0,
+  MouseButton = 1,
+  MouseScroll = 2,
+  Key = 3,
+}
+
+/** Which pointer button an event refers to. */
+export enum MouseButton {
+  Left = 0,
+  Right = 1,
+  Middle = 2,
+}
+
 /**
  * Channel tag carried in the first byte of every packet.
  *

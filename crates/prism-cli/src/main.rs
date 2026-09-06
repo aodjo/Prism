@@ -148,6 +148,15 @@ enum Command {
         /// Override the mode's hold ceiling, in milliseconds. For measurement.
         #[arg(long)]
         pacing_ms: Option<u32>,
+
+        /// Watch the stream without controlling the host.
+        #[arg(long)]
+        no_input: bool,
+
+        /// Send a steady stream of fabricated pointer motion, so the input path can be
+        /// measured without a hand on the mouse.
+        #[arg(long)]
+        synthetic_input: bool,
     },
 
     /// Encode synthetic frames to an Annex B file to verify the encoder.
@@ -263,6 +272,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             window_height,
             mode,
             pacing_ms,
+            no_input,
+            synthetic_input,
         } => {
             let pacing_us = pacing_ms.map_or_else(|| mode.ceiling_us(), |ms| ms * 1_000);
             let config = client::ClientConfig {
@@ -279,19 +290,44 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
 
             #[cfg(not(target_os = "macos"))]
             {
-                let _ = (window_width, window_height, pacing_us);
+                let _ = (
+                    window_width,
+                    window_height,
+                    pacing_us,
+                    no_input,
+                    synthetic_input,
+                );
                 if config.decode {
                     return Err("decoding is not implemented on this platform yet".into());
                 }
-                Ok(client::run(config, None, offset)?)
+                Ok(client::run(
+                    config,
+                    client::ClientHooks {
+                        offset: Some(offset),
+                        ..client::ClientHooks::default()
+                    },
+                )?)
             }
 
             #[cfg(target_os = "macos")]
             {
                 if display {
-                    display::run(config, window_width, window_height, pacing_us)
+                    display::run(
+                        config,
+                        window_width,
+                        window_height,
+                        pacing_us,
+                        !no_input,
+                        synthetic_input,
+                    )
                 } else {
-                    Ok(client::run(config, None, offset)?)
+                    Ok(client::run(
+                        config,
+                        client::ClientHooks {
+                            offset: Some(offset),
+                            ..client::ClientHooks::default()
+                        },
+                    )?)
                 }
             }
         }

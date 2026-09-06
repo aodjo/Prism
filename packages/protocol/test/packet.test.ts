@@ -8,6 +8,9 @@ import {
   Channel,
   ControlType,
   FEEDBACK_PACKET_LEN,
+  INPUT_PACKET_LEN,
+  InputKind,
+  MouseButton,
   FORMAT_VERSION,
   MAX_PACKET_SIZE,
   MAX_VIDEO_PAYLOAD,
@@ -19,10 +22,12 @@ import {
   decodeClockPing,
   decodeClockPong,
   decodeFeedbackPacket,
+  decodeInputPacket,
   decodeVideoPacket,
   encodeClockPing,
   encodeClockPong,
   encodeFeedbackPacket,
+  encodeInputPacket,
   encodeVideoPacket,
 } from '../src/index.js';
 
@@ -79,6 +84,45 @@ describe('constants match the shared vectors', () => {
     expect(CLOCK_PONG_LEN).toBe(vectors.constants.clockPongLen);
     expect(ControlType.ClockPing).toBe(vectors.controlTypes.clockPing);
     expect(ControlType.ClockPong).toBe(vectors.controlTypes.clockPong);
+  });
+});
+
+describe('input packets', () => {
+  it('agrees with vectors.json on the sizes and kinds', () => {
+    expect(INPUT_PACKET_LEN).toBe(vectors.constants.inputPacketLen);
+    expect(InputKind.MouseMove).toBe(vectors.inputKinds.mouseMove);
+    expect(InputKind.MouseButton).toBe(vectors.inputKinds.mouseButton);
+    expect(InputKind.MouseScroll).toBe(vectors.inputKinds.mouseScroll);
+    expect(InputKind.Key).toBe(vectors.inputKinds.key);
+    expect(MouseButton.Left).toBe(vectors.mouseButtons.left);
+  });
+
+  for (const vector of vectors.inputPackets) {
+    it(`encodes and decodes the ${vector.name} vector`, () => {
+      const { kind, x, y, flags } = vector.fields;
+      const pressed = (flags & 1) !== 0;
+
+      let event;
+      if (kind === InputKind.MouseMove) event = { kind: InputKind.MouseMove as const, dx: x, dy: y };
+      else if (kind === InputKind.MouseScroll)
+        event = { kind: InputKind.MouseScroll as const, dx: x, dy: y };
+      else if (kind === InputKind.MouseButton)
+        event = { kind: InputKind.MouseButton as const, button: x as MouseButton, pressed };
+      else event = { kind: InputKind.Key as const, usage: x, pressed };
+
+      const packet = { originTsUs: BigInt(vector.fields.originTsUs), event };
+      const bytes = encodeInputPacket(packet);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(bytes.length).toBe(INPUT_PACKET_LEN);
+      expect(decodeInputPacket(hexToBytes(vector.hex))).toEqual(packet);
+    });
+  }
+
+  it('refuses a button index it does not know', () => {
+    const bytes = hexToBytes(vectors.inputPackets[1]!.hex);
+    bytes[10] = 9;
+    expect(() => decodeInputPacket(bytes)).toThrow(PrismProtocolError);
   });
 });
 
@@ -237,6 +281,7 @@ describe('malformed packets are rejected', () => {
         const channel = channelOf(bytes);
         if (channel === Channel.Video) decodeVideoPacket(bytes);
         else if (channel === Channel.Feedback) decodeFeedbackPacket(bytes);
+        else if (channel === Channel.Input) decodeInputPacket(bytes);
         else if (channel === Channel.Control) {
           const type = controlTypeOf(bytes);
           if (type === ControlType.ClockPing) decodeClockPing(bytes);

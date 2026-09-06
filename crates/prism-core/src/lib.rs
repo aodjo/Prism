@@ -12,6 +12,7 @@ pub mod capture;
 pub mod clock;
 pub mod decode;
 pub mod encode;
+pub mod input;
 pub mod net;
 pub mod render;
 pub mod stats;
