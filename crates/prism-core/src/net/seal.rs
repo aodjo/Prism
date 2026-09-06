@@ -1,9 +1,18 @@
 //! Encrypting packets on the way out and refusing forgeries on the way in.
 //!
-//! Every packet on the wire is sealed with AES-256-GCM. That is not only about
+//! Every packet on the wire is sealed with ChaCha20-Poly1305. That is not only about
 //! confidentiality: a remote desktop session carries keystrokes and accepts injected input,
 //! so an unauthenticated flow is one where anyone who can reach the port can type on the
-//! host. Authentication is the part that matters most, and GCM gives both.
+//! host. Authentication is the part that matters most, and an AEAD gives both.
+//!
+//! # Why not AES-GCM
+//!
+//! It was AES-256-GCM first, and measuring it is what changed the choice. The pure-Rust `aes`
+//! crate reaches its hardware instructions on x86 at run time but not on stable aarch64, where
+//! it falls back to a constant-time software implementation. Measured here, a full packet cost
+//! 11.6 us to seal and open against ChaCha20-Poly1305's 3.5 — and the client is the aarch64
+//! machine. ChaCha is within a factor of two of hardware AES everywhere and needs no
+//! per-platform story at all, which is the same reasoning WireGuard applies.
 //!
 //! # What travels in the clear
 //!
@@ -13,10 +22,10 @@
 //!
 //! # Nonces
 //!
-//! A counter, one per direction, never reused. Reusing a nonce with GCM is not a weakness
-//! but a break: it leaks the XOR of two plaintexts and, worse, the authentication key. So
-//! the counter is never allowed to wrap — the session ends first, at a point no real session
-//! could reach.
+//! A counter, one per direction, never reused. Reusing a nonce here is not a weakness but a
+//! break: it leaks the XOR of two plaintexts and, worse, the Poly1305 key that authenticates
+//! them. So the counter is never allowed to wrap — the session ends first, at a point no real
+//! session could reach.
 //!
 //! # Replay
 //!
@@ -29,8 +38,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aes_gcm::aead::{AeadInPlace, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce, Tag};
+use chacha20poly1305::aead::{AeadInPlace, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 
 use crate::net::packet::{MAX_PLAINTEXT_SIZE, SEAL_OVERHEAD};
 
@@ -40,7 +49,7 @@ use crate::net::packet::{MAX_PLAINTEXT_SIZE, SEAL_OVERHEAD};
 /// and hand out a borrow of the same buffer.
 pub const COUNTER_LEN: usize = 8;
 
-/// Bytes of authentication tag GCM appends.
+/// Bytes of authentication tag the cipher appends.
 pub const TAG_LEN: usize = 16;
 
 /// How many counters behind the newest one are still accepted.
@@ -120,7 +129,7 @@ pub enum SealError {
 /// hot path against a once-a-second one; an atomic increment costs a fraction of the
 /// encryption it precedes. Use [`Sealer::split`] to hand the second thread its own handle.
 pub struct Sealer {
-    cipher: Aes256Gcm,
+    cipher: ChaCha20Poly1305,
     counter: Arc<AtomicU64>,
 }
 
@@ -129,7 +138,7 @@ impl Sealer {
     #[must_use]
     pub fn new(key: &[u8; 32]) -> Self {
         Self {
-            cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)),
+            cipher: ChaCha20Poly1305::new(Key::from_slice(key)),
             counter: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -138,8 +147,8 @@ impl Sealer {
     ///
     /// The two handles share one counter, so no nonce is ever issued twice however the sends
     /// interleave. That sharing is the entire point: two independent sealers on one key would
-    /// both start at zero and reuse every nonce, which under GCM leaks the authentication key
-    /// rather than merely weakening the cipher.
+    /// both start at zero and reuse every nonce, which leaks the authentication key rather
+    /// than merely weakening the cipher.
     #[must_use]
     pub fn split(&self) -> Self {
         Self {
@@ -208,7 +217,7 @@ impl Sealer {
 
 /// Opens incoming packets for one direction, refusing forgeries and replays.
 pub struct Opener {
-    cipher: Aes256Gcm,
+    cipher: ChaCha20Poly1305,
     newest: u64,
     /// Bit `n` set means the counter `newest - 1 - n` has already been accepted.
     seen: u64,
@@ -222,7 +231,7 @@ impl Opener {
     #[must_use]
     pub fn new(key: &[u8; 32]) -> Self {
         Self {
-            cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)),
+            cipher: ChaCha20Poly1305::new(Key::from_slice(key)),
             newest: 0,
             seen: 0,
             started: false,
@@ -330,7 +339,7 @@ impl Opener {
 /// Ninety-six bits, of which the counter fills the low sixty-four and the rest are zero.
 /// The keys are per-direction and per-session, so a counter is all that is needed to keep
 /// every nonce under a key distinct.
-fn nonce_for(counter: u64) -> Nonce<aes_gcm::aes::cipher::consts::U12> {
+fn nonce_for(counter: u64) -> Nonce {
     let mut bytes = [0u8; 12];
     bytes[..COUNTER_LEN].copy_from_slice(&counter.to_le_bytes());
 

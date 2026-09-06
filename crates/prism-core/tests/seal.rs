@@ -343,3 +343,29 @@ fn neither_half_prints_its_key() {
     assert!(printed.contains("sent"));
     assert!(printed.contains("forged"));
 }
+
+#[test]
+#[ignore = "a measurement, not an assertion; run with --ignored --nocapture"]
+fn how_much_a_full_size_packet_costs_to_seal_and_open() {
+    // The number the latency budget needs. A full packet is sealed and opened a hundred
+    // thousand times, which is about thirteen seconds of a 1440p120 stream.
+    const ROUNDS: u32 = 100_000;
+
+    let (mut sealer, mut opener) = pair();
+    let plaintext = vec![0x7eu8; MAX_PLAINTEXT_SIZE];
+    let mut packet = vec![0u8; MAX_PACKET_SIZE];
+
+    let start = std::time::Instant::now();
+    for _ in 0..ROUNDS {
+        let len = sealer.seal(&plaintext, &mut packet).expect("seals");
+        opener.open(&mut packet[..len]).expect("opens");
+    }
+    let elapsed = start.elapsed();
+
+    let per_packet = elapsed.as_secs_f64() / f64::from(ROUNDS) * 1e6;
+    println!(
+        "seal + open of {MAX_PLAINTEXT_SIZE} bytes: {per_packet:.3} us per packet, \
+         {:.1} Gbps",
+        f64::from(ROUNDS) * MAX_PLAINTEXT_SIZE as f64 * 8.0 / elapsed.as_secs_f64() / 1e9
+    );
+}

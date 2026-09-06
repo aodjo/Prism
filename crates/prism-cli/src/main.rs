@@ -10,7 +10,9 @@ mod display;
 #[cfg(target_os = "macos")]
 mod encode;
 mod host;
+mod identity;
 mod pattern;
+mod session;
 mod wire;
 
 use std::error::Error;
@@ -20,6 +22,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use prism_core::net::handshake::Identity;
 
 /// How the client trades latency against even presentation.
 ///
@@ -138,6 +141,17 @@ enum Command {
         /// Requires --pace, which supplies the rate it starts from.
         #[arg(long)]
         adaptive: bool,
+
+        /// Where this machine's long-term key is kept, generated on first use.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+
+        /// The client's public key in hex, as `prism-cli keygen` printed it.
+        ///
+        /// There is no way to run without one. A session that skipped this would be one
+        /// where anyone who can reach the port can watch the screen and type on it.
+        #[arg(long)]
+        peer_key: String,
     },
 
     /// Receive frames and report latency.
@@ -194,6 +208,25 @@ enum Command {
         /// measured without a hand on the mouse.
         #[arg(long)]
         synthetic_input: bool,
+
+        /// Where this machine's long-term key is kept, generated on first use.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+
+        /// The host's public key in hex, as `prism-cli keygen` printed it.
+        #[arg(long)]
+        peer_key: String,
+    },
+
+    /// Print this machine's public key, creating its long-term key if there is none.
+    ///
+    /// The two sides exchange these once. Each pins the other's, and from then on a peer
+    /// that cannot prove it holds the matching private key is refused before it can send a
+    /// single byte the session acts on.
+    Keygen {
+        /// Where to keep the key. Defaults to `~/.prism/identity.key`.
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
 
     /// Encode synthetic frames to an Annex B file to verify the encoder.
@@ -239,6 +272,24 @@ fn main() -> ExitCode {
     }
 }
 
+/// Loads the identity at `path`, or at the default location when none was given.
+///
+/// Generated on first use rather than demanded up front: a machine that has never run has
+/// nothing to lose by making a key, and demanding one before the first run would put a setup
+/// step in front of every install.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if the key cannot be read or written.
+fn open_identity(path: Option<&std::path::Path>) -> Result<Identity, Box<dyn Error>> {
+    let path = match path {
+        Some(path) => path.to_path_buf(),
+        None => identity::default_path()?,
+    };
+
+    Ok(identity::load_or_create(&path)?)
+}
+
 /// Runs the selected subcommand.
 ///
 /// # Errors
@@ -263,7 +314,13 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             parity,
             pace,
             adaptive,
+            identity,
+            peer_key,
         } => {
+            let keys = host::HostKeys {
+                identity: open_identity(identity.as_deref())?,
+                peer: identity::parse_peer_key(&peer_key)?,
+            };
             let config = host::HostConfig {
                 peer,
                 fps,
@@ -278,18 +335,19 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             };
 
             if !encode && !capture {
-                return Ok(host::run(config)?);
+                return Ok(host::run(config, &keys)?);
             }
 
             #[cfg(target_os = "macos")]
             if capture {
-                return host::run_captured(config, bitrate, width, height);
+                return host::run_captured(config, &keys, bitrate, width, height);
             }
 
             #[cfg(target_os = "macos")]
             {
                 host::run_encoded(
                     config,
+                    &keys,
                     prism_core::encode::EncoderConfig {
                         width,
                         height,
@@ -316,7 +374,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         // differently.
                         max_slice_bytes: slices as u32,
                     };
-                    host::run_windows(config, encoder_config, capture)
+                    host::run_windows(config, &keys, encoder_config, capture)
                 }
 
                 #[cfg(not(target_os = "windows"))]
@@ -338,6 +396,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             pacing_ms,
             no_input,
             synthetic_input,
+            identity,
+            peer_key,
         } => {
             let pacing_us = pacing_ms.map_or_else(|| mode.ceiling_us(), |ms| ms * 1_000);
             let config = client::ClientConfig {
@@ -347,6 +407,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 report_every,
                 in_flight,
                 decode: decode || display,
+                identity: open_identity(identity.as_deref())?,
+                peer_key: identity::parse_peer_key(&peer_key)?,
             };
 
             let offset =
@@ -390,6 +452,19 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     )?)
                 }
             }
+        }
+
+        Command::Keygen { identity: path } => {
+            let path = match path {
+                Some(path) => path,
+                None => identity::default_path()?,
+            };
+            let identity = identity::load_or_create(&path)?;
+
+            println!("{}", identity::to_hex(identity.public()));
+            eprintln!("prism-cli: key kept at {}", path.display());
+
+            Ok(())
         }
 
         Command::Encode {

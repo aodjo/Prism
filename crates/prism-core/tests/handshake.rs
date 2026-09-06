@@ -429,3 +429,236 @@ fn an_identity_does_not_print_its_private_key() {
 
     assert!(!printed.contains(&private), "the private key reached Debug");
 }
+
+// The drivers below are what the transport actually uses. Everything they add over the raw
+// state machine exists because the path is UDP: messages are lost, arrive twice, and arrive
+// from strangers.
+
+use prism_core::net::handshake::{Answer, Initiator, PeerPolicy, Responder};
+
+/// A reply buffer large enough for any handshake answer.
+const REPLY: usize = RESPONSE_OVERHEAD + MAX_HANDSHAKE_PAYLOAD;
+
+#[test]
+fn the_drivers_complete_a_handshake_and_carry_their_payloads() {
+    let client = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+    let client_public = *client.public();
+    let host_public = *host.public();
+
+    let mut initiator =
+        Initiator::new(&client, host.public(), b"hello from the client").expect("starts");
+    let mut responder = Responder::new(host, PeerPolicy::Paired(vec![client_public]));
+
+    let mut reply = [0u8; REPLY];
+    let Answer::Reply(len) = responder.accept(
+        initiator.first_message(),
+        b"hello from the host",
+        &mut reply,
+    ) else {
+        panic!("the responder did not answer a genuine first message");
+    };
+
+    assert!(initiator.accept(&reply[..len]), "the answer was refused");
+
+    let client_side = initiator.take().expect("a session");
+    let host_side = responder.take().expect("a session");
+
+    assert_eq!(client_side.peer_payload, b"hello from the host");
+    assert_eq!(host_side.peer_payload, b"hello from the client");
+
+    // Each side ends up naming the other, which is what the caller checks against pairing.
+    assert_eq!(client_side.session.peer_static, host_public);
+    assert_eq!(host_side.session.peer_static, client_public);
+}
+
+#[test]
+fn a_lost_answer_is_recovered_by_resending_the_same_first_message() {
+    // The case this driver exists for. If the responder started over instead of repeating its
+    // answer, it would derive a second set of keys while the initiator waited forever for an
+    // answer to the first — a session that never starts, with nothing in the logs to say why.
+    let client = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+
+    let mut initiator = Initiator::new(&client, host.public(), &[]).expect("starts");
+    let mut responder = Responder::new(host, PeerPolicy::Any);
+
+    let mut first_reply = [0u8; REPLY];
+    let Answer::Reply(first_len) =
+        responder.accept(initiator.first_message(), &[], &mut first_reply)
+    else {
+        panic!("no answer");
+    };
+    let established = responder.take().expect("a session");
+
+    // That answer is lost on the way back, so the initiator sends the same bytes again.
+    let mut second_reply = [0u8; REPLY];
+    let Answer::Reply(second_len) =
+        responder.accept(initiator.first_message(), &[], &mut second_reply)
+    else {
+        panic!("the retransmission went unanswered");
+    };
+
+    assert_eq!(
+        &first_reply[..first_len],
+        &second_reply[..second_len],
+        "the responder answered a retransmission with different bytes"
+    );
+    assert!(
+        responder.take().is_none(),
+        "a retransmission produced a second session"
+    );
+
+    assert!(initiator.accept(&second_reply[..second_len]));
+    let mut client_side = initiator.take().expect("a session");
+    let mut host_side = established;
+
+    let mut packet = vec![0u8; 4 + 24];
+    client_side
+        .session
+        .sealer
+        .seal(b"live", &mut packet)
+        .expect("seals");
+    assert_eq!(
+        host_side.session.opener.open(&mut packet).expect("opens"),
+        b"live",
+        "the keys the responder kept do not match the ones the initiator ended up with"
+    );
+}
+
+#[test]
+fn a_peer_the_policy_does_not_admit_gets_silence() {
+    // Silence rather than a refusal. A rejection would confirm to an unpaired caller that it
+    // had found a live host, which is exactly what a scan is looking for.
+    let stranger = Identity::generate().expect("generates");
+    let paired = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+
+    let initiator = Initiator::new(&stranger, host.public(), &[]).expect("starts");
+    let mut responder = Responder::new(host, PeerPolicy::Paired(vec![*paired.public()]));
+
+    let mut reply = [0u8; REPLY];
+    assert_eq!(
+        responder.accept(initiator.first_message(), &[], &mut reply),
+        Answer::Ignored
+    );
+    assert!(responder.take().is_none(), "an unpaired peer got a session");
+}
+
+#[test]
+fn one_paired_key_among_several_is_admitted() {
+    let client = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+    let others: Vec<[u8; 32]> = (0..3)
+        .map(|_| *Identity::generate().expect("generates").public())
+        .collect();
+
+    let mut allowed = others;
+    allowed.insert(2, *client.public());
+
+    let initiator = Initiator::new(&client, host.public(), &[]).expect("starts");
+    let mut responder = Responder::new(host, PeerPolicy::Paired(allowed));
+
+    let mut reply = [0u8; REPLY];
+    assert!(matches!(
+        responder.accept(initiator.first_message(), &[], &mut reply),
+        Answer::Reply(_)
+    ));
+}
+
+#[test]
+fn junk_never_gets_an_answer() {
+    // Every datagram that reaches an open UDP port lands here. None of them may produce a
+    // reply, or the port becomes an amplifier pointed at whoever the source address claims
+    // to be.
+    let host = Identity::generate().expect("generates");
+    let mut responder = Responder::new(host, PeerPolicy::Any);
+    let mut reply = [0u8; REPLY];
+
+    for length in [0usize, 1, 32, 95, 96, 400, 1200] {
+        assert_eq!(
+            responder.accept(&vec![0x7fu8; length], &[], &mut reply),
+            Answer::Ignored,
+            "junk of {length} bytes drew a reply"
+        );
+    }
+}
+
+#[test]
+fn a_second_different_handshake_does_not_displace_a_live_session() {
+    // Once a session is running, a new first message from anywhere would otherwise tear it
+    // down and replace it — a reset any observer could cause by replaying an old capture or
+    // simply by connecting.
+    let client = Identity::generate().expect("generates");
+    let intruder = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+
+    let mut initiator = Initiator::new(&client, host.public(), &[]).expect("starts");
+    let mut responder = Responder::new(host.clone(), PeerPolicy::Any);
+
+    let mut reply = [0u8; REPLY];
+    let Answer::Reply(len) = responder.accept(initiator.first_message(), &[], &mut reply) else {
+        panic!("no answer");
+    };
+    assert!(initiator.accept(&reply[..len]));
+    let live = responder.take().expect("a session");
+
+    let second = Initiator::new(&intruder, host.public(), &[]).expect("starts");
+    assert_eq!(
+        responder.accept(second.first_message(), &[], &mut reply),
+        Answer::Ignored
+    );
+    assert!(responder.take().is_none());
+
+    // And the session that was already running still works.
+    let mut client_side = initiator.take().expect("a session");
+    let mut host_side = live;
+    let mut packet = vec![0u8; 5 + 24];
+    client_side
+        .session
+        .sealer
+        .seal(b"still", &mut packet)
+        .expect("seals");
+    assert_eq!(
+        host_side.session.opener.open(&mut packet).expect("opens"),
+        b"still"
+    );
+}
+
+#[test]
+fn the_initiator_ignores_everything_but_its_answer() {
+    let client = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+
+    let mut initiator = Initiator::new(&client, host.public(), &[]).expect("starts");
+
+    for length in [0usize, 1, 47, 48, 300] {
+        assert!(
+            !initiator.accept(&vec![0x22u8; length]),
+            "junk of {length} bytes completed the handshake"
+        );
+    }
+    assert!(initiator.take().is_none());
+}
+
+#[test]
+fn an_answer_arriving_twice_does_not_produce_a_second_session() {
+    let client = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+
+    let mut initiator = Initiator::new(&client, host.public(), &[]).expect("starts");
+    let mut responder = Responder::new(host, PeerPolicy::Any);
+
+    let mut reply = [0u8; REPLY];
+    let Answer::Reply(len) = responder.accept(initiator.first_message(), &[], &mut reply) else {
+        panic!("no answer");
+    };
+
+    assert!(initiator.accept(&reply[..len]));
+    assert!(
+        !initiator.accept(&reply[..len]),
+        "a duplicated answer was accepted a second time"
+    );
+    assert!(initiator.take().is_some());
+    assert!(initiator.take().is_none());
+}

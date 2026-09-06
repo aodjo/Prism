@@ -10,13 +10,15 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 reed-solomon-erasure = "6.0"
-aes-gcm = "0.10"
-# `std` is deliberately off. Snow's `std` feature lists `ring/std`, which in Cargo's old
-# feature syntax also switches the optional `ring` dependency on, and ring is C that needs a
-# cross linker `pnpm lint:cross` does not have. The pure-Rust resolver is what this wants
-# anyway. `risky-raw-split` hands over the session keys so `net::seal` can put the nonce on
-# the wire, which is what makes the transport survive UDP reordering.
-snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "default-resolver-crypto", "risky-raw-split"] }
+chacha20poly1305 = "0.10"
+# The features name exactly the primitives `Noise_IK_25519_ChaChaPoly_BLAKE2s` uses, rather
+# than the `default-resolver-crypto` bundle, which would also build AES and SHA-2 that nothing
+# here calls. `std` is deliberately off: snow's `std` feature lists `ring/std`, which in
+# Cargo's old feature syntax also switches the optional `ring` dependency on, and ring is C
+# that needs a cross linker `pnpm lint:cross` does not have. `risky-raw-split` hands over the
+# session keys so `net::seal` can put the nonce on the wire, which is what makes the transport
+# survive UDP reordering.
+snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom", "risky-raw-split"] }
 
 [dev-dependencies]
 serde_json.workspace = true

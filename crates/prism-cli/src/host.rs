@@ -10,8 +10,22 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use prism_core::clock::now_us;
+use prism_core::net::handshake::{Identity, KEY_LEN};
 
 use crate::wire::SliceSender;
+
+/// The keys one host session runs under.
+///
+/// Separate from [`HostConfig`] because a key is not a tuning parameter: the config is
+/// copied around freely and describes how the stream should look, while these decide who is
+/// allowed to see it.
+#[derive(Debug, Clone)]
+pub struct HostKeys {
+    /// This machine's long-term key.
+    pub identity: Identity,
+    /// The client's public key, as pairing recorded it.
+    pub peer: [u8; KEY_LEN],
+}
 
 /// How the host should shape its traffic.
 #[derive(Debug, Clone, Copy)]
@@ -55,14 +69,14 @@ pub struct HostConfig {
 ///
 /// Panics if `config.slices` is zero or `config.frame_bytes` is smaller than
 /// `config.slices`, since neither describes a frame an encoder could produce.
-pub fn run(config: HostConfig) -> io::Result<()> {
+pub fn run(config: HostConfig, keys: &HostKeys) -> io::Result<()> {
     assert!(config.slices > 0, "a frame needs at least one slice");
     assert!(
         config.frame_bytes >= config.slices,
         "every slice needs at least one byte"
     );
 
-    let mut sender = SliceSender::connect(config.peer)?;
+    let mut sender = SliceSender::connect(config.peer, &keys.identity, &keys.peer)?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -125,11 +139,12 @@ pub fn run(config: HostConfig) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 pub fn run_encoded(
     config: HostConfig,
+    keys: &HostKeys,
     encoder_config: prism_core::encode::EncoderConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
 
-    let mut sender = SliceSender::connect(config.peer)?;
+    let mut sender = SliceSender::connect(config.peer, &keys.identity, &keys.peer)?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -215,6 +230,7 @@ pub fn run_encoded(
 #[cfg(target_os = "macos")]
 pub fn run_captured(
     config: HostConfig,
+    keys: &HostKeys,
     bitrate_bps: u32,
     width: u32,
     height: u32,
@@ -240,7 +256,7 @@ pub fn run_captured(
     };
 
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
-    let mut sender = SliceSender::connect(config.peer)?;
+    let mut sender = SliceSender::connect(config.peer, &keys.identity, &keys.peer)?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -430,6 +446,7 @@ fn build_slices(frame_bytes: usize, slices: usize) -> Vec<Vec<u8>> {
 #[cfg(target_os = "windows")]
 pub fn run_windows(
     config: HostConfig,
+    keys: &HostKeys,
     encoder_config: prism_core::encode::EncoderConfig,
     capture: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -457,7 +474,7 @@ pub fn run_windows(
     let mut encoder =
         unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), encoder_config) }?;
 
-    let mut sender = SliceSender::connect(config.peer)?;
+    let mut sender = SliceSender::connect(config.peer, &keys.identity, &keys.peer)?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }

@@ -40,7 +40,7 @@ use crate::net::seal::{Opener, Sealer};
 /// and a version byte in the prologue; a peer that wants a different one is a peer running a
 /// different version, and it fails to handshake rather than being talked down to a weaker
 /// one.
-const PATTERN: &str = "Noise_IK_25519_AESGCM_SHA256";
+const PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 
 /// Bound into the handshake transcript so the version cannot be stripped.
 ///
@@ -438,4 +438,257 @@ fn public_from_private(private: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], Handsha
 /// Renders bytes as hex, for `Debug` output that names a key without revealing a secret one.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Which peers a responder will complete a handshake with.
+///
+/// Named rather than defaulted, because "an empty list means anyone" is the kind of default
+/// that turns into an open host the first time a configuration file fails to load.
+#[derive(Debug, Clone)]
+pub enum PeerPolicy {
+    /// Only these static keys, which is what pairing produces.
+    Paired(Vec<[u8; KEY_LEN]>),
+    /// Any key at all. For a host deliberately in pairing mode, and for tests.
+    Any,
+}
+
+impl PeerPolicy {
+    /// Returns whether a peer's static key is one this side will talk to.
+    #[must_use]
+    pub fn admits(&self, peer: &[u8; KEY_LEN]) -> bool {
+        match self {
+            // Compared in full and without an early exit on the first differing byte. The
+            // keys are public, so this is not about secrecy; it is about not growing a timing
+            // oracle here later when the same shape is reused for something that is secret.
+            Self::Paired(keys) => keys
+                .iter()
+                .fold(false, |found, key| found | (key.ct_eq(peer))),
+            Self::Any => true,
+        }
+    }
+}
+
+/// Compares two keys without branching on their contents.
+trait ConstantTimeEq {
+    /// Returns whether the two keys are equal.
+    fn ct_eq(&self, other: &[u8; KEY_LEN]) -> bool;
+}
+
+impl ConstantTimeEq for [u8; KEY_LEN] {
+    fn ct_eq(&self, other: &[u8; KEY_LEN]) -> bool {
+        self.iter()
+            .zip(other)
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
+    }
+}
+
+/// A finished handshake: the session keys and whatever the peer sent alongside them.
+pub struct Established {
+    /// The keys for this session.
+    pub session: Session,
+    /// The payload the peer carried in its handshake message.
+    pub peer_payload: Vec<u8>,
+}
+
+impl core::fmt::Debug for Established {
+    /// Describes the result without exposing any key.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Established")
+            .field("session", &self.session)
+            .field("peer_payload", &self.peer_payload.len())
+            .finish()
+    }
+}
+
+/// Drives the initiating side of a handshake across an unreliable path.
+///
+/// The first message is kept so it can be sent again. On UDP either message can be lost, and
+/// a handshake that gives up on the first loss is a session that fails to start on a path
+/// where everything else would have worked. Retransmitting the *same bytes* rather than
+/// writing a new message is what makes that safe: a second message would carry a second
+/// ephemeral key and the responder would derive keys the initiator has thrown away.
+#[derive(Debug)]
+pub struct Initiator {
+    handshake: Option<Handshake>,
+    first: Vec<u8>,
+    established: Option<Established>,
+}
+
+impl Initiator {
+    /// Starts a handshake to a peer whose static key is known, carrying `payload`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HandshakeError::PayloadTooLarge`] if the payload is too big, and
+    /// [`HandshakeError::Misconfigured`] if the keys are not valid Curve25519 keys.
+    pub fn new(
+        identity: &Identity,
+        peer_static: &[u8; KEY_LEN],
+        payload: &[u8],
+    ) -> Result<Self, HandshakeError> {
+        let mut handshake = Handshake::initiator(identity, peer_static)?;
+
+        let mut first = vec![0u8; payload.len() + INIT_OVERHEAD];
+        let written = handshake.write_message(payload, &mut first)?;
+        first.truncate(written);
+
+        Ok(Self {
+            handshake: Some(handshake),
+            first,
+            established: None,
+        })
+    }
+
+    /// Returns the message to send, and to send again if no answer arrives.
+    #[must_use]
+    pub fn first_message(&self) -> &[u8] {
+        &self.first
+    }
+
+    /// Feeds a datagram, returning whether it completed the handshake.
+    ///
+    /// Anything that is not the expected answer is reported as not having completed it,
+    /// rather than as an error, because on a live socket most of what arrives is not.
+    pub fn accept(&mut self, datagram: &[u8]) -> bool {
+        let Some(handshake) = self.handshake.as_mut() else {
+            return false;
+        };
+
+        let mut payload = [0u8; MAX_HANDSHAKE_PAYLOAD];
+        let Ok(read) = handshake.read_message(datagram, &mut payload) else {
+            return false;
+        };
+
+        let Some(handshake) = self.handshake.take() else {
+            return false;
+        };
+        let Ok(session) = handshake.into_session() else {
+            return false;
+        };
+
+        self.established = Some(Established {
+            session,
+            peer_payload: payload[..read].to_vec(),
+        });
+
+        true
+    }
+
+    /// Takes the finished session, once there is one.
+    #[must_use]
+    pub fn take(&mut self) -> Option<Established> {
+        self.established.take()
+    }
+}
+
+/// What a responder decided about one datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// Not a handshake message this responder will act on. Pass it on or drop it.
+    Ignored,
+    /// The first `usize` bytes of the reply buffer should be sent back to the peer.
+    ///
+    /// A handshake may become available from [`Responder::take`] at the same time; a repeat
+    /// of a message already answered produces the same bytes and no new session.
+    Reply(usize),
+}
+
+/// Drives the answering side of a handshake across an unreliable path.
+///
+/// Holds the answer it gave so a retransmitted first message gets the same bytes back. That
+/// matters more than it looks: if the answer is lost, the initiator resends, and a responder
+/// that started a fresh handshake would derive a second set of keys while the initiator kept
+/// waiting for an answer to the first. The session would never start and nothing in the logs
+/// would say why.
+pub struct Responder {
+    identity: Identity,
+    policy: PeerPolicy,
+    answered: Option<(Vec<u8>, Vec<u8>)>,
+    established: Option<Established>,
+}
+
+impl Responder {
+    /// Creates a responder that will complete a handshake only with the peers `policy` names.
+    #[must_use]
+    pub fn new(identity: Identity, policy: PeerPolicy) -> Self {
+        Self {
+            identity,
+            policy,
+            answered: None,
+            established: None,
+        }
+    }
+
+    /// Feeds a datagram and writes any reply into `reply`.
+    ///
+    /// `reply` must be at least `RESPONSE_OVERHEAD + payload.len()` bytes.
+    ///
+    /// A peer the policy does not admit gets [`Answer::Ignored`] rather than a refusal.
+    /// Silence is the right answer: a rejection would tell an unpaired caller that it had
+    /// found a live host, which is exactly what a scan is looking for.
+    pub fn accept(&mut self, datagram: &[u8], payload: &[u8], reply: &mut [u8]) -> Answer {
+        if let Some((seen, answer)) = self.answered.as_ref() {
+            // Byte equality is enough to recognise a retransmission: the message is
+            // authenticated, so an attacker cannot produce a different one that would pass.
+            if seen.as_slice() == datagram {
+                if reply.len() < answer.len() {
+                    return Answer::Ignored;
+                }
+                reply[..answer.len()].copy_from_slice(answer);
+                return Answer::Reply(answer.len());
+            }
+
+            // A different first message while one is already answered. Starting over would
+            // abandon a session that may be live, so it is refused.
+            return Answer::Ignored;
+        }
+
+        let Ok(mut handshake) = Handshake::responder(&self.identity) else {
+            return Answer::Ignored;
+        };
+
+        let mut incoming = [0u8; MAX_HANDSHAKE_PAYLOAD];
+        let Ok(read) = handshake.read_message(datagram, &mut incoming) else {
+            return Answer::Ignored;
+        };
+
+        let Some(peer) = handshake.peer_static() else {
+            return Answer::Ignored;
+        };
+        if !self.policy.admits(&peer) {
+            return Answer::Ignored;
+        }
+
+        let Ok(written) = handshake.write_message(payload, reply) else {
+            return Answer::Ignored;
+        };
+
+        let Ok(session) = handshake.into_session() else {
+            return Answer::Ignored;
+        };
+
+        self.answered = Some((datagram.to_vec(), reply[..written].to_vec()));
+        self.established = Some(Established {
+            session,
+            peer_payload: incoming[..read].to_vec(),
+        });
+
+        Answer::Reply(written)
+    }
+
+    /// Takes the finished session, once there is one.
+    #[must_use]
+    pub fn take(&mut self) -> Option<Established> {
+        self.established.take()
+    }
+}
+
+impl core::fmt::Debug for Responder {
+    /// Describes the responder's progress without exposing any key material.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Responder")
+            .field("answered", &self.answered.is_some())
+            .finish_non_exhaustive()
+    }
 }

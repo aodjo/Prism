@@ -15,6 +15,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::ops::Range;
 
 use crate::net::packet::MAX_PACKET_SIZE;
 use crate::net::seal::{COUNTER_LEN, Opener, Sealer};
@@ -127,6 +128,15 @@ impl core::fmt::Debug for SecureSender {
     }
 }
 
+/// What one datagram turned out to be, as a range into the caller's buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Datagram {
+    /// It opened, and the plaintext is at this range.
+    Opened(Range<usize>),
+    /// It did not open. The range covers the datagram exactly as it arrived.
+    Rejected(Range<usize>),
+}
+
 /// The receiving half of a sealed session.
 pub struct SecureReceiver {
     transport: UdpTransport,
@@ -206,6 +216,35 @@ impl SecureReceiver {
                 }
             }
         }
+    }
+
+    /// Receives one datagram and says whether it opened, without skipping anything.
+    ///
+    /// [`Self::recv_into`] is the right call almost everywhere, because dropping what does not
+    /// open is what stops one forged packet ending a session. This exists for the one caller
+    /// that has something else to try with a rejected datagram: a side that has answered a
+    /// handshake but not yet heard a sealed packet back cannot know its answer arrived, so a
+    /// datagram that fails to open may be the peer asking again. Dropping it there would
+    /// deadlock a session that lost exactly one packet.
+    ///
+    /// Ranges are returned rather than slices so the caller can borrow the buffer again for
+    /// whatever it tries next.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`], including the read timeout.
+    pub fn recv_step(&mut self, buf: &mut [u8]) -> io::Result<(Datagram, SocketAddr)> {
+        let (len, from) = {
+            let (bytes, from) = self.transport.recv_from_into(buf)?;
+            (bytes.len(), from)
+        };
+
+        let outcome = match self.opener.open(&mut buf[..len]) {
+            Ok(plaintext) => Datagram::Opened(COUNTER_LEN..COUNTER_LEN + plaintext.len()),
+            Err(_) => Datagram::Rejected(0..len),
+        };
+
+        Ok((outcome, from))
     }
 
     /// Returns how many packets failed authentication.

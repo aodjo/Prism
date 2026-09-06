@@ -13,6 +13,7 @@ use prism_core::input::{Injector, PlatformInjector};
 use prism_core::net::ack::{is_newer, missing_in_history};
 use prism_core::net::cc::{CongestionConfig, CongestionController, DelaySample};
 use prism_core::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
+use prism_core::net::handshake::{Identity, KEY_LEN};
 use prism_core::net::loss::LossInjector;
 use prism_core::net::packet::{
     CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR, FLAG_LAST_OF_FRAME,
@@ -20,6 +21,8 @@ use prism_core::net::packet::{
     channel_of,
 };
 use prism_core::net::packetize::SlicePacketizer;
+use prism_core::net::seal::Opener;
+use prism_core::net::secure::SecureSender;
 use prism_core::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
 use prism_core::net::transport::UdpTransport;
 use prism_core::stats::LatencyRecorder;
@@ -128,7 +131,13 @@ impl ReturnPath {
 /// Owns the socket and the reusable send buffer for one session.
 #[derive(Debug)]
 pub struct SliceSender {
-    transport: UdpTransport,
+    sender: SecureSender,
+    /// The key for the client's half of the session, until the return path takes it.
+    ///
+    /// Held rather than used here because opening is the receiving thread's job, and there
+    /// is exactly one of those. Two openers on one direction would each keep their own replay
+    /// window and each reject what the other had already accepted.
+    opener: Option<Opener>,
     buffer: [u8; MAX_PACKET_SIZE],
     packets: u64,
     bytes: u64,
@@ -153,17 +162,30 @@ pub struct SliceSender {
 }
 
 impl SliceSender {
-    /// Binds an ephemeral local port and connects it to `peer`.
+    /// Binds an ephemeral local port, connects it to `peer`, and handshakes with it.
+    ///
+    /// Returns only once the session is sealed. There is no path through this that produces a
+    /// sender able to put a packet on the wire in the clear.
     ///
     /// # Errors
     ///
-    /// Returns the underlying [`io::Error`] if the socket cannot be bound or connected.
-    pub fn connect(peer: std::net::SocketAddr) -> io::Result<Self> {
+    /// Returns the underlying [`io::Error`] if the socket cannot be bound or connected,
+    /// [`io::ErrorKind::TimedOut`] if the peer never answers, and
+    /// [`io::ErrorKind::PermissionDenied`] if it answers with an unexpected key.
+    pub fn connect(
+        peer: std::net::SocketAddr,
+        identity: &Identity,
+        peer_key: &[u8; KEY_LEN],
+    ) -> io::Result<Self> {
         let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
         transport.connect(peer)?;
 
+        let established = crate::session::dial(&transport, identity, peer_key)?;
+        transport.set_read_timeout(None)?;
+
         Ok(Self {
-            transport,
+            sender: SecureSender::new(transport, established.session.sealer),
+            opener: Some(established.session.opener),
             buffer: [0; MAX_PACKET_SIZE],
             packets: 0,
             bytes: 0,
@@ -359,7 +381,7 @@ impl SliceSender {
             return Ok(());
         }
 
-        self.transport.send(&self.buffer[..len])?;
+        self.sender.send(&self.buffer[..len])?;
 
         Ok(())
     }
@@ -470,7 +492,7 @@ impl SliceSender {
         let len = cursor
             .encode_into(&mut self.buffer)
             .expect("a clamped sample always encodes");
-        self.transport.send(&self.buffer[..len])?;
+        self.sender.send(&self.buffer[..len])?;
         self.packets += 1;
         self.bytes += len as u64;
 
@@ -498,9 +520,18 @@ impl SliceSender {
     ///
     /// # Errors
     ///
-    /// Returns the underlying [`io::Error`] if the socket cannot be duplicated.
-    pub fn serve_return_path(&self, inject_input: bool) -> io::Result<()> {
-        let transport = self.transport.try_clone()?;
+    /// Returns the underlying [`io::Error`] if the socket cannot be duplicated, and
+    /// [`io::ErrorKind::AlreadyExists`] if a return path is already running.
+    pub fn serve_return_path(&mut self, inject_input: bool) -> io::Result<()> {
+        let opener = self.opener.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the return path is already running",
+            )
+        })?;
+
+        let mut receiver = self.sender.receiver(opener)?;
+        let mut replies = self.sender.split()?;
         let feedback = Arc::clone(&self.feedback);
         let adaptive = self.adaptive;
         let start_bps = self.pacer.as_ref().map_or(0, SendPacer::bitrate_bps);
@@ -522,7 +553,7 @@ impl SliceSender {
             let mut injected = 0u64;
 
             loop {
-                let bytes = match transport.recv_into(&mut recv_buf) {
+                let bytes = match receiver.recv_into(&mut recv_buf) {
                     Ok(bytes) => bytes,
                     Err(err) => {
                         eprintln!("host: return path recv failed: {err} ({:?})", err.kind());
@@ -546,7 +577,7 @@ impl SliceSender {
                             t3_us: now_us(),
                         };
                         if pong.encode_into(&mut send_buf).is_ok() {
-                            let _ = transport.send(&send_buf);
+                            let _ = replies.send(&send_buf);
                         }
                     }
                     Ok(Channel::Input) => {

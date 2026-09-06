@@ -21,13 +21,17 @@ use std::time::{Duration, Instant};
 use prism_core::clock::now_us;
 use prism_core::net::ack::AckTracker;
 use prism_core::net::clocksync::ClockSync;
+use prism_core::net::handshake::{Established, Identity, KEY_LEN, PeerPolicy};
 use prism_core::net::packet::{
     CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
     FEEDBACK_PACKET_LEN, FecPacket, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE,
     VideoPacket, channel_of, control_type_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
+use prism_core::net::secure::{Datagram, SecureReceiver, SecureSender};
 use prism_core::net::transport::UdpTransport;
+
+use crate::session::Listener;
 use prism_core::stats::{LatencyRecorder, LatencySummary};
 
 /// Where decoded pictures go when the client is showing them.
@@ -71,7 +75,11 @@ pub const OFFSET_UNKNOWN: i64 = i64::MIN;
 #[derive(Debug)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct InputSender {
-    transport: UdpTransport,
+    /// Behind a lock because this is shared with the window thread and sealing needs the
+    /// send buffer. The contention is nil — input is at most a thousand events a second and
+    /// nothing else uses this handle — and the alternative, a second key for this direction,
+    /// would mean a second nonce counter under the same key.
+    sender: Mutex<SecureSender>,
     host: SocketAddr,
     offset: Arc<AtomicI64>,
 }
@@ -110,7 +118,11 @@ impl InputSender {
 
         let mut buf = [0u8; INPUT_PACKET_LEN];
         if packet.encode_into(&mut buf).is_ok() {
-            self.transport.send_to(&buf, self.host)?;
+            let mut sender = self
+                .sender
+                .lock()
+                .map_err(|_| io::Error::other("the input sender was poisoned"))?;
+            sender.send_to(&buf, self.host)?;
         }
 
         Ok(origin_ts_us)
@@ -139,7 +151,7 @@ pub struct ClientHooks {
 }
 
 /// How the receiving client should behave.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Address to receive packets on.
     pub bind: SocketAddr,
@@ -153,6 +165,14 @@ pub struct ClientConfig {
     pub in_flight: usize,
     /// Decode the reassembled frames rather than only counting them.
     pub decode: bool,
+    /// This machine's long-term key.
+    pub identity: Identity,
+    /// The host's public key, as pairing recorded it.
+    ///
+    /// The host speaks first, so this side answers rather than dials — but it still refuses
+    /// any caller whose key is not this one, which is what stops a stranger who found the
+    /// port from becoming the host.
+    pub peer_key: [u8; KEY_LEN],
 }
 
 /// A reassembled frame on its way from the receive thread to the decode thread.
@@ -180,6 +200,48 @@ struct DecodeReport {
     errors: Vec<i32>,
 }
 
+/// Waits for the expected host to complete a handshake, and returns the session it produced.
+///
+/// Every datagram before that is offered to the handshake and otherwise dropped without a
+/// reply. A port that answered anything would be a port that tells a scan it found something,
+/// and one that could be aimed at a forged source address as an amplifier.
+///
+/// The listener comes back with the session because the work is not finished: the host cannot
+/// know its answer arrived until it hears a sealed packet, so until then it may ask again.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::TimedOut`] if no host completes a handshake before the idle
+/// timeout, and the underlying [`io::Error`] for a socket failure.
+fn accept_session(
+    transport: &UdpTransport,
+    config: &ClientConfig,
+) -> io::Result<(Established, SocketAddr, Listener)> {
+    let mut listener = Listener::new(
+        config.identity.clone(),
+        PeerPolicy::Paired(vec![config.peer_key]),
+    );
+    let mut buf = [0u8; MAX_PACKET_SIZE];
+
+    loop {
+        let (bytes, from) = match transport.recv_from_into(&mut buf) {
+            Ok(received) => received,
+            Err(err) if is_timeout(&err) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "no host completed a handshake",
+                ));
+            }
+            Err(err) => return Err(err),
+        };
+
+        let len = bytes.len();
+        if let Some(established) = listener.offer(transport, &buf[..len], from)? {
+            return Ok((established, from, listener));
+        }
+    }
+}
+
 /// Receives packets until the frame budget or the idle timeout is reached.
 ///
 /// # Errors
@@ -204,6 +266,14 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         if config.decode { "on" } else { "off" }
     );
 
+    // Nothing is read as a packet until a handshake with the expected host completes, and
+    // this side answers rather than dials because the host is the one that connects out.
+    let (established, host_addr, listener) = accept_session(&transport, &config)?;
+    println!(
+        "client: session established with {host_addr} ({})",
+        crate::identity::to_hex(&established.session.peer_static)
+    );
+
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
     let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
     let decoder = config
@@ -218,7 +288,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut behind = 0u32;
     let mut unsynced = 0u32;
     let mut sync = ClockSync::new();
-    let mut host: Option<SocketAddr> = None;
+    let host = host_addr;
     let mut last_ping = Instant::now() - PING_INTERVAL;
     let mut pings_sent = 0u32;
     let mut pongs_seen = 0u32;
@@ -227,37 +297,55 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut reports_sent = 0u64;
     let mut reports_failed = 0u64;
 
+    let mut sender = SecureSender::new(transport.try_clone()?, established.session.sealer);
+    let mut receiver = SecureReceiver::new(transport.try_clone()?, established.session.opener);
+
+    if let Some(slot) = input.as_ref() {
+        if let Ok(split) = sender.split() {
+            let _ = slot.set(InputSender {
+                sender: Mutex::new(split),
+                host,
+                offset: Arc::clone(&offset),
+            });
+        }
+    }
+
+    // Kept alive so that a host whose answer was lost gets it again. It retires as soon as a
+    // sealed packet arrives, which is proof the host has the keys.
+    let mut listener = Some(listener);
+
     loop {
-        if let Some(host) = host {
-            if last_ping.elapsed() >= PING_INTERVAL {
-                last_ping = Instant::now();
-                let ping = ClockPing { t1_us: now_us() };
-                if ping.encode_into(&mut ping_buf).is_ok() {
-                    match transport.send_to(&ping_buf, host) {
-                        Ok(_) => pings_sent += 1,
-                        Err(err) => eprintln!("client: ping to {host} failed: {err}"),
-                    }
+        if last_ping.elapsed() >= PING_INTERVAL {
+            last_ping = Instant::now();
+            let ping = ClockPing { t1_us: now_us() };
+            if ping.encode_into(&mut ping_buf).is_ok() {
+                match sender.send_to(&ping_buf, host) {
+                    Ok(_) => pings_sent += 1,
+                    Err(err) => eprintln!("client: ping to {host} failed: {err}"),
                 }
             }
         }
 
-        let (bytes, from) = match transport.recv_from_into(&mut recv_buf) {
+        let (datagram, from) = match receiver.recv_step(&mut recv_buf) {
             Ok(received) => received,
             Err(err) if is_timeout(&err) => break,
             Err(err) => return Err(err),
         };
-        if host.is_none() {
-            host = Some(from);
-            if let Some(slot) = input.as_ref() {
-                if let Ok(cloned) = transport.try_clone() {
-                    let _ = slot.set(InputSender {
-                        transport: cloned,
-                        host: from,
-                        offset: Arc::clone(&offset),
-                    });
-                }
+
+        let range = match datagram {
+            Datagram::Opened(range) => {
+                listener = None;
+                range
             }
-        }
+            Datagram::Rejected(range) => {
+                if let Some(listener) = listener.as_mut() {
+                    let _ = listener.offer(&transport, &recv_buf[range], from);
+                }
+                malformed += 1;
+                continue;
+            }
+        };
+        let bytes = &recv_buf[range];
 
         if channel_of(bytes) == Ok(Channel::Control) {
             let t4_us = now_us();
@@ -322,14 +410,12 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         // lost, and every microsecond it waits is a microsecond the encoder spends choosing
         // a reference it did not have to.
         acks.received(frame.frame_id);
-        if let Some(host) = host {
-            if let Some(report) = acks.report(now_us()) {
-                let mut buf = [0u8; FEEDBACK_PACKET_LEN];
-                if report.encode_into(&mut buf).is_ok() {
-                    match transport.send_to(&buf, host) {
-                        Ok(_) => reports_sent += 1,
-                        Err(_) => reports_failed += 1,
-                    }
+        if let Some(report) = acks.report(now_us()) {
+            let mut buf = [0u8; FEEDBACK_PACKET_LEN];
+            if report.encode_into(&mut buf).is_ok() {
+                match sender.send_to(&buf, host) {
+                    Ok(_) => reports_sent += 1,
+                    Err(_) => reports_failed += 1,
                 }
             }
         }
