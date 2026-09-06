@@ -9,3 +9,4 @@
 //! See `docs/wire-format.md` for the protocol this crate implements.
 
 pub mod net;
+pub mod stats;
