@@ -310,7 +310,11 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         height,
                         fps,
                         bitrate_bps: bitrate,
-                        max_slice_bytes: 0,
+                        // NVENC counts slices rather than bytes, so the host's slice count
+                        // is what it is told. Apple's encoder takes a byte ceiling and
+                        // refuses it anyway, which is why the two paths read this field
+                        // differently.
+                        max_slice_bytes: slices as u32,
                     };
                     host::run_windows(config, encoder_config, capture)
                 }

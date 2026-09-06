@@ -621,6 +621,11 @@ nvenc_struct!(LockBitstream, 1544, 1476, {
 pub struct NvencEncoder {
     nvenc: Nvenc,
     session: *mut c_void,
+    /// The configuration handed to the driver, kept alive because reconfiguring points at
+    /// the same memory rather than supplying a fresh copy.
+    preset: Box<PresetConfig>,
+    /// The parameters the session was initialized with, reused when the rate changes.
+    init: Box<InitializeParams>,
     registered: *mut c_void,
     bitstream: *mut c_void,
     config: crate::encode::EncoderConfig,
@@ -670,6 +675,8 @@ impl NvencEncoder {
         let mut encoder = Self {
             nvenc,
             session,
+            preset: Box::new(PresetConfig::default()),
+            init: Box::new(InitializeParams::default()),
             registered: core::ptr::null_mut(),
             bitstream: core::ptr::null_mut(),
             config,
@@ -709,14 +716,11 @@ impl NvencEncoder {
         };
 
         let api = self.nvenc.api;
-        let mut preset = PresetConfig {
-            version: struct_version_high(api, 5),
-            ..PresetConfig::default()
-        };
+        self.preset.version = struct_version_high(api, 5);
 
         // The configuration lives inside the preset structure, so its own version has to be
         // stamped before the driver will fill it.
-        let config_ptr = (&raw mut preset.tail).cast::<u8>();
+        let config_ptr = (&raw mut self.preset.tail).cast::<u8>();
         // SAFETY: `presetCfg` begins at offset eight, which is where `tail` starts, and the
         // first four bytes of a configuration are its version.
         unsafe {
@@ -731,16 +735,19 @@ impl NvencEncoder {
                 H264,
                 PRESET_P1,
                 TUNING_LOW_LATENCY,
-                &mut preset,
+                &mut *self.preset,
             ),
             "fetch the low latency preset",
         )?;
 
         // SAFETY: the offsets come from the header as the compiler reports them, and they
         // are all inside the configuration the driver just filled.
-        unsafe { self.apply_rate_control(config_ptr) };
+        unsafe {
+            apply_rate_control(config_ptr, self.config.bitrate_bps, self.config.fps);
+            apply_h264_config(config_ptr, self.config.max_slice_bytes);
+        }
 
-        let mut params = InitializeParams {
+        let params = InitializeParams {
             version: struct_version_high(api, 7),
             encode_guid: H264,
             preset_guid: PRESET_P1,
@@ -763,66 +770,76 @@ impl NvencEncoder {
             ..InitializeParams::default()
         };
 
+        // Kept rather than dropped: reconfiguring the session later hands these same
+        // parameters back with a new rate in them.
+        *self.init = params;
+
         check(
-            initialize(self.session, &mut params),
+            initialize(self.session, &mut *self.init),
             "initialize the encoder",
         )
     }
 
-    /// Overwrites the preset's rate control with what this session was asked for.
+    /// Changes the target bitrate on a running session.
     ///
-    /// The preset alone does not honour a bitrate. Passing it through unchanged produced
-    /// forty megabits against a twenty megabit request, and frames four times the size the
-    /// budget allows — which the client could not keep up with, so it dropped frames, and a
-    /// stream with a single keyframe never recovers from a dropped reference.
+    /// This is the actuator congestion control needs on the Windows host. NVENC has no
+    /// property to set for it: the whole configuration is handed back with the new rate in
+    /// it, which is why this encoder keeps its configuration alive rather than building one
+    /// and forgetting it.
     ///
-    /// Constant bitrate with a one-frame VBV window, which is the plan's first and most
-    /// important latency decision: a larger window lets the encoder emit a frame that takes
-    /// several frame times to transmit, and that is the single biggest source of latency
-    /// spikes.
+    /// `resetEncoder` is deliberately left clear. Resetting forces a keyframe, and a
+    /// controller that adjusts several times a second would then be sending keyframes
+    /// several times a second — a worse problem than the one it is solving.
     ///
-    /// # Safety
+    /// # Known limitation, measured rather than assumed
     ///
-    /// `config` must point at a configuration structure the driver has filled.
-    unsafe fn apply_rate_control(&self, config: *mut u8) {
-        // Offsets within NV_ENC_CONFIG, read from the header by a compiler rather than
-        // counted by hand.
-        const GOP_LENGTH: usize = 20;
-        const FRAME_INTERVAL_P: usize = 24;
-        const RC_MODE: usize = 44;
-        const AVERAGE_BITRATE: usize = 60;
-        const MAX_BITRATE: usize = 64;
-        const VBV_BUFFER_SIZE: usize = 68;
-        const VBV_INITIAL_DELAY: usize = 72;
-
-        /// `NV_ENC_PARAMS_RC_CBR`.
-        const RC_CBR: u32 = 2;
-
-        /// An infinite group of pictures: one keyframe at the start and nothing but P
-        /// frames after it. Recovery is the transport's job through parity, not a periodic
-        /// keyframe the whole stream pays for.
-        const GOP_INFINITE: u32 = u32::MAX;
-
-        let bitrate = self.config.bitrate_bps;
-        // Exactly one frame of budget. This is the vbvBufferSize the plan calls the largest
-        // single cause of latency spikes when it is set larger.
-        let frame_budget = bitrate / self.config.fps.max(1);
-
-        // SAFETY: every offset is inside the structure, and each write is a `u32` at a
-        // four-byte aligned offset.
-        unsafe {
-            let put =
-                |offset: usize, value: u32| config.add(offset).cast::<u32>().write_unaligned(value);
-
-            put(GOP_LENGTH, GOP_INFINITE);
-            // Every frame is a P frame; no B frames, which reorder output and cost a frame.
-            put(FRAME_INTERVAL_P, 1);
-            put(RC_MODE, RC_CBR);
-            put(AVERAGE_BITRATE, bitrate);
-            put(MAX_BITRATE, bitrate);
-            put(VBV_BUFFER_SIZE, frame_budget);
-            put(VBV_INITIAL_DELAY, frame_budget);
+    /// On the driver this was developed against (NVENC API 13.0, GTX 1660) the call
+    /// **succeeds and the output rate does not follow**. A session initialised at a fixed
+    /// rate tracks it closely — 8 Mbps produced 7.2 and 40 Mbps produced 34.8 — while a
+    /// session reconfigured from 20 Mbps up to 40 kept producing 17, which is what 20 Mbps
+    /// produces. One hundred and fifty-six reconfigurations were accepted and none refused.
+    /// Leaving the VBV window untouched across the change made no difference.
+    ///
+    /// So this is wired up and honest about not yet working: the congestion controller
+    /// drives the send pacer, which does take effect, and the encoder is told the same
+    /// number. Whether the missing piece is `resetEncoder`, a field the preset owns, or
+    /// something about this driver is not yet established, and claiming the actuator works
+    /// would be worse than saying it does not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::Encode`] if NVENC refuses the new configuration.
+    pub fn set_bitrate_bps(&mut self, bitrate_bps: u32) -> Result<(), EncodeError> {
+        if bitrate_bps == 0 || bitrate_bps == self.config.bitrate_bps {
+            return Ok(());
         }
+
+        let config_ptr = (&raw mut self.preset.tail).cast::<u8>();
+
+        // SAFETY: the pointer addresses the configuration this encoder owns and the driver
+        // filled, and the offsets come from the header.
+        unsafe { apply_rate_control(config_ptr, bitrate_bps, self.config.fps) };
+
+        let mut params = ReconfigureParams {
+            version: struct_version_high(self.nvenc.api, 2),
+            bit_fields: 0,
+            init: core::mem::take(&mut *self.init),
+            tail: [0; 8],
+        };
+
+        // SAFETY: the table slot holds the function NVENC put there, and the parameters are
+        // a live local for the duration of the call.
+        let reconfigure = unsafe { self.nvenc.function::<Reconfigure>(FN_RECONFIGURE) };
+        let status = reconfigure(self.session, &mut params);
+
+        // Put the parameters back whether or not the driver accepted them, so a refusal
+        // leaves the encoder able to try again rather than holding a default.
+        *self.init = core::mem::take(&mut params.init);
+        check(status, "reconfigure the encoder")?;
+
+        self.config.bitrate_bps = bitrate_bps;
+
+        Ok(())
     }
 
     /// Registers the NV12 texture so frames can be mapped rather than copied.
@@ -993,6 +1010,111 @@ impl NvencEncoder {
     }
 }
 
+/// Overwrites the preset's rate control with a requested bitrate.
+///
+/// The preset alone does not honour a bitrate. Passing it through unchanged produced forty
+/// megabits against a twenty megabit request, and frames four times the size the budget
+/// allows — which the client could not keep up with, so it dropped frames, and a stream with
+/// a single keyframe never recovers from a dropped reference.
+///
+/// Constant bitrate with a one-frame VBV window, which is the plan's first and most
+/// important latency decision: a larger window lets the encoder emit a frame that takes
+/// several frame times to transmit, and that is the single biggest source of latency spikes.
+///
+/// # Safety
+///
+/// `config` must point at a configuration structure the driver has filled.
+unsafe fn apply_rate_control(config: *mut u8, bitrate_bps: u32, fps: u32) {
+    // Offsets within NV_ENC_CONFIG, read from the header by a compiler rather than
+    // counted by hand.
+    const GOP_LENGTH: usize = 20;
+    const FRAME_INTERVAL_P: usize = 24;
+    const RC_MODE: usize = 44;
+    const AVERAGE_BITRATE: usize = 60;
+    const MAX_BITRATE: usize = 64;
+    const VBV_BUFFER_SIZE: usize = 68;
+    const VBV_INITIAL_DELAY: usize = 72;
+
+    /// `NV_ENC_PARAMS_RC_CBR`.
+    const RC_CBR: u32 = 2;
+
+    /// An infinite group of pictures: one keyframe at the start and nothing but P
+    /// frames after it. Recovery is the transport's job through parity, not a periodic
+    /// keyframe the whole stream pays for.
+    const GOP_INFINITE: u32 = u32::MAX;
+
+    let bitrate = bitrate_bps;
+    // Exactly one frame of budget. This is the vbvBufferSize the plan calls the largest
+    // single cause of latency spikes when it is set larger.
+    let frame_budget = bitrate / fps.max(1);
+
+    // SAFETY: every offset is inside the structure, and each write is a `u32` at a
+    // four-byte aligned offset.
+    unsafe {
+        let put =
+            |offset: usize, value: u32| config.add(offset).cast::<u32>().write_unaligned(value);
+
+        put(GOP_LENGTH, GOP_INFINITE);
+        // Every frame is a P frame; no B frames, which reorder output and cost a frame.
+        put(FRAME_INTERVAL_P, 1);
+        put(RC_MODE, RC_CBR);
+        put(AVERAGE_BITRATE, bitrate);
+        put(MAX_BITRATE, bitrate);
+        put(VBV_BUFFER_SIZE, frame_budget);
+        put(VBV_INITIAL_DELAY, frame_budget);
+    }
+}
+
+/// Sets the H.264 specific parts of the configuration the preset does not.
+///
+/// `slices` is how many slices each frame is cut into; one leaves the frame whole. Cutting
+/// it lets each piece start moving before the rest is encoded, which is the plan's second
+/// latency decision — and it is exactly what Apple Silicon refuses, so this is the first
+/// place in the project it can actually be done.
+///
+/// Parameter sets are repeated on every frame rather than only on the keyframe. Without
+/// that a client that joins late, or loses the one frame carrying them, waits forever on a
+/// black window with nothing reporting an error — the same failure the VideoToolbox path
+/// had. Two parameter sets are tens of bytes against a stream measured in megabits.
+///
+/// # Safety
+///
+/// `config` must point at a configuration structure the driver has filled.
+unsafe fn apply_h264_config(config: *mut u8, slices: u32) {
+    // Offsets within NV_ENC_CONFIG, from the header as the compiler reports them.
+    const H264_BITS: usize = 168;
+    const IDR_PERIOD: usize = 176;
+    const SLICE_MODE: usize = 232;
+    const SLICE_MODE_DATA: usize = 236;
+
+    /// Bit 12 of the H.264 bitfield word: emit SPS and PPS with every frame.
+    const REPEAT_SPS_PPS: u32 = 1 << 12;
+
+    /// `sliceMode` 3 means "this many slices per frame", which is the only mode that gives
+    /// a predictable count rather than a size-driven one.
+    const SLICE_MODE_COUNT: u32 = 3;
+
+    /// One keyframe at the start and none after it, matching the infinite group of pictures
+    /// the rate control sets.
+    const IDR_INFINITE: u32 = u32::MAX;
+
+    // SAFETY: every offset is inside the structure and each access is a `u32`.
+    unsafe {
+        let bits = config.add(H264_BITS).cast::<u32>();
+        bits.write_unaligned(bits.read_unaligned() | REPEAT_SPS_PPS);
+
+        let put =
+            |offset: usize, value: u32| config.add(offset).cast::<u32>().write_unaligned(value);
+
+        put(IDR_PERIOD, IDR_INFINITE);
+
+        if slices > 1 {
+            put(SLICE_MODE, SLICE_MODE_COUNT);
+            put(SLICE_MODE_DATA, slices);
+        }
+    }
+}
+
 impl Drop for NvencEncoder {
     /// Releases the bitstream buffer, the registered texture, and the session, in that order.
     fn drop(&mut self) {
@@ -1081,6 +1203,16 @@ const fn struct_version_high(api: u32, revision: u32) -> u32 {
     struct_version(api, revision) | (1 << 31)
 }
 
+nvenc_struct!(ReconfigureParams, 1816, 8, {
+    version: u32,
+    bit_fields: u32,
+    init: InitializeParams,
+});
+
+/// Index of `nvEncReconfigureEncoder`.
+const FN_RECONFIGURE: usize = 32;
+
+type Reconfigure = extern "system" fn(*mut c_void, *mut ReconfigureParams) -> i32;
 type OpenSession = extern "system" fn(*mut OpenSessionParams, *mut *mut c_void) -> i32;
 type GetPresetConfigEx =
     extern "system" fn(*mut c_void, CodecGuid, CodecGuid, u32, *mut PresetConfig) -> i32;

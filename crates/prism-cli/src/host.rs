@@ -521,6 +521,14 @@ pub fn run_windows(
 
     report(&sender, start.elapsed());
     sender.report_pacing();
+    if config.adaptive {
+        println!(
+            "encoder : {} rate changes accepted, {} refused, settled at {:.1} Mbps",
+            ENCODER_RATE_CHANGES.load(std::sync::atomic::Ordering::Relaxed),
+            ENCODER_RATE_REFUSALS.load(std::sync::atomic::Ordering::Relaxed),
+            f64::from(encoder.config().bitrate_bps) / 1e6,
+        );
+    }
     if sender.parity_sent() > 0 {
         println!("parity  : {} shards sent", sender.parity_sent());
     }
@@ -530,16 +538,41 @@ pub fn run_windows(
     Ok(())
 }
 
+/// How many times the encoder actually accepted a new rate.
+///
+/// Counted rather than assumed: a controller that changes its mind while the encoder
+/// ignores it looks identical from the outside to one that is working.
+#[cfg(target_os = "windows")]
+static ENCODER_RATE_CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the encoder refused one.
+#[cfg(target_os = "windows")]
+static ENCODER_RATE_REFUSALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Points NVENC at whatever bitrate the congestion controller currently wants.
 #[cfg(target_os = "windows")]
 fn follow_target_nvenc(
     encoder: &mut prism_core::encode::nvenc::NvencEncoder,
     sender: &SliceSender,
 ) {
-    let _ = (encoder, sender);
-    // NVENC changes rate through nvEncReconfigureEncoder rather than a property set, which
-    // is a separate structure this build does not yet declare. The controller still drives
-    // the pacer; the encoder follows once reconfiguration lands.
+    let Some(target) = sender.target_bps() else {
+        return;
+    };
+
+    let before = encoder.config().bitrate_bps;
+    match encoder.set_bitrate_bps(target) {
+        Ok(()) => {
+            let after = encoder.config().bitrate_bps;
+            if after != before {
+                ENCODER_RATE_CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        Err(err) => {
+            if ENCODER_RATE_REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                eprintln!("host: NVENC would not take {target} bps: {err}");
+            }
+        }
+    }
 }
 
 /// Where a Windows host's pictures come from.
