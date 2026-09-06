@@ -5,16 +5,33 @@
 //! from.
 
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use prism_core::clock::now_us;
 use prism_core::input::{Injector, PlatformInjector};
+use prism_core::net::ack::{is_newer, missing_in_history};
+use prism_core::net::loss::LossInjector;
 use prism_core::net::packet::{
     CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR, FLAG_LAST_OF_FRAME,
-    InputEvent, InputPacket, MAX_PACKET_SIZE, channel_of,
+    FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE, channel_of,
 };
 use prism_core::net::packetize::SlicePacketizer;
 use prism_core::net::transport::UdpTransport;
 use prism_core::stats::LatencyRecorder;
+
+/// What the host has heard back from the client.
+///
+/// Written by the return-path thread and read by whoever prints the summary, so plain
+/// atomics rather than a lock: the writer must never block on the path that also injects
+/// input, and a reader that sees a slightly stale count is reporting, not deciding.
+#[derive(Debug, Default)]
+struct FeedbackHeard {
+    reports: AtomicU64,
+    newest_acked: AtomicU32,
+    missing_in_last: AtomicU32,
+    ever: AtomicBool,
+}
 
 /// Owns the socket and the reusable send buffer for one session.
 #[derive(Debug)]
@@ -23,6 +40,12 @@ pub struct SliceSender {
     buffer: [u8; MAX_PACKET_SIZE],
     packets: u64,
     bytes: u64,
+    feedback: Arc<FeedbackHeard>,
+    /// Drops a fraction of video packets on the way out, when a run is testing recovery.
+    ///
+    /// Only video. Dropping control, feedback or input would be testing something else —
+    /// the point is to lose picture data and watch the stream survive it.
+    loss: Option<LossInjector>,
 }
 
 impl SliceSender {
@@ -40,7 +63,22 @@ impl SliceSender {
             buffer: [0; MAX_PACKET_SIZE],
             packets: 0,
             bytes: 0,
+            feedback: Arc::new(FeedbackHeard::default()),
+            loss: None,
         })
+    }
+
+    /// Starts dropping the given fraction of outgoing video packets.
+    ///
+    /// `per_million` is parts per million, so the five percent M4 is judged at is 50_000.
+    /// The seed makes a failing run reproducible, which is the whole reason this is here
+    /// rather than an operating system traffic shaper.
+    pub fn inject_loss(&mut self, per_million: u32, seed: u64) {
+        self.loss = Some(LossInjector::new(per_million, seed));
+        println!(
+            "host: dropping {:.2}% of outgoing video packets (seed {seed})",
+            f64::from(per_million) / 10_000.0
+        );
     }
 
     /// Cuts one slice into packets and sends them.
@@ -80,6 +118,15 @@ impl SliceSender {
             let len = packet
                 .encode_into(&mut self.buffer)
                 .expect("packet fits the send buffer");
+
+            // Dropped after encoding rather than before, so the packet counter reflects what
+            // the session produced and the loss figure is measured against it.
+            if self.loss.as_mut().is_some_and(LossInjector::should_drop) {
+                self.packets += 1;
+                self.bytes += len as u64;
+                continue;
+            }
+
             self.transport.send(&self.buffer[..len])?;
             self.packets += 1;
             self.bytes += len as u64;
@@ -148,6 +195,7 @@ impl SliceSender {
     /// Returns the underlying [`io::Error`] if the socket cannot be duplicated.
     pub fn serve_return_path(&self, inject_input: bool) -> io::Result<()> {
         let transport = self.transport.try_clone()?;
+        let feedback = Arc::clone(&self.feedback);
 
         std::thread::spawn(move || {
             let mut recv_buf = [0u8; MAX_PACKET_SIZE];
@@ -214,12 +262,78 @@ impl SliceSender {
                             }
                         }
                     }
+                    Ok(Channel::Feedback) => {
+                        let Ok(report) = FeedbackPacket::decode(bytes) else {
+                            continue;
+                        };
+
+                        // Only the newest report matters. Each one repeats the whole recent
+                        // history, so an older one arriving late says nothing new, and
+                        // acting on it would undo what a newer one already established.
+                        let previous = feedback.newest_acked.load(Ordering::Relaxed);
+                        let first = !feedback.ever.swap(true, Ordering::Relaxed);
+
+                        if first || is_newer(report.last_frame_id, previous) {
+                            feedback
+                                .newest_acked
+                                .store(report.last_frame_id, Ordering::Relaxed);
+                            feedback
+                                .missing_in_last
+                                .store(missing_in_history(report.recv_bitmap), Ordering::Relaxed);
+                        }
+
+                        feedback.reports.fetch_add(1, Ordering::Relaxed);
+                    }
                     _ => {}
                 }
             }
         });
 
         Ok(())
+    }
+
+    /// Prints what the injector actually dropped, if one was running.
+    ///
+    /// The achieved rate rather than the configured one, because on a short run they differ
+    /// and a verdict quoting the wrong one would be measuring something it did not do.
+    pub fn report_loss(&self) {
+        let Some(loss) = self.loss.as_ref() else {
+            return;
+        };
+
+        let (considered, dropped) = loss.tally();
+        println!(
+            "loss    : dropped {dropped} of {considered} video packets ({:.2}% achieved)",
+            f64::from(loss.achieved_per_million()) / 10_000.0
+        );
+    }
+
+    /// Prints what the client has been reporting back, and says so loudly if it has not.
+    ///
+    /// Silence here is the failure mode this project has already been bitten by. The host
+    /// socket is connected to its peer, so anything arriving from a different address is
+    /// discarded by the kernel with no error and no log — video keeps flowing and only the
+    /// return path is dead. That looked like "input is broken" last time and would look
+    /// like "the controller does nothing" this time.
+    pub fn report_feedback(&self) {
+        let reports = self.feedback.reports.load(Ordering::Relaxed);
+
+        if reports == 0 {
+            println!(
+                "feedback: none received — the client never reported a frame. If video is \
+                 flowing, the return path is being dropped: this socket is connected to \
+                 --peer, so anything from a different source address is discarded silently. \
+                 Check that --peer is the address the client routes out of."
+            );
+            return;
+        }
+
+        println!(
+            "feedback: {reports} reports, newest frame acknowledged {}, {} of the last 32 \
+             missing",
+            self.feedback.newest_acked.load(Ordering::Relaxed),
+            self.feedback.missing_in_last.load(Ordering::Relaxed),
+        );
     }
 }
 
