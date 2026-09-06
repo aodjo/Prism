@@ -6,6 +6,8 @@
 
 mod client;
 #[cfg(target_os = "macos")]
+mod display;
+#[cfg(target_os = "macos")]
 mod encode;
 mod host;
 mod pattern;
@@ -95,6 +97,18 @@ enum Command {
         /// Decode the reassembled frames and report end-to-end latency.
         #[arg(long)]
         decode: bool,
+
+        /// Show the decoded stream in a window. Implies --decode.
+        #[arg(long)]
+        display: bool,
+
+        /// Window width when showing the stream.
+        #[arg(long, default_value_t = 1280)]
+        window_width: u32,
+
+        /// Window height when showing the stream.
+        #[arg(long, default_value_t = 720)]
+        window_height: u32,
     },
 
     /// Encode synthetic frames to an Annex B file to verify the encoder.
@@ -199,20 +213,36 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             report_every,
             in_flight,
             decode,
+            display,
+            window_width,
+            window_height,
         } => {
-            #[cfg(not(target_os = "macos"))]
-            if decode {
-                return Err("decoding is not implemented on this platform yet".into());
-            }
-
-            Ok(client::run(client::ClientConfig {
+            let config = client::ClientConfig {
                 bind,
                 frames,
                 idle_timeout: Duration::from_millis(idle_timeout_ms),
                 report_every,
                 in_flight,
-                decode,
-            })?)
+                decode: decode || display,
+            };
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (window_width, window_height);
+                if config.decode {
+                    return Err("decoding is not implemented on this platform yet".into());
+                }
+                Ok(client::run(config, None)?)
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                if display {
+                    display::run(config, window_width, window_height)
+                } else {
+                    Ok(client::run(config, None)?)
+                }
+            }
         }
 
         Command::Encode {

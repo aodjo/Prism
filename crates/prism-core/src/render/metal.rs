@@ -25,6 +25,7 @@ use objc2_metal::{
     MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLStoreAction, MTLTexture,
 };
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::render::RenderError;
 
@@ -161,10 +162,28 @@ impl MetalRenderer {
         &self.device
     }
 
+    /// Prepares a layer to receive frames from this renderer.
+    ///
+    /// Display sync is turned off and the drawable count held at two. Both trade a little
+    /// smoothness for latency, which is the trade this whole project makes: waiting for
+    /// the next vertical blank to hand over a frame that is already finished adds up to a
+    /// frame of delay, and a third drawable adds another.
+    pub fn configure_layer(&self, layer: &CAMetalLayer, width: usize, height: usize) {
+        layer.setDevice(Some(&self.device));
+        layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        layer.setFramebufferOnly(true);
+        layer.setDisplaySyncEnabled(false);
+        layer.setMaximumDrawableCount(2);
+        layer.setDrawableSize(objc2_core_foundation::CGSize {
+            width: width as f64,
+            height: height as f64,
+        });
+    }
+
     /// Draws one picture into `target` and waits for the GPU to finish.
     ///
-    /// Waiting is correct for a still frame or a test. The live path will present to a
-    /// drawable and let the display link pace it instead, which is M2 work.
+    /// Waiting is for offscreen work such as tests. The live path uses [`Self::present`],
+    /// which does not block.
     ///
     /// # Errors
     ///
@@ -175,6 +194,59 @@ impl MetalRenderer {
         picture: &CVPixelBuffer,
         target: &ProtocolObject<dyn MTLTexture>,
     ) -> Result<(), RenderError> {
+        let command_buffer = self.record(picture, target)?;
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+
+        Ok(())
+    }
+
+    /// Draws one picture into a layer's next drawable and presents it.
+    ///
+    /// Does not wait for the GPU. Blocking here would serialise the decoder against the
+    /// display, which costs a frame for no benefit — the drawable is already scheduled
+    /// and the next picture can start while this one is still being drawn.
+    ///
+    /// Returns `false` when the layer had no drawable available, which happens when the
+    /// display is behind; the frame is dropped rather than queued because a frame shown
+    /// late is worse than one not shown at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::Bind`] if either plane cannot be bound as a texture, and
+    /// [`RenderError::Setup`] if Metal refuses a command buffer or encoder.
+    pub fn present(
+        &mut self,
+        picture: &CVPixelBuffer,
+        layer: &CAMetalLayer,
+    ) -> Result<bool, RenderError> {
+        let Some(drawable) = layer.nextDrawable() else {
+            return Ok(false);
+        };
+
+        let target = drawable.texture();
+        let command_buffer = self.record(picture, &target)?;
+
+        command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
+        command_buffer.commit();
+
+        Ok(true)
+    }
+
+    /// Records the conversion pass into a fresh command buffer.
+    ///
+    /// The bound plane textures are dropped when this returns, which is safe because
+    /// Metal retains everything a committed command buffer refers to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::Bind`] if either plane cannot be bound, and
+    /// [`RenderError::Setup`] if Metal refuses a command buffer or encoder.
+    fn record(
+        &mut self,
+        picture: &CVPixelBuffer,
+        target: &ProtocolObject<dyn MTLTexture>,
+    ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>, RenderError> {
         let (width, height) = (
             CVPixelBufferGetWidth(picture),
             CVPixelBufferGetHeight(picture),
@@ -184,8 +256,6 @@ impl MetalRenderer {
         let chroma =
             self.bind_plane(picture, MTLPixelFormat::RG8Unorm, width / 2, height / 2, 1)?;
 
-        // Both textures were created from the picture and live until the command buffer
-        // completes, which this function waits for.
         let luma_texture = CVMetalTextureGetTexture(&luma).ok_or(RenderError::Setup {
             reason: "the luma plane has no texture",
         })?;
@@ -225,10 +295,7 @@ impl MetalRenderer {
         }
         encoder.endEncoding();
 
-        command_buffer.commit();
-        command_buffer.waitUntilCompleted();
-
-        Ok(())
+        Ok(command_buffer)
     }
 
     /// Binds one plane of a picture as a Metal texture without copying it.
