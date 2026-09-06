@@ -126,7 +126,6 @@ pub struct VideoToolboxDecoder {
     avcc: Vec<u8>,
     output: Receiver<DecodedFrame>,
     context: Box<CallbackContext>,
-    current: Option<DecodedFrame>,
 }
 
 impl VideoToolboxDecoder {
@@ -149,7 +148,6 @@ impl VideoToolboxDecoder {
                 output: tx,
                 errors: Mutex::new(Vec::new()),
             }),
-            current: None,
         }
     }
 
@@ -214,12 +212,11 @@ impl VideoToolboxDecoder {
 
     /// Waits up to `timeout` for the next decoded picture.
     ///
-    /// The previously returned picture is released at the start of each call, so the
-    /// borrow cannot outlive the next poll.
-    pub fn poll(&mut self, timeout: Duration) -> Option<&DecodedFrame> {
-        self.current = None;
-        self.current = self.output.recv_timeout(timeout).ok();
-        self.current.as_ref()
+    /// Ownership passes to the caller so the picture can be handed to another thread for
+    /// display. The underlying buffer is reference counted, so this is a retain rather
+    /// than a copy of the pixels.
+    pub fn poll(&mut self, timeout: Duration) -> Option<DecodedFrame> {
+        self.output.recv_timeout(timeout).ok()
     }
 
     /// Returns and clears any decode errors reported asynchronously by VideoToolbox.

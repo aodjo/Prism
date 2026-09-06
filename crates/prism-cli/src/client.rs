@@ -12,7 +12,7 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::mpsc::{Receiver, Sender, channel, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +21,17 @@ use prism_core::net::packet::{MAX_PACKET_SIZE, VideoPacket};
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::transport::UdpTransport;
 use prism_core::stats::{LatencyRecorder, LatencySummary};
+
+/// Where decoded pictures go when the client is showing them.
+///
+/// The payload type differs by platform because only macOS has a decoder so far; the
+/// alias keeps the signatures below identical everywhere.
+#[cfg(target_os = "macos")]
+pub type PictureSink = SyncSender<prism_core::decode::videotoolbox::DecodedFrame>;
+
+/// Where decoded pictures would go on a platform with no decoder yet.
+#[cfg(not(target_os = "macos"))]
+pub type PictureSink = SyncSender<()>;
 
 /// How many frames may wait for the decoder before the newest is dropped.
 ///
@@ -75,7 +86,7 @@ struct DecodeReport {
 ///
 /// Returns an [`io::Error`] if the socket cannot be bound or read, other than the
 /// timeout that ends the run normally.
-pub fn run(config: ClientConfig) -> io::Result<()> {
+pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()> {
     let transport = UdpTransport::bind(config.bind)?;
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
@@ -88,7 +99,9 @@ pub fn run(config: ClientConfig) -> io::Result<()> {
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
     let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
-    let decoder = config.decode.then(|| spawn_decoder(frames_rx, recycle_tx));
+    let decoder = config
+        .decode
+        .then(|| spawn_decoder(frames_rx, recycle_tx, pictures));
 
     let mut reassembler = FrameReassembler::new(config.in_flight);
     let mut arrival = LatencyRecorder::new(4096);
@@ -183,6 +196,7 @@ pub fn run(config: ClientConfig) -> io::Result<()> {
 fn spawn_decoder(
     frames: Receiver<FrameBuf>,
     recycle: Sender<FrameBuf>,
+    pictures: Option<PictureSink>,
 ) -> thread::JoinHandle<DecodeReport> {
     use prism_core::decode::DecodeError;
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
@@ -220,6 +234,12 @@ fn spawn_decoder(
                 latency.record(elapsed_us(picture.pts_us));
                 stage.record(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
                 decoded += 1;
+
+                if let Some(sink) = pictures.as_ref() {
+                    // Dropped rather than queued: a picture that waits its turn is
+                    // already too late to be worth showing.
+                    let _ = sink.try_send(picture);
+                }
             } else {
                 starved += 1;
             }
@@ -245,7 +265,9 @@ fn spawn_decoder(
 fn spawn_decoder(
     frames: Receiver<FrameBuf>,
     recycle: Sender<FrameBuf>,
+    pictures: Option<PictureSink>,
 ) -> thread::JoinHandle<DecodeReport> {
+    let _ = pictures;
     thread::spawn(move || {
         while let Ok(buf) = frames.recv() {
             let _ = recycle.send(buf);
