@@ -279,6 +279,23 @@ impl Nvenc {
         })
     }
 
+    /// Returns one entry of the function table as a callable.
+    ///
+    /// # Safety
+    ///
+    /// `index` must name a slot NVENC filled, and `F` must be that function's signature.
+    /// Both come from the header, and getting either wrong is undefined behaviour.
+    unsafe fn function<F: Copy>(&self, index: usize) -> F {
+        debug_assert_eq!(
+            core::mem::size_of::<F>(),
+            core::mem::size_of::<*mut c_void>(),
+            "a function table slot is one pointer"
+        );
+
+        // SAFETY: the caller guarantees the slot and the signature match.
+        unsafe { *core::ptr::from_ref(&self.functions.functions[index]).cast::<F>() }
+    }
+
     /// Returns the API version the driver implements, as major and minor.
     #[must_use]
     pub fn driver_api_version(&self) -> (u32, u32) {
@@ -416,3 +433,602 @@ impl core::fmt::Debug for FunctionList {
             .finish_non_exhaustive()
     }
 }
+
+/// The low-latency preset, `NV_ENC_PRESET_P1_GUID`.
+///
+/// P1 is the fastest of the seven presets. Quality presets buy image quality with encoder
+/// latency, which is the wrong side of this project's trade.
+const PRESET_P1: CodecGuid = CodecGuid {
+    data1: 0xfc0a_8d3e,
+    data2: 0x45f8,
+    data3: 0x4cf8,
+    data4: [0x80, 0xc7, 0x29, 0x88, 0x71, 0x59, 0x0e, 0xbf],
+};
+
+/// `NV_ENC_TUNING_INFO_LOW_LATENCY`.
+const TUNING_LOW_LATENCY: u32 = 2;
+
+/// `NV_ENC_BUFFER_FORMAT_NV12`.
+const BUFFER_FORMAT_NV12: u32 = 1;
+
+/// `NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX`.
+const RESOURCE_TYPE_DIRECTX: u32 = 0;
+
+/// `NV_ENC_PIC_STRUCT_FRAME`.
+const PIC_STRUCT_FRAME: u32 = 1;
+
+/// `NV_ENC_PIC_FLAG_FORCEIDR`.
+const PIC_FLAG_FORCE_IDR: u32 = 2;
+
+/// `NV_ENC_PIC_FLAG_OUTPUT_SPSPPS`.
+const PIC_FLAG_OUTPUT_SPSPPS: u32 = 4;
+
+/// Index of `nvEncInitializeEncoder`.
+const FN_INITIALIZE: usize = 11;
+/// Index of `nvEncCreateBitstreamBuffer`.
+const FN_CREATE_BITSTREAM: usize = 14;
+/// Index of `nvEncDestroyBitstreamBuffer`.
+const FN_DESTROY_BITSTREAM: usize = 15;
+/// Index of `nvEncEncodePicture`.
+const FN_ENCODE_PICTURE: usize = 16;
+/// Index of `nvEncLockBitstream`.
+const FN_LOCK_BITSTREAM: usize = 17;
+/// Index of `nvEncUnlockBitstream`.
+const FN_UNLOCK_BITSTREAM: usize = 18;
+/// Index of `nvEncMapInputResource`.
+const FN_MAP_INPUT: usize = 25;
+/// Index of `nvEncUnmapInputResource`.
+const FN_UNMAP_INPUT: usize = 26;
+/// Index of `nvEncRegisterResource`.
+const FN_REGISTER_RESOURCE: usize = 30;
+/// Index of `nvEncUnregisterResource`.
+const FN_UNREGISTER_RESOURCE: usize = 31;
+/// Index of `nvEncGetEncodePresetConfigEx`.
+const FN_GET_PRESET_CONFIG_EX: usize = 39;
+
+/// Every NVENC structure this module passes, sized exactly as the C header defines it.
+///
+/// The sizes and offsets were taken from the header by a compiler rather than by hand — a
+/// first attempt at `NV_ENC_INITIALIZE_PARAMS` by hand came out twenty-four bytes short and
+/// placed `tuningInfo` at the wrong offset, which would have corrupted memory rather than
+/// failed. The named fields are the ones this module sets; everything after them is opaque
+/// padding, and a compile-time assertion pins the total.
+macro_rules! nvenc_struct {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $size:expr, $tail:expr, { $($field:ident : $ty:ty),* $(,)? }
+    ) => {
+        $(#[$meta])*
+        #[repr(C)]
+        struct $name {
+            $($field: $ty,)*
+            tail: [u8; $tail],
+        }
+
+        const _: () = assert!(
+            core::mem::size_of::<$name>() == $size,
+            concat!(stringify!($name), " must match the C layout exactly")
+        );
+
+        impl Default for $name {
+            /// Zeroes every field, which is what NVENC requires of its reserved space.
+            fn default() -> Self {
+                // SAFETY: every field is a plain integer, pointer or byte array, for all of
+                // which an all-zero pattern is a valid value.
+                unsafe { core::mem::zeroed() }
+            }
+        }
+    };
+}
+
+nvenc_struct!(InitializeParams, 1800, 1656, {
+    version: u32,
+    encode_guid: CodecGuid,
+    preset_guid: CodecGuid,
+    encode_width: u32,
+    encode_height: u32,
+    dar_width: u32,
+    dar_height: u32,
+    frame_rate_num: u32,
+    frame_rate_den: u32,
+    enable_encode_async: u32,
+    enable_ptd: u32,
+    bit_fields: u32,
+    priv_data_size: u32,
+    reserved: u32,
+    priv_data: *mut c_void,
+    encode_config: *mut c_void,
+    max_encode_width: u32,
+    max_encode_height: u32,
+    me_hints: [u8; 32],
+    tuning_info: u32,
+    buffer_format: u32,
+});
+
+nvenc_struct!(PresetConfig, 5128, 5120, {
+    version: u32,
+    reserved: u32,
+});
+
+nvenc_struct!(RegisterResource, 1536, 1488, {
+    version: u32,
+    resource_type: u32,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    sub_resource_index: u32,
+    resource_to_register: *mut c_void,
+    registered_resource: *mut c_void,
+    buffer_format: u32,
+    buffer_usage: u32,
+});
+
+nvenc_struct!(MapInputResource, 1544, 1508, {
+    version: u32,
+    sub_resource_index: u32,
+    sub_resource: *mut c_void,
+    registered_resource: *mut c_void,
+    mapped_resource: *mut c_void,
+    mapped_buffer_fmt: u32,
+});
+
+nvenc_struct!(CreateBitstreamBuffer, 776, 752, {
+    version: u32,
+    size: u32,
+    memory_heap: u32,
+    reserved: u32,
+    bitstream_buffer: *mut c_void,
+});
+
+nvenc_struct!(PicParams, 3360, 3280, {
+    version: u32,
+    input_width: u32,
+    input_height: u32,
+    input_pitch: u32,
+    encode_pic_flags: u32,
+    frame_idx: u32,
+    input_timestamp: u64,
+    input_duration: u64,
+    input_buffer: *mut c_void,
+    output_bitstream: *mut c_void,
+    completion_event: *mut c_void,
+    buffer_fmt: u32,
+    picture_struct: u32,
+    picture_type: u32,
+    codec_pic_params_pad: u32,
+});
+
+nvenc_struct!(LockBitstream, 1544, 1476, {
+    version: u32,
+    bit_fields: u32,
+    output_bitstream: *mut c_void,
+    slice_offsets: *mut u32,
+    frame_idx: u32,
+    hw_encode_status: u32,
+    num_slices: u32,
+    bitstream_size_in_bytes: u32,
+    output_timestamp: u64,
+    output_duration: u64,
+    bitstream_buffer_ptr: *mut c_void,
+    picture_type: u32,
+});
+
+/// A running NVENC session encoding NV12 textures into H.264.
+///
+/// The texture is registered once and mapped per frame rather than copied: NVENC reads the
+/// same GPU memory the conversion pass wrote, so a frame never touches system memory
+/// between the compositor and the wire.
+pub struct NvencEncoder {
+    nvenc: Nvenc,
+    session: *mut c_void,
+    registered: *mut c_void,
+    bitstream: *mut c_void,
+    config: crate::encode::EncoderConfig,
+    frame: crate::encode::EncodedFrame,
+    frames_encoded: u64,
+}
+
+impl NvencEncoder {
+    /// Opens a session and prepares it to encode `texture`.
+    ///
+    /// `texture` must be the NV12 surface the conversion pass draws into, on the same
+    /// Direct3D device as `device`. It is registered here and reused for every frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::SessionCreate`] if NVENC will not open a session, accept the
+    /// configuration, or register the texture.
+    ///
+    /// # Safety
+    ///
+    /// `device` must be a live `ID3D11Device` and `texture` a live `ID3D11Texture2D` NV12
+    /// surface belonging to it, both outliving this encoder.
+    pub unsafe fn new(
+        device: *mut c_void,
+        texture: *mut c_void,
+        config: crate::encode::EncoderConfig,
+    ) -> Result<Self, EncodeError> {
+        let nvenc = Nvenc::load()?;
+        let api = nvenc.api;
+
+        // SAFETY: the table slot holds the function NVENC put there.
+        let open = unsafe { nvenc.function::<OpenSession>(FN_OPEN_SESSION_EX) };
+
+        let mut params = OpenSessionParams {
+            version: struct_version(api, 1),
+            device_type: DEVICE_TYPE_DIRECTX,
+            device,
+            reserved: core::ptr::null_mut(),
+            api_version: api,
+            reserved1: [0; 253],
+            reserved2: [core::ptr::null_mut(); 64],
+        };
+
+        let mut session: *mut c_void = core::ptr::null_mut();
+        check(open(&mut params, &mut session), "open a session")?;
+
+        let mut encoder = Self {
+            nvenc,
+            session,
+            registered: core::ptr::null_mut(),
+            bitstream: core::ptr::null_mut(),
+            config,
+            frame: crate::encode::EncodedFrame::default(),
+            frames_encoded: 0,
+        };
+
+        // SAFETY: the session was just opened and the texture is the caller's, which they
+        // guarantee outlives this encoder.
+        unsafe {
+            encoder.initialize()?;
+            encoder.register(texture)?;
+            encoder.create_bitstream()?;
+        }
+
+        Ok(encoder)
+    }
+
+    /// Configures the session from the low-latency preset.
+    ///
+    /// The preset is fetched and handed back unchanged. NVENC fills a configuration
+    /// structure of nearly four kilobytes with a codec-specific union inside it, and every
+    /// field this code does not need is a field it can get wrong; asking the driver for a
+    /// preset and passing it through is both simpler and safer than filling it in.
+    ///
+    /// # Safety
+    ///
+    /// The session must be open.
+    unsafe fn initialize(&mut self) -> Result<(), EncodeError> {
+        // SAFETY: the table slots hold the functions NVENC put there.
+        let (get_preset, initialize) = unsafe {
+            (
+                self.nvenc
+                    .function::<GetPresetConfigEx>(FN_GET_PRESET_CONFIG_EX),
+                self.nvenc.function::<Initialize>(FN_INITIALIZE),
+            )
+        };
+
+        let api = self.nvenc.api;
+        let mut preset = PresetConfig {
+            version: struct_version_high(api, 5),
+            ..PresetConfig::default()
+        };
+
+        // The configuration lives inside the preset structure, so its own version has to be
+        // stamped before the driver will fill it.
+        let config_ptr = (&raw mut preset.tail).cast::<u8>();
+        // SAFETY: `presetCfg` begins at offset eight, which is where `tail` starts, and the
+        // first four bytes of a configuration are its version.
+        unsafe {
+            config_ptr
+                .cast::<u32>()
+                .write_unaligned(struct_version_high(api, 9));
+        }
+
+        check(
+            get_preset(
+                self.session,
+                H264,
+                PRESET_P1,
+                TUNING_LOW_LATENCY,
+                &mut preset,
+            ),
+            "fetch the low latency preset",
+        )?;
+
+        let mut params = InitializeParams {
+            version: struct_version_high(api, 7),
+            encode_guid: H264,
+            preset_guid: PRESET_P1,
+            encode_width: self.config.width,
+            encode_height: self.config.height,
+            dar_width: self.config.width,
+            dar_height: self.config.height,
+            frame_rate_num: self.config.fps,
+            frame_rate_den: 1,
+            // Synchronous. The event-driven path is what the plan wants and NVENC supports
+            // it, but it needs an event object per in-flight frame and belongs with the
+            // threading work rather than with first light.
+            enable_encode_async: 0,
+            // Picture type decided by the encoder, which is what lets it honour a forced
+            // IDR without the caller tracking GOP structure.
+            enable_ptd: 1,
+            encode_config: config_ptr.cast(),
+            tuning_info: TUNING_LOW_LATENCY,
+            buffer_format: BUFFER_FORMAT_NV12,
+            ..InitializeParams::default()
+        };
+
+        check(
+            initialize(self.session, &mut params),
+            "initialize the encoder",
+        )
+    }
+
+    /// Registers the NV12 texture so frames can be mapped rather than copied.
+    ///
+    /// # Safety
+    ///
+    /// `texture` must be a live NV12 `ID3D11Texture2D` on this session's device.
+    unsafe fn register(&mut self, texture: *mut c_void) -> Result<(), EncodeError> {
+        // SAFETY: the table slot holds the function NVENC put there.
+        let register = unsafe { self.nvenc.function::<Register>(FN_REGISTER_RESOURCE) };
+
+        let mut resource = RegisterResource {
+            version: struct_version(self.nvenc.api, 5),
+            resource_type: RESOURCE_TYPE_DIRECTX,
+            width: self.config.width,
+            height: self.config.height,
+            // Zero lets NVENC take the pitch from the texture, which is the only thing that
+            // can know it.
+            pitch: 0,
+            resource_to_register: texture,
+            buffer_format: BUFFER_FORMAT_NV12,
+            ..RegisterResource::default()
+        };
+
+        check(
+            register(self.session, &mut resource),
+            "register the texture",
+        )?;
+        self.registered = resource.registered_resource;
+
+        Ok(())
+    }
+
+    /// Allocates the buffer NVENC writes the bitstream into.
+    ///
+    /// # Safety
+    ///
+    /// The session must be initialized.
+    unsafe fn create_bitstream(&mut self) -> Result<(), EncodeError> {
+        // SAFETY: the table slot holds the function NVENC put there.
+        let create = unsafe { self.nvenc.function::<CreateBitstream>(FN_CREATE_BITSTREAM) };
+
+        let mut buffer = CreateBitstreamBuffer {
+            version: struct_version(self.nvenc.api, 1),
+            ..CreateBitstreamBuffer::default()
+        };
+
+        check(
+            create(self.session, &mut buffer),
+            "allocate a bitstream buffer",
+        )?;
+        self.bitstream = buffer.bitstream_buffer;
+
+        Ok(())
+    }
+
+    /// Encodes one frame from the registered texture.
+    ///
+    /// The texture must already hold the picture: this maps it, encodes, and reads the
+    /// bitstream back, so the caller draws into it and then calls this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::Encode`] if NVENC refuses the frame or will not hand back the
+    /// bitstream.
+    pub fn encode(
+        &mut self,
+        pts_us: u64,
+        force_idr: bool,
+    ) -> Result<&crate::encode::EncodedFrame, EncodeError> {
+        // SAFETY: every table slot holds the function NVENC put there, and the session,
+        // registered resource and bitstream buffer are all alive for this encoder's life.
+        let (map, unmap, encode, lock, unlock) = unsafe {
+            (
+                self.nvenc.function::<MapInput>(FN_MAP_INPUT),
+                self.nvenc.function::<UnmapInput>(FN_UNMAP_INPUT),
+                self.nvenc.function::<EncodePicture>(FN_ENCODE_PICTURE),
+                self.nvenc.function::<LockBitstreamFn>(FN_LOCK_BITSTREAM),
+                self.nvenc.function::<UnlockBitstream>(FN_UNLOCK_BITSTREAM),
+            )
+        };
+
+        let api = self.nvenc.api;
+
+        let mut mapping = MapInputResource {
+            version: struct_version(api, 4),
+            registered_resource: self.registered,
+            ..MapInputResource::default()
+        };
+        check(map(self.session, &mut mapping), "map the texture")?;
+
+        let mut flags = 0;
+        if force_idr {
+            // The parameter sets ride along with the keyframe, so a client that joins here
+            // has everything it needs to start.
+            flags |= PIC_FLAG_FORCE_IDR | PIC_FLAG_OUTPUT_SPSPPS;
+        }
+
+        let mut picture = PicParams {
+            version: struct_version_high(api, 7),
+            input_width: self.config.width,
+            input_height: self.config.height,
+            encode_pic_flags: flags,
+            input_timestamp: pts_us,
+            input_buffer: mapping.mapped_resource,
+            output_bitstream: self.bitstream,
+            buffer_fmt: BUFFER_FORMAT_NV12,
+            picture_struct: PIC_STRUCT_FRAME,
+            ..PicParams::default()
+        };
+
+        let encode_status = encode(self.session, &mut picture);
+
+        let mut locked = LockBitstream {
+            version: struct_version_high(api, 2),
+            output_bitstream: self.bitstream,
+            ..LockBitstream::default()
+        };
+
+        let result = (|| -> Result<(), EncodeError> {
+            check(encode_status, "encode a picture")?;
+            check(lock(self.session, &mut locked), "lock the bitstream")?;
+            Ok(())
+        })();
+
+        if result.is_ok() {
+            self.frame.reset();
+            self.frame.pts_us = locked.output_timestamp;
+
+            // SAFETY: NVENC reports the buffer and its length together, and the buffer is
+            // valid until it is unlocked below.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    locked.bitstream_buffer_ptr.cast::<u8>(),
+                    locked.bitstream_size_in_bytes as usize,
+                )
+            };
+
+            split_annex_b(&mut self.frame, bytes);
+            self.frame.is_idr = self.frame.slices.iter().any(|range| {
+                self.frame
+                    .data
+                    .get(range.start + crate::encode::START_CODE.len())
+                    .is_some_and(|&byte| byte & 0x1f == 5)
+            });
+
+            let _ = unlock(self.session, self.bitstream);
+        }
+
+        let _ = unmap(self.session, mapping.mapped_resource);
+        result?;
+
+        self.frames_encoded += 1;
+
+        Ok(&self.frame)
+    }
+
+    /// Returns how many frames this session has encoded.
+    #[must_use]
+    pub fn frames_encoded(&self) -> u64 {
+        self.frames_encoded
+    }
+
+    /// Returns the configuration this session was created with.
+    #[must_use]
+    pub fn config(&self) -> crate::encode::EncoderConfig {
+        self.config
+    }
+}
+
+impl Drop for NvencEncoder {
+    /// Releases the bitstream buffer, the registered texture, and the session, in that order.
+    fn drop(&mut self) {
+        // SAFETY: each slot holds the function NVENC put there, and each handle is either
+        // null or one this encoder created.
+        unsafe {
+            if !self.bitstream.is_null() {
+                let destroy = self.nvenc.function::<UnlockBitstream>(FN_DESTROY_BITSTREAM);
+                let _ = destroy(self.session, self.bitstream);
+            }
+            if !self.registered.is_null() {
+                let unregister = self
+                    .nvenc
+                    .function::<UnlockBitstream>(FN_UNREGISTER_RESOURCE);
+                let _ = unregister(self.session, self.registered);
+            }
+            if !self.session.is_null() {
+                let destroy = self
+                    .nvenc
+                    .function::<extern "system" fn(*mut c_void) -> i32>(FN_DESTROY_ENCODER);
+                let _ = destroy(self.session);
+            }
+        }
+    }
+}
+
+impl core::fmt::Debug for NvencEncoder {
+    /// Describes the session without printing raw handles.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NvencEncoder")
+            .field("config", &self.config)
+            .field("frames_encoded", &self.frames_encoded)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Splits an Annex B bitstream into the frame's NAL units.
+///
+/// NVENC emits H.264 with start codes already in place, so this finds the boundaries rather
+/// than inserting them. Both three and four byte start codes are accepted because an encoder
+/// may use either.
+fn split_annex_b(frame: &mut crate::encode::EncodedFrame, bytes: &[u8]) {
+    let mut starts = Vec::new();
+    let mut index = 0;
+
+    while index + 3 <= bytes.len() {
+        if bytes[index] == 0 && bytes[index + 1] == 0 {
+            if bytes[index + 2] == 1 {
+                starts.push((index, 3));
+                index += 3;
+                continue;
+            }
+            if index + 4 <= bytes.len() && bytes[index + 2] == 0 && bytes[index + 3] == 1 {
+                starts.push((index, 4));
+                index += 4;
+                continue;
+            }
+        }
+        index += 1;
+    }
+
+    for (position, (offset, prefix)) in starts.iter().enumerate() {
+        let begin = offset + prefix;
+        let end = starts
+            .get(position + 1)
+            .map_or(bytes.len(), |(next, _)| *next);
+
+        if begin < end {
+            frame.push_nal(&bytes[begin..end]);
+        }
+    }
+}
+
+/// Turns an NVENC status into an error naming what was being attempted.
+fn check(status: i32, attempt: &'static str) -> Result<(), EncodeError> {
+    if status == 0 {
+        return Ok(());
+    }
+
+    let _ = attempt;
+    Err(EncodeError::Encode { status })
+}
+
+/// Builds a version stamp with the high bit some structures require.
+const fn struct_version_high(api: u32, revision: u32) -> u32 {
+    struct_version(api, revision) | (1 << 31)
+}
+
+type OpenSession = extern "system" fn(*mut OpenSessionParams, *mut *mut c_void) -> i32;
+type GetPresetConfigEx =
+    extern "system" fn(*mut c_void, CodecGuid, CodecGuid, u32, *mut PresetConfig) -> i32;
+type Initialize = extern "system" fn(*mut c_void, *mut InitializeParams) -> i32;
+type Register = extern "system" fn(*mut c_void, *mut RegisterResource) -> i32;
+type CreateBitstream = extern "system" fn(*mut c_void, *mut CreateBitstreamBuffer) -> i32;
+type MapInput = extern "system" fn(*mut c_void, *mut MapInputResource) -> i32;
+type UnmapInput = extern "system" fn(*mut c_void, *mut c_void) -> i32;
+type EncodePicture = extern "system" fn(*mut c_void, *mut PicParams) -> i32;
+type LockBitstreamFn = extern "system" fn(*mut c_void, *mut LockBitstream) -> i32;
+type UnlockBitstream = extern "system" fn(*mut c_void, *mut c_void) -> i32;
