@@ -68,8 +68,10 @@ jobs:
         run: pnpm smoke:electron
         if: runner.os != 'Linux'
 
+      # Electron ships chrome-sandbox expecting setuid root, which a CI checkout cannot
+      # provide. The smoke test never renders, so dropping the sandbox is safe here.
       - name: Addon loads in Electron
-        run: xvfb-run --auto-servernum pnpm smoke:electron
+        run: xvfb-run --auto-servernum pnpm exec electron scripts/electron-smoke.cjs --no-sandbox
         if: runner.os == 'Linux'
 
       - uses: actions/upload-artifact@v4
