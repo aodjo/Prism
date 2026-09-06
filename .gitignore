@@ -18,3 +18,5 @@ packages/native/index.d.ts
 # Compiled from packages/host/src/panel.ts, next to the markup that loads it.
 packages/host/renderer/panel.js
 packages/host/renderer/panel.js.map
+packages/client/renderer/panel.js
+packages/client/renderer/panel.js.map
