@@ -17,13 +17,12 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use prism_core::net::handshake::{Identity, KEY_LEN};
-use prism_core::net::pairing::{
+use crate::identity;
+use crate::net::handshake::{Identity, KEY_LEN};
+use crate::net::pairing::{
     ACCEPT_LEN, HELLO_LEN, OFFER_LEN, PairingClient, PairingError, PairingHost, Pin,
 };
-use prism_core::net::transport::UdpTransport;
-
-use crate::identity;
+use crate::net::transport::UdpTransport;
 
 /// How long to wait for an answer before sending the opening message again.
 const RETRY_INTERVAL: Duration = Duration::from_millis(400);
@@ -45,26 +44,28 @@ const WINDOW: Duration = Duration::from_secs(120);
 /// already decided.
 const GRACE: Duration = Duration::from_secs(10);
 
-/// Shows a pairing code and waits for one client to use it.
+/// Generates a pairing code and waits for one client to use it.
 ///
-/// Prints the code, then blocks until a client completes the exchange or the window closes.
-/// The client's key is recorded on success.
+/// `show` is handed the code and the address being listened on, so the caller can put both in
+/// front of a person however it likes — a terminal line, a tray window, a QR code. Blocks
+/// until a client completes the exchange or the window closes, and records the client's key on
+/// success.
 ///
 /// # Errors
 ///
 /// Returns [`io::ErrorKind::TimedOut`] if nobody pairs before the window closes, and the
 /// underlying [`io::Error`] for a socket or file failure.
-pub fn host(bind: SocketAddr, identity: &Identity, peers: &Path) -> io::Result<[u8; KEY_LEN]> {
+pub fn host(
+    bind: SocketAddr,
+    identity: &Identity,
+    peers: &Path,
+    show: impl FnOnce(&Pin, SocketAddr),
+) -> io::Result<[u8; KEY_LEN]> {
     let transport = UdpTransport::bind(bind)?;
     transport.set_read_timeout(Some(Duration::from_millis(250)))?;
 
     let pin = Pin::generate().map_err(to_io)?;
-    println!("pairing code: {}", pin.to_display());
-    println!(
-        "waiting on {} for up to {} seconds",
-        transport.local_addr()?,
-        WINDOW.as_secs()
-    );
+    show(&pin, transport.local_addr()?);
 
     let mut state = PairingHost::new(pin, *identity.public());
     let mut offer = [0u8; OFFER_LEN];
@@ -114,7 +115,6 @@ pub fn host(bind: SocketAddr, identity: &Identity, peers: &Path) -> io::Result<[
             })?;
 
             identity::remember_peer(peers, &peer)?;
-            println!("paired with {}", identity::to_hex(&peer));
 
             return Ok(peer);
         }
@@ -190,7 +190,6 @@ pub fn client(
             transport.send(&accept[..written])?;
 
             identity::remember_peer(peers, &peer)?;
-            println!("paired with {}", identity::to_hex(&peer));
 
             return Ok(peer);
         }

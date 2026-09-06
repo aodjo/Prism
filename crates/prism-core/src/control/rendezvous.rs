@@ -27,9 +27,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use prism_core::net::handshake::{Identity, KEY_LEN};
-use prism_core::net::rendezvous::{MAX_MESSAGE_LEN, Message, answer};
-use prism_core::net::transport::UdpTransport;
+use crate::net::handshake::{Identity, KEY_LEN};
+use crate::net::rendezvous::{MAX_MESSAGE_LEN, Message, answer};
+use crate::net::transport::UdpTransport;
 
 /// How long to wait for the server before asking again.
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -146,6 +146,18 @@ pub fn spawn_keepalive(
     Ok(())
 }
 
+/// Where a host is, and where the server sees this machine.
+///
+/// The second half is not needed to connect. It is what a person looking at a diagnostics
+/// panel wants, and what says whether this machine's router hands out a stable mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Located {
+    /// Where to send to reach the host.
+    pub address: SocketAddr,
+    /// Where the server saw this machine.
+    pub observed: SocketAddr,
+}
+
 /// Asks the server where a host is and opens this side's router towards it.
 ///
 /// # Errors
@@ -158,7 +170,7 @@ pub fn lookup(
     server: SocketAddr,
     host: [u8; KEY_LEN],
     client: [u8; KEY_LEN],
-) -> io::Result<SocketAddr> {
+) -> io::Result<Located> {
     let mut out = [0u8; MAX_MESSAGE_LEN];
     let mut buf = [0u8; MAX_MESSAGE_LEN];
 
@@ -177,10 +189,7 @@ pub fn lookup(
             };
 
             match message {
-                Message::Found { address, observed } => {
-                    println!("client: this machine appears at {observed}");
-                    return Ok(address);
-                }
+                Message::Found { address, observed } => return Ok(Located { address, observed }),
                 Message::UnknownHost => {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,

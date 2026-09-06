@@ -24,12 +24,12 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use prism_core::net::handshake::{
+use crate::net::handshake::{
     Answer, Established, Identity, Initiator, KEY_LEN, MAX_HANDSHAKE_PAYLOAD, PeerPolicy,
     RESPONSE_OVERHEAD, Responder,
 };
-use prism_core::net::packet::MAX_PACKET_SIZE;
-use prism_core::net::transport::UdpTransport;
+use crate::net::packet::MAX_PACKET_SIZE;
+use crate::net::transport::UdpTransport;
 
 /// How long to wait for an answer before sending the first message again.
 ///

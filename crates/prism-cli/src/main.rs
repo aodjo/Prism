@@ -10,11 +10,7 @@ mod display;
 #[cfg(target_os = "macos")]
 mod encode;
 mod host;
-mod identity;
-mod pair;
 mod pattern;
-mod rendezvous;
-mod session;
 mod wire;
 
 use std::error::Error;
@@ -24,6 +20,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use prism_core::identity;
 use prism_core::net::handshake::Identity;
 
 /// How the client trades latency against even presentation.
@@ -564,7 +561,12 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     identity: path,
                 } => {
                     let identity = open_identity(path.as_deref())?;
-                    pair::host(bind, &identity, &peers)?;
+                    let peer =
+                        prism_core::control::pair::host(bind, &identity, &peers, |pin, at| {
+                            println!("pairing code: {}", pin.to_display());
+                            println!("waiting on {at}");
+                        })?;
+                    println!("paired with {}", identity::to_hex(&peer));
                 }
                 PairSide::Client {
                     host,
@@ -572,7 +574,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     identity: path,
                 } => {
                     let identity = open_identity(path.as_deref())?;
-                    pair::client(host, &pin, &identity, &peers)?;
+                    let peer = prism_core::control::pair::client(host, &pin, &identity, &peers)?;
+                    println!("paired with {}", identity::to_hex(&peer));
                 }
             }
 

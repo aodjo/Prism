@@ -26,7 +26,8 @@ fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
     let transport = UdpTransport::bind(config.bind)?;
 
     if let Some(server) = config.rendezvous {
-        let observed = crate::rendezvous::register(&transport, server, &keys.identity)?;
+        let observed =
+            prism_core::control::rendezvous::register(&transport, server, &keys.identity)?;
         println!("host: registered with {server}, reachable at {observed}");
 
         // Held for the life of the process. The registration and the router mapping both
@@ -34,7 +35,7 @@ fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
         // session — a host that went quiet on the server would be unreachable for the next
         // client without anything appearing to have failed.
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        crate::rendezvous::spawn_keepalive(
+        prism_core::control::rendezvous::spawn_keepalive(
             &transport,
             server,
             *keys.identity.public(),
@@ -43,7 +44,7 @@ fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
         std::mem::forget(stop);
 
         let (caller, address) =
-            crate::rendezvous::await_caller(&transport, server, config.patience)?;
+            prism_core::control::rendezvous::await_caller(&transport, server, config.patience)?;
         println!("host: a client is calling from {address}");
         let _ = caller;
     }

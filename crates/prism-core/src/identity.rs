@@ -5,12 +5,16 @@
 //! ever paired with this machine pinned the public half, so a new key is a new machine as far
 //! as any of them is concerned. That is the property pairing depends on, so the file is
 //! written with an owner-only mode and never regenerated over an existing one.
+//!
+//! This is control plane rather than data plane, and it lives here anyway because the data
+//! plane needs it: no session starts without an identity, and the Node-API surface can only
+//! expose what Rust holds. Nothing here is on the frame path.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use prism_core::net::handshake::{Identity, KEY_LEN};
+use crate::net::handshake::{Identity, KEY_LEN};
 
 /// Where the identity is kept when the command line does not say.
 ///

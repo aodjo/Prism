@@ -182,7 +182,7 @@ impl SliceSender {
         allowed: Vec<[u8; KEY_LEN]>,
         patience: std::time::Duration,
     ) -> io::Result<Self> {
-        let (established, peer, _) = crate::session::serve(
+        let (established, peer, _) = prism_core::control::session::serve(
             &transport,
             identity.clone(),
             PeerPolicy::Paired(allowed),

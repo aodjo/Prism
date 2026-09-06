@@ -224,20 +224,23 @@ fn locate(transport: &UdpTransport, config: &ClientConfig) -> io::Result<SocketA
         ));
     };
 
-    let address = crate::rendezvous::lookup(
+    let found = prism_core::control::rendezvous::lookup(
         transport,
         server,
         config.peer_key,
         *config.identity.public(),
     )?;
-    println!("client: the host is at {address}");
+    println!(
+        "client: the host is at {}, and this machine appears at {}",
+        found.address, found.observed
+    );
 
     // Both sides punch. The handshake message this side is about to send repeatedly is its
     // own punch, but the host's router will only pass it once the host has sent outward here
     // — which the server has just told it to do.
-    crate::rendezvous::punch(transport, address)?;
+    prism_core::control::rendezvous::punch(transport, found.address)?;
 
-    Ok(address)
+    Ok(found.address)
 }
 
 /// Receives packets until the frame budget or the idle timeout is reached.
@@ -266,12 +269,13 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
 
     // Nothing is read as a packet until the handshake completes, and it only completes with
     // the host pairing recorded: the first message is encrypted to that key and no other.
-    let established = crate::session::dial(&transport, &config.identity, &config.peer_key)?;
+    let established =
+        prism_core::control::session::dial(&transport, &config.identity, &config.peer_key)?;
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
     println!(
         "client: session established with {host} ({})",
-        crate::identity::to_hex(&established.session.peer_static)
+        prism_core::identity::to_hex(&established.session.peer_static)
     );
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
