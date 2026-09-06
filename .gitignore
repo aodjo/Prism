@@ -7,3 +7,7 @@ target/
 .env.*
 packages/native/index.js
 packages/native/index.d.ts
+
+# Large local artifacts that must never enter git history
+*.iso
+*.aria2
