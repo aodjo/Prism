@@ -19,3 +19,10 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFDictionary", "CFString", "CFNumber", "CFArray"] }
+objc2-core-media = { version = "0.3", features = ["CMBase", "CMTime", "CMSampleBuffer", "CMFormatDescription", "CMBlockBuffer", "CMAttachment"] }
+objc2-core-video = { version = "0.3", features = ["CVBase", "CVReturn", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool"] }
+objc2-video-toolbox = { version = "0.3", features = ["VTBase", "VTErrors", "VTSession", "VTCompressionSession", "VTCompressionProperties", "objc2-core-media"] }
