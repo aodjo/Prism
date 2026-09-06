@@ -5,9 +5,13 @@
 //! than a compositor. CI drives it for protocol regression runs.
 
 mod client;
+#[cfg(target_os = "macos")]
+mod encode;
 mod host;
 
 use std::net::SocketAddr;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -70,11 +74,74 @@ enum Command {
         #[arg(long, default_value_t = 4)]
         in_flight: usize,
     },
+
+    /// Encode synthetic frames to an Annex B file to verify the encoder.
+    #[cfg(target_os = "macos")]
+    Encode {
+        /// Where to write the elementary stream.
+        #[arg(long, default_value = "prism-probe.h264")]
+        out: PathBuf,
+
+        /// Frames to encode.
+        #[arg(long, default_value_t = 120)]
+        frames: u32,
+
+        /// Frame width in pixels.
+        #[arg(long, default_value_t = 1920)]
+        width: u32,
+
+        /// Frame height in pixels.
+        #[arg(long, default_value_t = 1080)]
+        height: u32,
+
+        /// Frames per second.
+        #[arg(long, default_value_t = 60)]
+        fps: u32,
+
+        /// Target bitrate in bits per second.
+        #[arg(long, default_value_t = 24_000_000)]
+        bitrate: u32,
+
+        /// Soft ceiling on bytes per slice; zero leaves slicing to the encoder.
+        #[arg(long, default_value_t = 12_000)]
+        slice_bytes: u32,
+    },
 }
 
 /// Parses the command line and runs the requested side.
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    #[cfg(target_os = "macos")]
+    if let Command::Encode {
+        out,
+        frames,
+        width,
+        height,
+        fps,
+        bitrate,
+        slice_bytes,
+    } = &cli.command
+    {
+        let config = encode::EncodeConfig {
+            out: out.clone(),
+            frames: *frames,
+            encoder: prism_core::encode::EncoderConfig {
+                width: *width,
+                height: *height,
+                fps: *fps,
+                bitrate_bps: *bitrate,
+                max_slice_bytes: *slice_bytes,
+            },
+        };
+        return match encode::run(config) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("prism-cli: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     let result = match cli.command {
         Command::Host {
@@ -103,6 +170,8 @@ fn main() -> ExitCode {
             report_every,
             in_flight,
         }),
+        #[cfg(target_os = "macos")]
+        Command::Encode { .. } => unreachable!("handled before the match"),
     };
 
     match result {
