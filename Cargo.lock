@@ -643,6 +643,7 @@ dependencies = [
  "prism-core",
  "sdl3",
  "sdl3-sys",
+ "windows",
 ]
 
 [[package]]

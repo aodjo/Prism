@@ -303,6 +303,19 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             #[cfg(not(target_os = "macos"))]
             {
                 let _ = (width, height, bitrate);
+                #[cfg(target_os = "windows")]
+                {
+                    let encoder_config = prism_core::encode::EncoderConfig {
+                        width,
+                        height,
+                        fps,
+                        bitrate_bps: bitrate,
+                        max_slice_bytes: 0,
+                    };
+                    host::run_windows(config, encoder_config, capture)
+                }
+
+                #[cfg(not(target_os = "windows"))]
                 Err("encoding is not implemented on this platform yet".into())
             }
         }
