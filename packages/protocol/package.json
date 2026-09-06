@@ -9,10 +9,14 @@
     ".": "./dist/index.js",
     "./vectors.json": "./vectors.json"
   },
-  "files": ["dist", "vectors.json"],
+  "files": [
+    "dist",
+    "vectors.json"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "tsc --noEmit -p tsconfig.json && vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

@@ -80,6 +80,45 @@ impl UdpTransport {
         self.socket.send(bytes)
     }
 
+    /// Clones the socket so another thread can use the same flow.
+    ///
+    /// The clock synchronisation exchange needs the host to answer on the socket it is
+    /// already sending video from, so that the reply comes from the address the client is
+    /// talking to. A second socket would answer from a different port and the client would
+    /// have no way to pair it with the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the descriptor cannot be duplicated.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            socket: self.socket.try_clone()?,
+        })
+    }
+
+    /// Sends one packet to a specific address, ignoring any connected peer.
+    ///
+    /// The receiving side of a session binds without connecting, so this is how it answers
+    /// a host it has only learned about by hearing from it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the packet cannot be sent.
+    pub fn send_to(&self, bytes: &[u8], addr: SocketAddr) -> io::Result<usize> {
+        self.socket.send_to(bytes, addr)
+    }
+
+    /// Receives one packet into `buf`, returning the bytes and where they came from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::WouldBlock`] or [`io::ErrorKind::TimedOut`] when the read
+    /// timeout expires, and the underlying [`io::Error`] otherwise.
+    pub fn recv_from_into<'a>(&self, buf: &'a mut [u8]) -> io::Result<(&'a [u8], SocketAddr)> {
+        let (len, from) = self.socket.recv_from(buf)?;
+        Ok((&buf[..len], from))
+    }
+
     /// Receives one packet into `buf` and returns the bytes that were written.
     ///
     /// A datagram longer than `buf` is truncated, so `buf` must be at least

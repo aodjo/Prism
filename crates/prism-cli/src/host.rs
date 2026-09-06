@@ -50,6 +50,7 @@ pub fn run(config: HostConfig) -> io::Result<()> {
     );
 
     let mut sender = SliceSender::connect(config.peer)?;
+    sender.answer_clock_pings()?;
     let slices = build_slices(config.frame_bytes, config.slices);
     let interval = frame_interval(config.fps);
 
@@ -97,6 +98,7 @@ pub fn run_encoded(
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
 
     let mut sender = SliceSender::connect(config.peer)?;
+    sender.answer_clock_pings()?;
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     let mut picture = Nv12Frame::new(encoder_config.width, encoder_config.height)?;
     let interval = frame_interval(config.fps);
@@ -194,6 +196,7 @@ pub fn run_captured(
 
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     let mut sender = SliceSender::connect(config.peer)?;
+    sender.answer_clock_pings()?;
 
     println!(
         "host: capturing the screen at {width}x{height} {} fps, {} kbps, to {}",

@@ -25,6 +25,15 @@ pub const MAX_VIDEO_PAYLOAD: usize = MAX_PACKET_SIZE - VIDEO_HEADER_LEN;
 /// Exact byte length of a feedback packet; it carries no variable-length payload.
 pub const FEEDBACK_PACKET_LEN: usize = 17;
 
+/// Byte length of a control packet header: the channel tag and the message type.
+pub const CONTROL_HEADER_LEN: usize = 2;
+
+/// Exact byte length of a clock synchronisation ping.
+pub const CLOCK_PING_LEN: usize = 10;
+
+/// Exact byte length of a clock synchronisation pong.
+pub const CLOCK_PONG_LEN: usize = 26;
+
 /// Reserved video flag bits; any packet setting one of these is rejected.
 pub const VIDEO_FLAGS_RESERVED_MASK: u8 = 0xf8;
 
@@ -79,6 +88,34 @@ impl TryFrom<u8> for Channel {
     }
 }
 
+/// Message type carried in the second byte of a control packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ControlType {
+    /// Client's half of a clock synchronisation exchange.
+    ClockPing = 0,
+    /// Host's answer, carrying both of its own timestamps.
+    ClockPong = 1,
+}
+
+impl TryFrom<u8> for ControlType {
+    type Error = ProtocolError;
+
+    /// Converts a raw type byte into a [`ControlType`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::UnknownControlType`] for a type this build does not know,
+    /// which is how a message added in a future revision is refused rather than misread.
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        match tag {
+            0 => Ok(ControlType::ClockPing),
+            1 => Ok(ControlType::ClockPong),
+            other => Err(ProtocolError::UnknownControlType(other)),
+        }
+    }
+}
+
 /// Reason a byte sequence was rejected as malformed.
 ///
 /// Decoders return this instead of a partially populated packet, so a corrupt or
@@ -93,6 +130,10 @@ pub enum ProtocolError {
     /// Leading byte was not one of the defined channel tags.
     #[error("unknown channel tag {0}")]
     UnknownChannel(u8),
+
+    /// Control message type was not one this build knows.
+    #[error("unknown control type {0}")]
+    UnknownControlType(u8),
 
     /// Packet was routed to a decoder for a different channel.
     #[error("expected channel {expected:?}, got tag {got}")]
@@ -419,4 +460,212 @@ impl FeedbackPacket {
 pub fn channel_of(bytes: &[u8]) -> Result<Channel, ProtocolError> {
     let &tag = bytes.first().ok_or(ProtocolError::Empty)?;
     Channel::try_from(tag)
+}
+
+/// The client's half of a clock synchronisation exchange.
+///
+/// Sent on [`Channel::Control`]. The host answers with a [`ClockPong`] carrying both of
+/// its own timestamps, from which the client derives the offset between the two clocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockPing {
+    /// Client clock when the ping was sent, in microseconds.
+    pub t1_us: u64,
+}
+
+impl ClockPing {
+    /// Serialises this ping into `buf` and returns how many bytes were written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than
+    /// [`CLOCK_PING_LEN`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{CLOCK_PING_LEN, ClockPing};
+    /// let mut buf = [0u8; CLOCK_PING_LEN];
+    /// assert_eq!(ClockPing { t1_us: 1_000_000 }.encode_into(&mut buf).unwrap(), CLOCK_PING_LEN);
+    /// ```
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < CLOCK_PING_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: CLOCK_PING_LEN,
+            });
+        }
+
+        buf[0] = Channel::Control as u8;
+        buf[1] = ControlType::ClockPing as u8;
+        buf[2..10].copy_from_slice(&self.t1_us.to_le_bytes());
+
+        Ok(CLOCK_PING_LEN)
+    }
+
+    /// Parses a clock ping, requiring an exact length match.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::UnknownControlType`], or
+    /// [`ProtocolError::WrongLength`] as appropriate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::ClockPing;
+    /// let bytes = [0, 0, 0x40, 0x42, 0x0f, 0, 0, 0, 0, 0];
+    /// assert_eq!(ClockPing::decode(&bytes).unwrap().t1_us, 1_000_000);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_control(bytes, ControlType::ClockPing, CLOCK_PING_LEN)?;
+
+        Ok(Self {
+            t1_us: read_u64(bytes, 2),
+        })
+    }
+}
+
+/// The host's answer to a [`ClockPing`].
+///
+/// Carries the ping's own timestamp back so the client can pair the reply, plus the two
+/// host timestamps that bracket the host's handling of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockPong {
+    /// Echoed from the ping, in client time.
+    pub t1_us: u64,
+    /// Host clock when the ping arrived, in microseconds.
+    pub t2_us: u64,
+    /// Host clock when this answer was sent, in microseconds.
+    pub t3_us: u64,
+}
+
+impl ClockPong {
+    /// Serialises this answer into `buf` and returns how many bytes were written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than
+    /// [`CLOCK_PONG_LEN`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{CLOCK_PONG_LEN, ClockPong};
+    /// let pong = ClockPong { t1_us: 1_000_000, t2_us: 1_000_500, t3_us: 1_000_600 };
+    /// let mut buf = [0u8; CLOCK_PONG_LEN];
+    /// assert_eq!(pong.encode_into(&mut buf).unwrap(), CLOCK_PONG_LEN);
+    /// ```
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < CLOCK_PONG_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: CLOCK_PONG_LEN,
+            });
+        }
+
+        buf[0] = Channel::Control as u8;
+        buf[1] = ControlType::ClockPong as u8;
+        buf[2..10].copy_from_slice(&self.t1_us.to_le_bytes());
+        buf[10..18].copy_from_slice(&self.t2_us.to_le_bytes());
+        buf[18..26].copy_from_slice(&self.t3_us.to_le_bytes());
+
+        Ok(CLOCK_PONG_LEN)
+    }
+
+    /// Parses a clock pong, requiring an exact length match.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::UnknownControlType`], or
+    /// [`ProtocolError::WrongLength`] as appropriate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::ClockPong;
+    /// # use prism_core::net::packet::CLOCK_PONG_LEN;
+    /// let pong = ClockPong { t1_us: 5, t2_us: 6, t3_us: 7 };
+    /// let mut buf = [0u8; CLOCK_PONG_LEN];
+    /// pong.encode_into(&mut buf).unwrap();
+    /// assert_eq!(ClockPong::decode(&buf).unwrap(), pong);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_control(bytes, ControlType::ClockPong, CLOCK_PONG_LEN)?;
+
+        Ok(Self {
+            t1_us: read_u64(bytes, 2),
+            t2_us: read_u64(bytes, 10),
+            t3_us: read_u64(bytes, 18),
+        })
+    }
+}
+
+/// Reads the control message type from a control packet.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::Empty`] for a zero-length input,
+/// [`ProtocolError::WrongChannel`] if the tag is not [`Channel::Control`],
+/// [`ProtocolError::TooShort`] if the type byte is missing, and
+/// [`ProtocolError::UnknownControlType`] for a type this build does not know.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::net::packet::{ControlType, control_type_of};
+/// assert_eq!(control_type_of(&[0, 1]).unwrap(), ControlType::ClockPong);
+/// assert!(control_type_of(&[0]).is_err());
+/// ```
+pub fn control_type_of(bytes: &[u8]) -> Result<ControlType, ProtocolError> {
+    let channel = channel_of(bytes)?;
+    if channel != Channel::Control {
+        return Err(ProtocolError::WrongChannel {
+            expected: Channel::Control,
+            got: bytes[0],
+        });
+    }
+
+    if bytes.len() < CONTROL_HEADER_LEN {
+        return Err(ProtocolError::TooShort {
+            actual: bytes.len(),
+            needed: CONTROL_HEADER_LEN,
+        });
+    }
+
+    ControlType::try_from(bytes[1])
+}
+
+/// Checks that a control packet has the expected type and exact length.
+///
+/// # Errors
+///
+/// Returns whatever [`control_type_of`] rejects, [`ProtocolError::UnknownControlType`] if
+/// the type is not the one expected, or [`ProtocolError::WrongLength`] on a size mismatch.
+fn expect_control(bytes: &[u8], expected: ControlType, length: usize) -> Result<(), ProtocolError> {
+    let actual = control_type_of(bytes)?;
+    if actual != expected {
+        return Err(ProtocolError::UnknownControlType(bytes[1]));
+    }
+
+    if bytes.len() != length {
+        return Err(ProtocolError::WrongLength {
+            actual: bytes.len(),
+            expected: length,
+        });
+    }
+
+    Ok(())
+}
+
+/// Reads a little-endian `u64` at `offset`.
+///
+/// # Panics
+///
+/// Panics if `bytes` is shorter than `offset + 8`; callers validate the length first.
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(
+        bytes[offset..offset + 8]
+            .try_into()
+            .expect("length was validated"),
+    )
 }
