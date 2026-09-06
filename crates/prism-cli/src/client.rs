@@ -27,7 +27,6 @@ use prism_core::stats::{LatencyRecorder, LatencySummary};
 /// Two, because a frame that has queued behind another has already missed its moment.
 const DECODE_QUEUE_DEPTH: usize = 2;
 
-
 /// How the receiving client should behave.
 #[derive(Debug, Clone, Copy)]
 pub struct ClientConfig {
