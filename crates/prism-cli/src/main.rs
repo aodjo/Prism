@@ -11,6 +11,7 @@ mod display;
 mod encode;
 mod host;
 mod identity;
+mod pair;
 mod pattern;
 mod session;
 mod wire;
@@ -146,12 +147,14 @@ enum Command {
         #[arg(long)]
         identity: Option<PathBuf>,
 
-        /// The client's public key in hex, as `prism-cli keygen` printed it.
+        /// The client's public key in hex.
         ///
-        /// There is no way to run without one. A session that skipped this would be one
-        /// where anyone who can reach the port can watch the screen and type on it.
+        /// Defaults to the one `prism-cli pair` recorded, and is only needed when several
+        /// machines have been paired. There is no way to run without a peer either way: a
+        /// session that skipped this would be one where anyone who can reach the port can
+        /// watch the screen and type on it.
         #[arg(long)]
-        peer_key: String,
+        peer_key: Option<String>,
     },
 
     /// Receive frames and report latency.
@@ -213,9 +216,22 @@ enum Command {
         #[arg(long)]
         identity: Option<PathBuf>,
 
-        /// The host's public key in hex, as `prism-cli keygen` printed it.
+        /// The host's public key in hex.
+        ///
+        /// Defaults to the one `prism-cli pair` recorded.
         #[arg(long)]
-        peer_key: String,
+        peer_key: Option<String>,
+    },
+
+    /// Exchange long-term keys with another machine using a six digit code.
+    ///
+    /// Run once per pair of machines. After it, neither side ever needs a code again, and a
+    /// peer that cannot prove it holds the matching private key is refused before it can send
+    /// a single byte the session acts on.
+    Pair {
+        /// Which side of the exchange to run.
+        #[command(subcommand)]
+        side: PairSide,
     },
 
     /// Print this machine's public key, creating its long-term key if there is none.
@@ -258,6 +274,40 @@ enum Command {
         /// Soft ceiling on bytes per slice; zero leaves slicing to the encoder.
         #[arg(long, default_value_t = 12_000)]
         slice_bytes: u32,
+    },
+}
+
+/// The two halves of a pairing exchange.
+///
+/// The client dials, because that is where the person who typed the code is waiting. This is
+/// the opposite of a running session, where the host dials — pairing and streaming are
+/// separate exchanges and neither constrains the other.
+#[derive(Debug, Subcommand)]
+enum PairSide {
+    /// Show a code and wait for one client to use it.
+    Host {
+        /// Address to listen on.
+        #[arg(long, default_value = "0.0.0.0:47100")]
+        bind: SocketAddr,
+
+        /// Where this machine's long-term key is kept, generated on first use.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+    },
+
+    /// Type a code the host is showing and pair with it.
+    Client {
+        /// Address the host is waiting on.
+        #[arg(long)]
+        host: SocketAddr,
+
+        /// The six digits the host printed.
+        #[arg(long)]
+        pin: String,
+
+        /// Where this machine's long-term key is kept, generated on first use.
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
 }
 
@@ -319,7 +369,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
         } => {
             let keys = host::HostKeys {
                 identity: open_identity(identity.as_deref())?,
-                peer: identity::parse_peer_key(&peer_key)?,
+                peer: identity::resolve_peer(
+                    peer_key.as_deref(),
+                    &identity::default_peers_path()?,
+                )?,
             };
             let config = host::HostConfig {
                 peer,
@@ -408,7 +461,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 in_flight,
                 decode: decode || display,
                 identity: open_identity(identity.as_deref())?,
-                peer_key: identity::parse_peer_key(&peer_key)?,
+                peer_key: identity::resolve_peer(
+                    peer_key.as_deref(),
+                    &identity::default_peers_path()?,
+                )?,
             };
 
             let offset =
@@ -452,6 +508,30 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     )?)
                 }
             }
+        }
+
+        Command::Pair { side } => {
+            let peers = identity::default_peers_path()?;
+
+            match side {
+                PairSide::Host {
+                    bind,
+                    identity: path,
+                } => {
+                    let identity = open_identity(path.as_deref())?;
+                    pair::host(bind, &identity, &peers)?;
+                }
+                PairSide::Client {
+                    host,
+                    pin,
+                    identity: path,
+                } => {
+                    let identity = open_identity(path.as_deref())?;
+                    pair::client(host, &pin, &identity, &peers)?;
+                }
+            }
+
+            Ok(())
         }
 
         Command::Keygen { identity: path } => {

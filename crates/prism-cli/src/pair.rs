@@ -1,0 +1,216 @@
+//! Running a pairing exchange over UDP.
+//!
+//! The one place a person is involved. The host shows a number, the person carries it to the
+//! client and types it, and when this is over each machine holds the other's long-term key
+//! and no number is ever needed again.
+//!
+//! # Which side dials
+//!
+//! The client, because that is where the person is: they have just typed a code and are
+//! waiting for something to happen. It is also the direction the rendezvous server will use,
+//! so nothing here has to be rearranged later. Note that this is the opposite of a running
+//! session, where the host dials the client — pairing and streaming are separate exchanges
+//! and neither constrains the other.
+
+use std::io;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use prism_core::net::handshake::{Identity, KEY_LEN};
+use prism_core::net::pairing::{
+    ACCEPT_LEN, HELLO_LEN, OFFER_LEN, PairingClient, PairingError, PairingHost, Pin,
+};
+use prism_core::net::transport::UdpTransport;
+
+use crate::identity;
+
+/// How long to wait for an answer before sending the opening message again.
+const RETRY_INTERVAL: Duration = Duration::from_millis(400);
+
+/// How long the client keeps trying before giving up on the host.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the host shows a code before retiring it.
+///
+/// A code left on screen indefinitely is a code someone can walk past and use. Two minutes is
+/// long enough to carry a number to another machine and short enough that walking away closes
+/// the window.
+const WINDOW: Duration = Duration::from_secs(120);
+
+/// How long to wait for the closing message once a code has been used.
+///
+/// The code is spent the moment it is answered, so nothing that arrives after this can
+/// succeed. Waiting out the whole window would leave a person watching a screen that has
+/// already decided.
+const GRACE: Duration = Duration::from_secs(10);
+
+/// Shows a pairing code and waits for one client to use it.
+///
+/// Prints the code, then blocks until a client completes the exchange or the window closes.
+/// The client's key is recorded on success.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::TimedOut`] if nobody pairs before the window closes, and the
+/// underlying [`io::Error`] for a socket or file failure.
+pub fn host(bind: SocketAddr, identity: &Identity, peers: &Path) -> io::Result<[u8; KEY_LEN]> {
+    let transport = UdpTransport::bind(bind)?;
+    transport.set_read_timeout(Some(Duration::from_millis(250)))?;
+
+    let pin = Pin::generate().map_err(to_io)?;
+    println!("pairing code: {}", pin.to_display());
+    println!(
+        "waiting on {} for up to {} seconds",
+        transport.local_addr()?,
+        WINDOW.as_secs()
+    );
+
+    let mut state = PairingHost::new(pin, *identity.public());
+    let mut offer = [0u8; OFFER_LEN];
+    let mut buf = [0u8; 1200];
+    let mut answered_to: Option<SocketAddr> = None;
+
+    let mut close_at = Instant::now() + WINDOW;
+
+    while Instant::now() < close_at {
+        let (bytes, from) = match transport.recv_from_into(&mut buf) {
+            Ok(received) => received,
+            Err(err) if is_timeout(&err) => continue,
+            Err(err) => return Err(err),
+        };
+
+        let len = bytes.len();
+
+        if len == HELLO_LEN && answered_to.is_none() {
+            match state.answer(&buf[..len], &mut offer) {
+                Ok(written) => {
+                    transport.send_to(&offer[..written], from)?;
+                    answered_to = Some(from);
+
+                    // The code is now spent, so only this client's closing message can still
+                    // succeed. Whether it arrives is decided in seconds, not minutes.
+                    close_at = Instant::now() + GRACE;
+                }
+                // A code is spent by one attempt, and a malformed element is an attempt. The
+                // person has to ask for a new code, which is exactly the intended cost.
+                Err(PairingError::Failed | PairingError::Spent) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "the pairing attempt failed; ask for a new code and try again",
+                    ));
+                }
+                Err(_) => continue,
+            }
+            continue;
+        }
+
+        if len == ACCEPT_LEN && answered_to == Some(from) {
+            let peer = state.accept(&buf[..len]).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the pairing attempt failed; ask for a new code and try again",
+                )
+            })?;
+
+            identity::remember_peer(peers, &peer)?;
+            println!("paired with {}", identity::to_hex(&peer));
+
+            return Ok(peer);
+        }
+    }
+
+    Err(if answered_to.is_some() {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the client did not complete the exchange, which is what a mistyped code looks \
+             like; ask for a new code and try again",
+        )
+    } else {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "nobody paired before the code expired",
+        )
+    })
+}
+
+/// Carries a typed code to a host and completes the exchange.
+///
+/// The host's key is recorded on success.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::PermissionDenied`] if the code was wrong or the machine answering
+/// is not the one that showed it, [`io::ErrorKind::TimedOut`] if nothing answers, and the
+/// underlying [`io::Error`] for a socket or file failure.
+pub fn client(
+    host: SocketAddr,
+    pin: &str,
+    identity: &Identity,
+    peers: &Path,
+) -> io::Result<[u8; KEY_LEN]> {
+    let pin = Pin::parse(pin).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
+    let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
+    transport.connect(host)?;
+    transport.set_read_timeout(Some(RETRY_INTERVAL))?;
+
+    let mut state = PairingClient::new(&pin, *identity.public());
+    let mut accept = [0u8; ACCEPT_LEN];
+    let mut buf = [0u8; 1200];
+
+    let give_up = Instant::now() + DIAL_TIMEOUT;
+
+    while Instant::now() < give_up {
+        transport.send(state.hello())?;
+
+        let retry_at = Instant::now() + RETRY_INTERVAL;
+        while Instant::now() < retry_at {
+            let bytes = match transport.recv_into(&mut buf) {
+                Ok(bytes) => bytes,
+                Err(err) if is_timeout(&err) => break,
+                Err(err) => return Err(err),
+            };
+
+            if bytes.len() != OFFER_LEN {
+                continue;
+            }
+
+            let len = bytes.len();
+            let (peer, written) = state.finish(&buf[..len], &mut accept).map_err(|_| {
+                // The one failure a person will actually see. It means the code was mistyped,
+                // it has already been used, or the machine that answered is not the one that
+                // showed it — and none of those can be told apart, which is the design.
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the code was not accepted; ask the host for a new one",
+                )
+            })?;
+
+            transport.send(&accept[..written])?;
+
+            identity::remember_peer(peers, &peer)?;
+            println!("paired with {}", identity::to_hex(&peer));
+
+            return Ok(peer);
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "the host did not answer",
+    ))
+}
+
+/// Turns a pairing failure into an input/output error for the command line.
+fn to_io(err: PairingError) -> io::Error {
+    io::Error::other(err.to_string())
+}
+
+/// Returns whether an error is the read timeout rather than a real failure.
+fn is_timeout(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}

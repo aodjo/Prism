@@ -9,6 +9,7 @@ pub mod handshake;
 pub mod loss;
 pub mod packet;
 pub mod packetize;
+pub mod pairing;
 pub mod reassemble;
 pub mod seal;
 pub mod secure;

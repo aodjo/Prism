@@ -128,3 +128,106 @@ fn from_hex(text: &str) -> Option<[u8; KEY_LEN]> {
 
     Some(key)
 }
+
+/// Where the keys of paired peers are kept, beside the identity.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] if there is no home directory.
+pub fn default_peers_path() -> io::Result<PathBuf> {
+    Ok(default_path()?.with_file_name("peers"))
+}
+
+/// Records a peer's public key, doing nothing if it is already there.
+///
+/// Append-only and one key per line. A machine may be paired with several peers, and
+/// forgetting one because another was added later would mean re-pairing a machine that never
+/// stopped being trusted.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the file cannot be read or written.
+pub fn remember_peer(path: &Path, key: &[u8; KEY_LEN]) -> io::Result<()> {
+    let line = to_hex(key);
+
+    if known_peers(path)?.iter().any(|known| known == key) {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    io::Write::write_all(&mut file, line.as_bytes())?;
+    io::Write::write_all(&mut file, b"\n")?;
+
+    Ok(())
+}
+
+/// Reads every peer key that has been paired with, oldest first.
+///
+/// A missing file is an empty list rather than an error: a machine that has never paired has
+/// no peers, which is a state and not a fault.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the file exists but cannot be read, and
+/// [`io::ErrorKind::InvalidData`] if a line is not a key.
+pub fn known_peers(path: &Path) -> io::Result<Vec<[u8; KEY_LEN]>> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            from_hex(line).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} holds a line that is not a key: {line:?}",
+                        path.display()
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Resolves the peer to talk to: the one named on the command line, or the last one paired.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] with an instruction to pair when neither is available,
+/// and [`io::ErrorKind::InvalidInput`] if several peers are known and none was named.
+pub fn resolve_peer(named: Option<&str>, peers_path: &Path) -> io::Result<[u8; KEY_LEN]> {
+    if let Some(text) = named {
+        return parse_peer_key(text)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err));
+    }
+
+    let known = known_peers(peers_path)?;
+
+    match known.len() {
+        0 => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no peer has been paired; run `prism-cli pair` on both machines, or pass --peer-key",
+        )),
+        1 => Ok(known[0]),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{} peers are paired, so --peer-key has to say which:\n  {}",
+                known.len(),
+                known.iter().map(to_hex).collect::<Vec<_>>().join("\n  ")
+            ),
+        )),
+    }
+}
