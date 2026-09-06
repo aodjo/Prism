@@ -109,6 +109,7 @@ pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()
     let mut malformed = 0u64;
     let mut frames = 0u32;
     let mut behind = 0u32;
+    let mut unsynced = 0u32;
 
     loop {
         let bytes = match transport.recv_into(&mut recv_buf) {
@@ -130,7 +131,10 @@ pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()
             continue;
         };
 
-        arrival.record(elapsed_us(frame.capture_ts_us));
+        match elapsed_us(frame.capture_ts_us) {
+            Some(age) => arrival.record(age),
+            None => unsynced += 1,
+        }
         frames += 1;
 
         if config.decode {
@@ -156,6 +160,12 @@ pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()
     let decode_report = decoder.map(|handle| handle.join().unwrap_or_default());
 
     println!("\nclient: {frames} frames reassembled, {malformed} packets unparseable");
+    if unsynced > 0 {
+        println!(
+            "client: {unsynced} frames could not be timed — the host clock is ahead of this one, \
+             so latency across machines is unmeasurable until clock sync lands in M2"
+        );
+    }
     report("arrival ", &mut arrival);
 
     if let Some(decode_report) = decode_report {
@@ -231,7 +241,9 @@ fn spawn_decoder(
                         .saturating_sub(picture.pts_us)
                         .min(u64::from(u32::MAX)) as u32,
                 );
-                latency.record(elapsed_us(picture.pts_us));
+                if let Some(age) = elapsed_us(picture.pts_us) {
+                    latency.record(age);
+                }
                 stage.record(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
                 decoded += 1;
 
@@ -276,14 +288,19 @@ fn spawn_decoder(
     })
 }
 
-/// Returns how long ago a host timestamp was, clamped to what a sample can hold.
+/// Returns how long ago a host timestamp was, or `None` if the two clocks disagree.
 ///
-/// Host and client share a clock here because both run on one machine. Comparing across
-/// machines needs the clock synchronisation that arrives in M2.
-fn elapsed_us(timestamp_us: u64) -> u32 {
-    now_us()
-        .saturating_sub(timestamp_us)
-        .min(u64::from(u32::MAX)) as u32
+/// Both sides stamp against the Unix epoch, which only makes them comparable when they
+/// run on the same machine. Across machines the offset is unknown, and a host clock ahead
+/// of the client's produces a negative age.
+///
+/// Reporting that as zero would be worse than reporting nothing: a cross-machine run
+/// would show a flawless sub-millisecond latency that is entirely an artefact. So an
+/// impossible sample is refused and the caller counts it. Clock synchronisation, which
+/// makes these figures real, is M2.
+fn elapsed_us(timestamp_us: u64) -> Option<u32> {
+    let now = now_us();
+    (now >= timestamp_us).then(|| (now - timestamp_us).min(u64::from(u32::MAX)) as u32)
 }
 
 /// Prints a latency summary under the given label.
