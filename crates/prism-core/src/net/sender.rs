@@ -142,6 +142,10 @@ pub struct SliceSender {
     /// is exactly one of those. Two openers on one direction would each keep their own replay
     /// window and each reject what the other had already accepted.
     opener: Option<Opener>,
+    /// The client's static key, as the handshake proved it.
+    peer: [u8; KEY_LEN],
+    /// Where that client is.
+    peer_address: std::net::SocketAddr,
     buffer: [u8; MAX_PACKET_SIZE],
     packets: u64,
     bytes: u64,
@@ -194,14 +198,11 @@ impl SliceSender {
         )?;
         transport.set_read_timeout(None)?;
 
-        println!(
-            "host: session opened by {peer} ({})",
-            hex(&established.session.peer_static)
-        );
-
         Ok(Self {
             sender: SecureSender::new(transport, established.session.sealer),
             opener: Some(established.session.opener),
+            peer: established.session.peer_static,
+            peer_address: peer,
             buffer: [0; MAX_PACKET_SIZE],
             packets: 0,
             bytes: 0,
@@ -515,6 +516,18 @@ impl SliceSender {
         Ok(true)
     }
 
+    /// Returns the connected client's public key, as the handshake proved it.
+    #[must_use]
+    pub fn peer(&self) -> [u8; KEY_LEN] {
+        self.peer
+    }
+
+    /// Returns where the connected client is.
+    #[must_use]
+    pub fn peer_address(&self) -> std::net::SocketAddr {
+        self.peer_address
+    }
+
     /// Returns how many packets have been sent.
     #[must_use]
     pub fn packets(&self) -> u64 {
@@ -806,9 +819,4 @@ impl HostInput {
             );
         }
     }
-}
-
-/// Renders a key as hex, for the line that names who connected.
-fn hex(key: &[u8; KEY_LEN]) -> String {
-    key.iter().map(|byte| format!("{byte:02x}")).collect()
 }

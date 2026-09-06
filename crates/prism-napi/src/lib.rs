@@ -17,7 +17,7 @@
 
 mod tasks;
 
-use napi::bindgen_prelude::AsyncTask;
+use napi::bindgen_prelude::{AsyncTask, BigInt};
 use napi_derive::napi;
 use prism_core::identity;
 use prism_core::net::pairing::Pin;
@@ -124,4 +124,104 @@ pub fn pair_as_client(host: String, code: String) -> AsyncTask<PairAsClient> {
 /// Turns any error into one JavaScript can throw.
 fn to_napi(err: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(err.to_string())
+}
+
+/// A host session the control plane started and can watch.
+///
+/// One at a time. A second session on one machine would mean two capture streams and two
+/// encoders competing for the same GPU, which is slower than either alone and produces a worse
+/// picture for both viewers.
+#[napi]
+pub struct Host {
+    service: Option<prism_core::control::host::HostService>,
+}
+
+/// What a host session is doing, as of a moment ago.
+///
+/// Polled by the interface a few times a second and never faster: a panel that updates more
+/// often than a person can read costs frames to produce and tells them nothing.
+#[napi(object)]
+pub struct HostSnapshot {
+    /// `opening`, `waiting`, `streaming`, `stopped` or `failed`.
+    pub phase: String,
+    /// Where the rendezvous server sees this machine, once it has said.
+    pub observed: Option<String>,
+    /// The connected client's public key as hex, once one has connected.
+    pub peer: Option<String>,
+    /// Frames captured, encoded and sent.
+    pub frames: BigInt,
+    /// Packets put on the wire, parity included.
+    pub packets: BigInt,
+    /// Bytes put on the wire, headers included.
+    pub bytes: BigInt,
+    /// What sending has worked out to so far, in bits per second.
+    pub bitrate_bps: BigInt,
+    /// What went wrong, when the phase is `failed`.
+    pub error: Option<String>,
+}
+
+/// How a host session should behave.
+///
+/// Everything is optional because a person starting a session from a window has opinions
+/// about at most one of these.
+#[napi(object)]
+pub struct HostOptions {
+    /// Address to listen on. Defaults to a port the operating system chooses, which is right
+    /// when a rendezvous server is being used.
+    pub bind: Option<String>,
+    /// Rendezvous server to register with, so clients can find this machine behind NAT.
+    pub rendezvous: Option<String>,
+    /// Frames per second to capture at.
+    pub fps: Option<u32>,
+    /// Target bitrate in bits per second.
+    pub bitrate_bps: Option<u32>,
+    /// Whether to let the client control this machine.
+    pub inject_input: Option<bool>,
+}
+
+#[napi]
+impl Host {
+    /// Starts a session and returns immediately.
+    ///
+    /// Binding, registering and waiting for a client all happen on a thread of their own, so
+    /// this does not block the window. [`Host::snapshot`] says what is happening.
+    ///
+    /// # Errors
+    ///
+    /// Fails if an address cannot be parsed, if no client has ever been paired — a host that
+    /// admits nobody is the right answer rather than an inconvenience — or if the session
+    /// thread cannot be spawned.
+    #[napi(constructor)]
+    pub fn new(options: HostOptions) -> napi::Result<Self> {
+        let config = tasks::host_config(&options)?;
+        let keys = tasks::host_keys()?;
+
+        Ok(Self {
+            service: Some(
+                prism_core::control::host::HostService::start(config, keys).map_err(to_napi)?,
+            ),
+        })
+    }
+
+    /// Returns what the session is doing.
+    #[napi]
+    #[must_use]
+    pub fn snapshot(&self) -> HostSnapshot {
+        let Some(service) = self.service.as_ref() else {
+            return tasks::stopped_snapshot();
+        };
+
+        tasks::describe(&service.snapshot())
+    }
+
+    /// Ends the session and waits for its thread.
+    ///
+    /// Safe to call twice: a window that stops a session and then closes would otherwise have
+    /// to remember which it did first.
+    #[napi]
+    pub fn stop(&mut self) {
+        if let Some(service) = self.service.take() {
+            service.join();
+        }
+    }
 }

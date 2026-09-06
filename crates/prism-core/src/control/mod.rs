@@ -11,6 +11,7 @@
 //! Nothing here prints. A library that writes to standard output cannot be embedded in a
 //! window, so what a caller would want to show is returned instead.
 
+pub mod host;
 pub mod pair;
 pub mod rendezvous;
 pub mod session;
