@@ -73,6 +73,19 @@ crates/prism-rendezvous/  자체 호스팅 서버: 페어링·시그널링·주�
 `packages/protocol/vectors.json`이 유일한 진실 소스다. Rust(`cargo test`)와
 TS(`vitest`) 양쪽이 같은 벡터로 테스트하며, 포맷을 바꾸면 벡터를 먼저 고친다.
 
+## 푸시 전 검사
+
+`#[cfg(target_os = ...)]` 뒤에 있는 코드는 macOS에서만 빌드해서는 절대 검증되지 않는다.
+한쪽에서만 쓰이는 상수·import는 다른 OS에서 dead code가 되고, CI의 `-D warnings`에 걸린다.
+플랫폼별 코드를 건드렸다면 푸시 전에 반드시 실행한다:
+
+```sh
+pnpm lint         # macOS clippy + rustfmt
+pnpm lint:cross   # linux, windows 타깃 clippy (링커 없이 clippy만 수행하므로 로컬에서 동작)
+```
+
+최초 1회 `rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-msvc` 필요.
+
 ## 핫패스 금지 사항
 
 - 핫패스에 `tokio` 사용 금지 (제어 평면·랑데부 서버에만 허용)
@@ -100,6 +113,7 @@ TS(`vitest`) 양쪽이 같은 벡터로 테스트하며, 포맷을 바꾸면 벡
 - 마일스톤 단위 작업은 `feature/m1-vertical-slice` 처럼 마일스톤 번호를 붙인다.
 - 태그는 `v0.1.0` 형식. `release/*`를 `main`에 병합할 때만 붙인다.
 - CI는 `main`·`develop` 푸시와 두 브랜치를 향한 PR에서 돈다.
+- GitHub 기본 브랜치는 `main`이다. PR은 반드시 `--base develop`을 명시해서 만든다.
 
 `git flow` CLI 없이 순수 git으로도 동일하게 운용 가능하다. CLI를 쓰려면
 `brew install git-flow-avh` 후 `git flow init -d` (설정은 이미 `.git/config`에 있음).

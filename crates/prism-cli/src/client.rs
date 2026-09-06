@@ -27,13 +27,6 @@ use prism_core::stats::{LatencyRecorder, LatencySummary};
 /// Two, because a frame that has queued behind another has already missed its moment.
 const DECODE_QUEUE_DEPTH: usize = 2;
 
-/// How long the decode thread waits for a picture before moving on.
-///
-/// Short on purpose. Blocking here stalls the whole decode thread, so every frame behind
-/// the one being waited for is measured as late and may be dropped. Roughly two frame
-/// intervals is long enough to absorb the decoder's own pipelining and short enough that
-/// a stall cannot cascade.
-const POLL_TIMEOUT: Duration = Duration::from_millis(8);
 
 /// How the receiving client should behave.
 #[derive(Debug, Clone, Copy)]
@@ -194,6 +187,14 @@ fn spawn_decoder(
 ) -> thread::JoinHandle<DecodeReport> {
     use prism_core::decode::DecodeError;
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
+
+    /// How long the decode thread waits for a picture before moving on.
+    ///
+    /// Short on purpose. Blocking here stalls the whole decode thread, so every frame
+    /// behind the one being waited for is measured as late and may be dropped. Roughly
+    /// two frame intervals is long enough to absorb the decoder's own pipelining and
+    /// short enough that a stall cannot cascade.
+    const POLL_TIMEOUT: Duration = Duration::from_millis(8);
 
     thread::spawn(move || {
         let mut decoder = VideoToolboxDecoder::new();
