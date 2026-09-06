@@ -8,8 +8,8 @@ use prism_core::net::packet::{
     CLOCK_PING_LEN, CLOCK_PONG_LEN, CONTROL_HEADER_LEN, CURSOR_POSITION_LEN, Channel, ClockPing,
     ClockPong, ControlType, CursorPosition, FEC_HEADER_LEN, FEEDBACK_PACKET_LEN, FORMAT_VERSION,
     FecPacket, FeedbackPacket, INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket,
-    MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD, MouseButton, VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN,
-    VideoPacket, channel_of, control_type_of,
+    MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD, MouseButton, SEAL_OVERHEAD,
+    VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN, VideoPacket, channel_of, control_type_of,
 };
 use serde_json::Value;
 
@@ -403,7 +403,10 @@ fn malformed_packets_are_rejected() {
 }
 
 #[test]
-fn a_full_size_payload_exactly_fills_a_packet() {
+fn a_full_size_payload_exactly_fills_the_plaintext_budget() {
+    // The budget the packet formats are built against is what fits on the wire *after*
+    // sealing, so a full packet fills that rather than MAX_PACKET_SIZE. Asserting the wire
+    // size here would pass only while encryption is switched off.
     let payload = [0u8; MAX_VIDEO_PAYLOAD];
     let packet = VideoPacket {
         frame_id: 1,
@@ -416,7 +419,16 @@ fn a_full_size_payload_exactly_fills_a_packet() {
     };
 
     let mut buf = [0u8; MAX_PACKET_SIZE];
-    assert_eq!(packet.encode_into(&mut buf).unwrap(), MAX_PACKET_SIZE);
+    assert_eq!(
+        packet.encode_into(&mut buf).unwrap(),
+        MAX_PLAINTEXT_SIZE,
+        "a full packet fills the plaintext budget"
+    );
+    assert_eq!(
+        MAX_PLAINTEXT_SIZE + SEAL_OVERHEAD,
+        MAX_PACKET_SIZE,
+        "and sealing it brings it up to exactly what the wire allows"
+    );
 }
 
 #[test]

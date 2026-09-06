@@ -19,8 +19,22 @@ pub const MAX_PACKET_SIZE: usize = 1200;
 /// Byte length of a video packet header, including the leading channel tag.
 pub const VIDEO_HEADER_LEN: usize = 20;
 
+/// Bytes a sealed packet costs beyond its plaintext.
+///
+/// Eight for the nonce counter that travels in the clear and sixteen for the
+/// authentication tag. Everything else — the channel tag included — is inside the seal, so
+/// an observer learns nothing about a packet but its size.
+pub const SEAL_OVERHEAD: usize = 24;
+
+/// Largest plaintext packet that still fits on the wire once sealed.
+///
+/// [`MAX_PACKET_SIZE`] describes what leaves the socket, so the budget the packet formats
+/// are built against is that minus what the seal costs. Getting this the other way round
+/// would make every full-size packet fragment the moment encryption was switched on.
+pub const MAX_PLAINTEXT_SIZE: usize = MAX_PACKET_SIZE - SEAL_OVERHEAD;
+
 /// Largest slice fragment that fits in one video packet.
-pub const MAX_VIDEO_PAYLOAD: usize = MAX_PACKET_SIZE - VIDEO_HEADER_LEN;
+pub const MAX_VIDEO_PAYLOAD: usize = MAX_PLAINTEXT_SIZE - VIDEO_HEADER_LEN;
 
 /// Exact byte length of a feedback packet; it carries no variable-length payload.
 pub const FEEDBACK_PACKET_LEN: usize = 17;
@@ -48,7 +62,7 @@ pub const CURSOR_POSITION_LEN: usize = 18;
 pub const FEC_HEADER_LEN: usize = 20;
 
 /// Largest parity shard that fits in one packet.
-pub const MAX_FEC_PAYLOAD: usize = MAX_PACKET_SIZE - FEC_HEADER_LEN;
+pub const MAX_FEC_PAYLOAD: usize = MAX_PLAINTEXT_SIZE - FEC_HEADER_LEN;
 
 /// Most shards a Reed-Solomon block may hold, data and parity together.
 ///

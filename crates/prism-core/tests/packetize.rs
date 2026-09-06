@@ -5,9 +5,11 @@
 //! bitstream the encoder produced. Everything else here guards a boundary around that.
 
 use prism_core::net::packet::{
-    FLAG_IDR, FLAG_LAST_OF_FRAME, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD, VideoPacket,
+    FLAG_IDR, FLAG_LAST_OF_FRAME, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD,
+    VideoPacket,
 };
 use prism_core::net::packetize::{MAX_SLICE_LEN, PacketizeError, SlicePacketizer};
+use prism_core::net::seal::Sealer;
 
 /// Builds a deterministic pseudo-random bitstream of the requested length.
 ///
@@ -117,15 +119,27 @@ fn only_the_final_packet_is_short() {
 }
 
 #[test]
-fn a_full_packet_fills_the_mtu_budget_exactly() {
+fn a_full_packet_fills_the_mtu_budget_exactly_once_it_is_sealed() {
+    // The packetiser sizes payloads against the plaintext budget, not the datagram, because
+    // every packet grows by the seal's overhead before it leaves the socket. The number that
+    // has to land on the PMTU floor is the sealed one — if the packetiser filled the datagram
+    // instead, every video packet would fragment.
     let data = bitstream(MAX_VIDEO_PAYLOAD);
     let packet = SlicePacketizer::new(1, 0, 0, 0, &data)
         .unwrap()
         .next()
         .unwrap();
 
-    let mut buf = [0u8; MAX_PACKET_SIZE];
-    assert_eq!(packet.encode_into(&mut buf).unwrap(), MAX_PACKET_SIZE);
+    let mut plaintext = [0u8; MAX_PLAINTEXT_SIZE];
+    let len = packet.encode_into(&mut plaintext).unwrap();
+    assert_eq!(len, MAX_PLAINTEXT_SIZE);
+
+    let mut sealed = [0u8; MAX_PACKET_SIZE];
+    let mut sealer = Sealer::new(&[0x11; 32]);
+    assert_eq!(
+        sealer.seal(&plaintext[..len], &mut sealed).unwrap(),
+        MAX_PACKET_SIZE
+    );
 }
 
 #[test]

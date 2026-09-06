@@ -3,7 +3,7 @@
   "constants": {
     "maxPacketSize": 1200,
     "videoHeaderLen": 20,
-    "maxVideoPayload": 1180,
+    "maxVideoPayload": 1156,
     "feedbackPacketLen": 17,
     "controlHeaderLen": 2,
     "clockPingLen": 10,
@@ -11,7 +11,9 @@
     "inputPacketLen": 15,
     "cursorPositionLen": 18,
     "fecHeaderLen": 20,
-    "maxFecPayload": 1180
+    "maxFecPayload": 1156,
+    "sealOverhead": 24,
+    "maxPlaintextSize": 1176
   },
   "channels": {
     "control": 0,
@@ -187,7 +189,7 @@
     },
     {
       "name": "fec-tail-len-over-shard",
-      "hex": "050700000001000802009d0440420f0000000000aa",
+      "hex": "05070000000100080200850440420f0000000000aa",
       "reason": "the final data shard cannot exceed MAX_VIDEO_PAYLOAD"
     }
   ],
@@ -331,11 +333,11 @@
         "dataCount": 254,
         "parityCount": 1,
         "shardIndex": 0,
-        "tailLen": 1180,
+        "tailLen": 1156,
         "captureTsUs": "18446744073709551615"
       },
       "payloadHex": "ff",
-      "hex": "05fffffffffffffe01009c04ffffffffffffffffff"
+      "hex": "05fffffffffffffe01008404ffffffffffffffffff"
     },
     {
       "name": "single-shard-block",

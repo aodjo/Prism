@@ -8,6 +8,8 @@ import {
   CURSOR_POSITION_LEN,
   FEC_HEADER_LEN,
   MAX_FEC_PAYLOAD,
+  MAX_PLAINTEXT_SIZE,
+  SEAL_OVERHEAD,
   Channel,
   ControlType,
   FEEDBACK_PACKET_LEN,
@@ -252,7 +254,7 @@ describe('video packet', () => {
     ).toThrow(PrismProtocolError);
   });
 
-  it('never produces a packet larger than MAX_PACKET_SIZE at the payload limit', () => {
+  it('at the payload limit fills the plaintext budget, which seals to exactly MAX_PACKET_SIZE', () => {
     const bytes = encodeVideoPacket({
       frameId: 1,
       sliceId: 0,
@@ -263,7 +265,8 @@ describe('video packet', () => {
       payload: new Uint8Array(MAX_VIDEO_PAYLOAD),
     });
 
-    expect(bytes.length).toBe(MAX_PACKET_SIZE);
+    expect(bytes.length).toBe(MAX_PLAINTEXT_SIZE);
+    expect(bytes.length + SEAL_OVERHEAD).toBe(MAX_PACKET_SIZE);
   });
 
   it('rejects encoding with a reserved flag bit set', () => {
@@ -392,7 +395,8 @@ describe('fec packet', () => {
     // The reason the header is capped at 20 bytes. A longer header would leave room for
     // less than a full shard and Reed-Solomon needs every shard the same length.
     expect(MAX_FEC_PAYLOAD).toBe(MAX_VIDEO_PAYLOAD);
-    expect(FEC_HEADER_LEN + MAX_FEC_PAYLOAD).toBe(MAX_PACKET_SIZE);
+    expect(FEC_HEADER_LEN + MAX_FEC_PAYLOAD).toBe(MAX_PLAINTEXT_SIZE);
+    expect(MAX_PLAINTEXT_SIZE + SEAL_OVERHEAD).toBe(MAX_PACKET_SIZE);
   });
 
   it('recovers the slice length without the packet that would have carried it', () => {

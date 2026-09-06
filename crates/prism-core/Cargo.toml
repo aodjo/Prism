@@ -10,6 +10,13 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 reed-solomon-erasure = "6.0"
+aes-gcm = "0.10"
+# `std` is deliberately off. Snow's `std` feature lists `ring/std`, which in Cargo's old
+# feature syntax also switches the optional `ring` dependency on, and ring is C that needs a
+# cross linker `pnpm lint:cross` does not have. The pure-Rust resolver is what this wants
+# anyway. `risky-raw-split` hands over the session keys so `net::seal` can put the nonce on
+# the wire, which is what makes the transport survive UDP reordering.
+snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "default-resolver-crypto", "risky-raw-split"] }
 
 [dev-dependencies]
 serde_json.workspace = true
