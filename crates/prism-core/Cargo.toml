@@ -32,3 +32,5 @@ objc2-video-toolbox = { version = "0.3", features = ["VTBase", "VTErrors", "VTSe
 objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShareableContent", "SCError"] }
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
+objc2-core-text = "0.3.2"
+objc2-core-graphics = "0.3.2"

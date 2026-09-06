@@ -8,6 +8,8 @@
 
 #[cfg(target_os = "macos")]
 pub mod metal;
+#[cfg(target_os = "macos")]
+pub mod overlay;
 pub mod pacing;
 
 /// Reason a picture could not be drawn.

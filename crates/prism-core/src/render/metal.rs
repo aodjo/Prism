@@ -20,14 +20,15 @@ use objc2_core_video::{
 };
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat,
-    MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLBlendFactor, MTLBlendOperation, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
+    MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction,
+    MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLStoreAction, MTLTexture,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::render::RenderError;
+use crate::render::overlay::TextOverlay;
 
 /// The shader that turns an NV12 picture into RGB.
 ///
@@ -73,6 +74,35 @@ fragment float4 prism_fragment(VertexOut in [[stage_in]],
 
     return float4(saturate(rgb), 1.0);
 }
+
+struct OverlayVertexOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+// `rect` is (left, top, width, height) in normalised device coordinates, where y grows
+// upwards. No vertical flip: a CoreGraphics bitmap context draws with its origin at the
+// bottom left, but lays its rows out top down in memory, so row zero is already the top
+// of the image and samples straight through.
+vertex OverlayVertexOut prism_overlay_vertex(uint vid [[vertex_id]],
+                                             constant float4 &rect [[buffer(0)]]) {
+    const float2 corners[6] = {
+        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
+        float2(1.0, 0.0), float2(1.0, 1.0), float2(0.0, 1.0)
+    };
+    float2 c = corners[vid];
+
+    OverlayVertexOut out;
+    out.position = float4(rect.x + c.x * rect.z, rect.y - c.y * rect.w, 0.0, 1.0);
+    out.uv = c;
+    return out;
+}
+
+fragment float4 prism_overlay_fragment(OverlayVertexOut in [[stage_in]],
+                                       texture2d<float> glyphs [[texture(0)]]) {
+    constexpr sampler nearest(filter::nearest, address::clamp_to_edge);
+    return glyphs.sample(nearest, in.uv);
+}
 "#;
 
 /// Draws decoded pictures into a Metal texture.
@@ -81,6 +111,7 @@ pub struct MetalRenderer {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    overlay_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     cache: CFRetained<CVMetalTextureCache>,
 }
 
@@ -133,6 +164,8 @@ impl MetalRenderer {
                 message: err.localizedDescription().to_string(),
             })?;
 
+        let overlay_pipeline = build_overlay_pipeline(&device, &library, format)?;
+
         let mut raw: *mut CVMetalTextureCache = null_mut();
 
         // SAFETY: the device outlives the call and CoreVideo writes a retained cache into
@@ -152,6 +185,7 @@ impl MetalRenderer {
             device,
             queue,
             pipeline,
+            overlay_pipeline,
             cache,
         })
     }
@@ -194,7 +228,7 @@ impl MetalRenderer {
         picture: &CVPixelBuffer,
         target: &ProtocolObject<dyn MTLTexture>,
     ) -> Result<(), RenderError> {
-        let command_buffer = self.record(picture, target)?;
+        let command_buffer = self.record(picture, target, None)?;
         command_buffer.commit();
         command_buffer.waitUntilCompleted();
 
@@ -219,13 +253,14 @@ impl MetalRenderer {
         &mut self,
         picture: &CVPixelBuffer,
         layer: &CAMetalLayer,
+        overlay: Option<&TextOverlay>,
     ) -> Result<bool, RenderError> {
         let Some(drawable) = layer.nextDrawable() else {
             return Ok(false);
         };
 
         let target = drawable.texture();
-        let command_buffer = self.record(picture, &target)?;
+        let command_buffer = self.record(picture, &target, overlay)?;
 
         command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
         command_buffer.commit();
@@ -246,6 +281,7 @@ impl MetalRenderer {
         &mut self,
         picture: &CVPixelBuffer,
         target: &ProtocolObject<dyn MTLTexture>,
+        overlay: Option<&TextOverlay>,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>, RenderError> {
         let (width, height) = (
             CVPixelBufferGetWidth(picture),
@@ -293,6 +329,24 @@ impl MetalRenderer {
             encoder.setFragmentTexture_atIndex(Some(&chroma_texture), 1);
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
         }
+
+        if let Some(overlay) = overlay {
+            let rect = overlay_rect(overlay, target.width(), target.height());
+
+            encoder.setRenderPipelineState(&self.overlay_pipeline);
+            // SAFETY: the rectangle is four floats, matching the shader's `float4`, and
+            // the overlay texture outlives the encoder.
+            unsafe {
+                encoder.setVertexBytes_length_atIndex(
+                    NonNull::from(&rect).cast(),
+                    core::mem::size_of_val(&rect),
+                    0,
+                );
+                encoder.setFragmentTexture_atIndex(Some(overlay.texture()), 0);
+                encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+            }
+        }
+
         encoder.endEncoding();
 
         Ok(command_buffer)
@@ -338,4 +392,65 @@ impl MetalRenderer {
         // SAFETY: CoreVideo created the texture, so ownership transfers here.
         Ok(unsafe { CFRetained::from_raw(NonNull::new_unchecked(raw)) })
     }
+}
+
+/// Builds the pipeline that blends the statistics overlay over the picture.
+///
+/// Blending is premultiplied: the overlay bitmap is drawn by CoreGraphics with
+/// premultiplied alpha, so the source factor is one rather than the source alpha.
+///
+/// # Errors
+///
+/// Returns [`RenderError::Setup`] if either shader function is missing, and
+/// [`RenderError::Shader`] if Metal will not build the pipeline.
+fn build_overlay_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+    format: MTLPixelFormat,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, RenderError> {
+    let vertex = library
+        .newFunctionWithName(&NSString::from_str("prism_overlay_vertex"))
+        .ok_or(RenderError::Setup {
+            reason: "the overlay vertex function is missing",
+        })?;
+    let fragment = library
+        .newFunctionWithName(&NSString::from_str("prism_overlay_fragment"))
+        .ok_or(RenderError::Setup {
+            reason: "the overlay fragment function is missing",
+        })?;
+
+    let descriptor = MTLRenderPipelineDescriptor::new();
+    descriptor.setVertexFunction(Some(&vertex));
+    descriptor.setFragmentFunction(Some(&fragment));
+
+    // SAFETY: attachment zero always exists on a fresh pipeline descriptor.
+    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    attachment.setPixelFormat(format);
+    attachment.setBlendingEnabled(true);
+    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+    attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
+    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+
+    device
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .map_err(|err| RenderError::Shader {
+            message: err.localizedDescription().to_string(),
+        })
+}
+
+/// Returns where the overlay sits on the target, in normalised device coordinates.
+///
+/// Pinned to the top left at its natural pixel size, so the text stays legible whatever
+/// the window is scaled to rather than stretching with it.
+fn overlay_rect(overlay: &TextOverlay, target_width: usize, target_height: usize) -> [f32; 4] {
+    let margin_x = 16.0 / target_width.max(1) as f32;
+    let margin_y = 16.0 / target_height.max(1) as f32;
+
+    let width = (overlay.width() as f32 / target_width.max(1) as f32) * 2.0;
+    let height = (overlay.height() as f32 / target_height.max(1) as f32) * 2.0;
+
+    [-1.0 + margin_x * 2.0, 1.0 - margin_y * 2.0, width, height]
 }
