@@ -257,6 +257,21 @@ pub fn run(
         "display: window {width}x{height}, drawable {drawable_width}x{drawable_height}, escape to quit"
     );
 
+    // A machine with no sound device still shows picture. Audio is worth having and not worth
+    // ending a session over, so a failure here is reported once and the stream carries on.
+    let playback = match sdl
+        .audio()
+        .map_err(Box::<dyn Error>::from)
+        .and_then(|audio| crate::audio::start(&audio))
+    {
+        Ok((playback, sink)) => Some((playback, sink)),
+        Err(err) => {
+            eprintln!("display: no audio output ({err}); the stream will be silent");
+            None
+        }
+    };
+    let audio_sink = playback.as_ref().map(|(_, sink)| sink.clone());
+
     let (pictures_tx, pictures_rx) = sync_channel(PICTURE_QUEUE_DEPTH);
     let offset = Arc::new(AtomicI64::new(client::OFFSET_UNKNOWN));
     let input_slot: Arc<OnceLock<client::InputSender>> = Arc::new(OnceLock::new());
@@ -273,6 +288,7 @@ pub fn run(
                     offset: Some(offset),
                     input: Some(input),
                     cursor: Some(cursor),
+                    audio: audio_sink,
                 },
             )
         })
@@ -392,6 +408,17 @@ pub fn run(
     println!("display: {shown} pictures shown, {missed} had no drawable available");
     if capture_input {
         println!("input  : {sent_input} events sent");
+    }
+    if let Some((_, sink)) = playback.as_ref() {
+        let stats = sink.stats();
+        println!(
+            "audio  : {} frames played, {} concealed, {} starved, {} dropped, buffer {} frames",
+            stats.played.load(Ordering::Relaxed),
+            stats.concealed.load(Ordering::Relaxed),
+            stats.starved.load(Ordering::Relaxed),
+            stats.dropped.load(Ordering::Relaxed),
+            stats.depth.load(Ordering::Relaxed),
+        );
     }
     report_pacing(&mut pacer);
     worker

@@ -156,6 +156,8 @@ pub struct HostSnapshot {
     pub bytes: BigInt,
     /// What sending has worked out to so far, in bits per second.
     pub bitrate_bps: BigInt,
+    /// Audio frames captured, encoded and sent.
+    pub audio_frames: BigInt,
     /// What went wrong, when the phase is `failed`.
     pub error: Option<String>,
 }

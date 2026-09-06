@@ -23,13 +23,30 @@ use prism_core::net::ack::AckTracker;
 use prism_core::net::clocksync::ClockSync;
 use prism_core::net::handshake::{Identity, KEY_LEN};
 use prism_core::net::packet::{
-    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
+    AudioPacket, CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
     FEEDBACK_PACKET_LEN, FecPacket, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE,
     VideoPacket, channel_of, control_type_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::secure::{SecureReceiver, SecureSender};
 use prism_core::net::transport::UdpTransport;
+
+#[cfg(target_os = "macos")]
+use crate::audio::AudioSink;
+
+/// Stands in for the playback sink on platforms with no client window yet.
+///
+/// The wire side of audio is built and tested everywhere; only the playing of it is macOS
+/// only so far, because that is where the client window is.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone)]
+pub struct AudioSink;
+
+#[cfg(not(target_os = "macos"))]
+impl AudioSink {
+    /// Discards a frame, on a platform that cannot play it.
+    pub fn push(&self, _sequence: u32, _payload: &[u8], _arrived_us: u64) {}
+}
 
 use prism_core::stats::{LatencyRecorder, LatencySummary};
 
@@ -146,6 +163,11 @@ pub struct ClientHooks {
     pub input: Option<Arc<OnceLock<InputSender>>>,
     /// Updated as the host reports where its pointer is.
     pub cursor: Option<CursorSink>,
+    /// Where arriving audio frames go, when this machine can play them.
+    ///
+    /// Absent when nothing is showing the stream, because a session with no window is a
+    /// measurement run and playing its audio out loud would be a surprise.
+    pub audio: Option<AudioSink>,
 }
 
 /// How the receiving client should behave.
@@ -255,6 +277,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         offset,
         input,
         cursor,
+        audio,
     } = hooks;
     let offset = offset.unwrap_or_else(|| Arc::new(AtomicI64::new(OFFSET_UNKNOWN)));
     let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
@@ -355,6 +378,18 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
                     }
                 }
                 _ => {}
+            }
+
+            continue;
+        }
+
+        // Audio has its own path from here on: no reassembly, no parity, and a jitter buffer
+        // of its own. Sharing the video path's machinery would make every one of its decisions
+        // wrong for sound, which is five millisecond frames rather than sixteen and a
+        // concealed gap rather than a repaired one.
+        if channel_of(bytes) == Ok(Channel::Audio) {
+            if let (Some(sink), Ok(packet)) = (audio.as_ref(), AudioPacket::decode(bytes)) {
+                sink.push(packet.sequence, packet.payload, now_us());
             }
 
             continue;

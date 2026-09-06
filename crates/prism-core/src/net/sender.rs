@@ -20,9 +20,9 @@ use crate::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_
 use crate::net::handshake::{Identity, KEY_LEN, PeerPolicy};
 use crate::net::loss::LossInjector;
 use crate::net::packet::{
-    CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR, FLAG_LAST_OF_FRAME,
-    FecPacket, FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD,
-    channel_of,
+    AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR,
+    FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE,
+    MAX_VIDEO_PAYLOAD, channel_of,
 };
 use crate::net::packetize::SlicePacketizer;
 use crate::net::seal::Opener;
@@ -167,6 +167,9 @@ pub struct SliceSender {
     pacer: Option<SendPacer>,
     /// Whether the congestion controller is allowed to drive the pacer's rate.
     adaptive: bool,
+    /// How many audio frames have gone out, counted separately because they are a different
+    /// kind of traffic: unpaced, unprotected, and two hundred a second regardless of the video.
+    audio_frames: u64,
 }
 
 impl SliceSender {
@@ -215,6 +218,7 @@ impl SliceSender {
             oversized_slice_warned: false,
             pacer: None,
             adaptive: false,
+            audio_frames: 0,
         })
     }
 
@@ -514,6 +518,66 @@ impl SliceSender {
         self.bytes += len as u64;
 
         Ok(true)
+    }
+
+    /// Sends one encoded audio frame.
+    ///
+    /// Not paced and not protected by parity. Audio is a fraction of a percent of the link and
+    /// its frames are five milliseconds apart, so spreading them would delay sound to smooth a
+    /// burst that does not exist; and a lost frame is concealed by the decoder, which costs
+    /// nothing per frame where parity would cost bandwidth on every one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the packet cannot be sent, and
+    /// [`io::ErrorKind::InvalidInput`] if the frame is larger than one packet carries — which
+    /// for Opus at any sane rate it never is.
+    pub fn send_audio(
+        &mut self,
+        sequence: u32,
+        payload: &[u8],
+        capture_ts_us: u64,
+    ) -> io::Result<()> {
+        let packet = AudioPacket {
+            sequence,
+            capture_ts_us,
+            payload,
+        };
+
+        let len = packet
+            .encode_into(&mut self.buffer)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
+        self.sender.send(&self.buffer[..len])?;
+        self.packets += 1;
+        self.bytes += len as u64;
+        self.audio_frames += 1;
+
+        Ok(())
+    }
+
+    /// Builds a sender for the audio thread.
+    ///
+    /// Its own socket handle and its own buffer, so audio and video never wait on each other,
+    /// and a *shared* nonce counter, because both are the same direction under the same key.
+    /// Two independent counters would both start at zero and reuse every nonce, which leaks
+    /// the authentication key rather than merely weakening the cipher.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the socket cannot be duplicated.
+    pub fn audio_sender(&self) -> io::Result<AudioSender> {
+        Ok(AudioSender {
+            sender: self.sender.split()?,
+            buffer: Box::new([0; MAX_PACKET_SIZE]),
+            frames: 0,
+        })
+    }
+
+    /// Returns how many audio frames have been sent.
+    #[must_use]
+    pub fn audio_frames(&self) -> u64 {
+        self.audio_frames
     }
 
     /// Returns the connected client's public key, as the handshake proved it.
@@ -818,5 +882,62 @@ impl HostInput {
                  cannot tell the two apart"
             );
         }
+    }
+}
+
+/// Sends audio, on the audio thread's own handle.
+///
+/// Separate from [`SliceSender`] because audio is a different kind of traffic on the same
+/// session: two hundred tiny frames a second, unpaced and unprotected, on a thread that must
+/// not wait behind a video frame being packetised.
+pub struct AudioSender {
+    sender: SecureSender,
+    buffer: Box<[u8; MAX_PACKET_SIZE]>,
+    frames: u64,
+}
+
+impl AudioSender {
+    /// Sends one encoded audio frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the packet cannot be sent, and
+    /// [`io::ErrorKind::InvalidInput`] if the frame is larger than one packet carries — which
+    /// for Opus at any sane rate it never is.
+    pub fn send_audio(
+        &mut self,
+        sequence: u32,
+        payload: &[u8],
+        capture_ts_us: u64,
+    ) -> io::Result<()> {
+        let packet = AudioPacket {
+            sequence,
+            capture_ts_us,
+            payload,
+        };
+
+        let len = packet
+            .encode_into(self.buffer.as_mut_slice())
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
+        self.sender.send(&self.buffer[..len])?;
+        self.frames += 1;
+
+        Ok(())
+    }
+
+    /// Returns how many frames have gone out.
+    #[must_use]
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+}
+
+impl core::fmt::Debug for AudioSender {
+    /// Describes the sender by what it has sent.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AudioSender")
+            .field("frames", &self.frames)
+            .finish_non_exhaustive()
     }
 }

@@ -61,6 +61,12 @@ pub struct HostConfig {
     pub parity_loss: Option<f32>,
     /// Whether to inject the client's input events into this machine.
     pub inject_input: bool,
+    /// Send the machine's audio, or `None` to stream picture only.
+    ///
+    /// The value is the bitrate. A hundred and twenty-eight kilobits is transparent for
+    /// desktop audio and is under half a percent of what the picture costs, so this is on by
+    /// default and off only when somebody has a reason.
+    pub audio_bitrate_bps: Option<u32>,
 }
 
 impl Default for HostConfig {
@@ -77,6 +83,7 @@ impl Default for HostConfig {
             adaptive: false,
             parity_loss: Some(0.05),
             inject_input: true,
+            audio_bitrate_bps: Some(128_000),
         }
     }
 }
@@ -126,6 +133,8 @@ pub struct Snapshot {
     pub bytes: u64,
     /// What the last second of sending worked out to, in bits per second.
     pub bitrate_bps: u64,
+    /// Audio frames captured, encoded and sent.
+    pub audio_frames: u64,
     /// What went wrong, when the phase is [`Phase::Failed`].
     pub error: Option<String>,
 }
@@ -142,6 +151,7 @@ struct Shared {
     packets: AtomicU64,
     bytes: AtomicU64,
     bitrate_bps: AtomicU64,
+    audio_frames: AtomicU64,
     /// Written once when each becomes known, so a lock costs nothing measurable.
     observed: Mutex<Option<SocketAddr>>,
     peer: Mutex<Option<[u8; KEY_LEN]>>,
@@ -226,6 +236,7 @@ impl HostService {
             packets: self.shared.packets.load(Ordering::Relaxed),
             bytes: self.shared.bytes.load(Ordering::Relaxed),
             bitrate_bps: self.shared.bitrate_bps.load(Ordering::Relaxed),
+            audio_frames: self.shared.audio_frames.load(Ordering::Relaxed),
             error: self
                 .shared
                 .error
@@ -271,7 +282,7 @@ impl core::fmt::Debug for HostService {
 }
 
 /// Runs one session to completion on its own thread.
-fn run(config: HostConfig, keys: HostKeys, shared: &Shared, stop: &AtomicBool) {
+fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<AtomicBool>) {
     shared.set_phase(Phase::Opening);
 
     let sender = match open(&config, &keys, shared, stop) {
@@ -284,7 +295,20 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Shared, stop: &AtomicBool) {
 
     shared.set_phase(Phase::Streaming);
 
-    if let Err(err) = stream(&config, sender, shared, stop) {
+    // Audio runs on its own thread and its own clock. Interleaving it with the video loop
+    // would tie a five millisecond cadence to a sixteen millisecond one, and whichever waited
+    // for the other would be the one a person noticed.
+    let audio = config
+        .audio_bitrate_bps
+        .and_then(|bitrate| spawn_audio(&sender, bitrate, shared, stop).ok().flatten());
+
+    let outcome = stream(&config, sender, shared, stop);
+
+    if let Some(thread) = audio {
+        let _ = thread.join();
+    }
+
+    if let Err(err) = outcome {
         shared.fail(err);
         return;
     }
@@ -356,6 +380,90 @@ fn open(
     }
 
     Ok(sender)
+}
+
+/// Starts the thread that captures, encodes and sends this machine's audio.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the socket cannot be duplicated for the audio
+/// thread's own sender.
+#[cfg(target_os = "windows")]
+fn spawn_audio(
+    sender: &SliceSender,
+    bitrate_bps: u32,
+    shared: &Arc<Shared>,
+    stop: &Arc<AtomicBool>,
+) -> io::Result<Option<JoinHandle<()>>> {
+    use crate::audio::codec::AudioEncoder;
+    use crate::audio::wasapi::LoopbackCapture;
+
+    let mut sender = sender.audio_sender()?;
+    let shared = Arc::clone(shared);
+    let stop = Arc::clone(stop);
+
+    let thread = std::thread::Builder::new()
+        .name("prism-host-audio".into())
+        .spawn(move || {
+            let Ok(mut capture) = LoopbackCapture::start() else {
+                return;
+            };
+            let Ok(mut encoder) = AudioEncoder::new(bitrate_bps) else {
+                return;
+            };
+
+            let silence = [0.0f32; crate::audio::FRAME_INTERLEAVED];
+            let mut sequence = 0u32;
+
+            while !stop.load(Ordering::Relaxed) {
+                // A silent machine delivers nothing at all, not zeroes. Sending silence in its
+                // place keeps the stream continuous, which is what stops the client's jitter
+                // buffer from having to fill from empty the moment something makes a sound.
+                let frame = match capture.poll(Duration::from_millis(20)) {
+                    Ok(Some(samples)) => samples,
+                    Ok(None) => &silence,
+                    Err(_) => return,
+                };
+
+                let Ok(packet) = encoder.encode(frame) else {
+                    continue;
+                };
+
+                if sender
+                    .send_audio(sequence, packet, crate::clock::now_us())
+                    .is_err()
+                {
+                    return;
+                }
+
+                sequence = sequence.wrapping_add(1);
+                shared
+                    .audio_frames
+                    .store(u64::from(sequence), Ordering::Relaxed);
+            }
+        })?;
+
+    Ok(Some(thread))
+}
+
+/// Returns no audio thread, on a platform with no system audio capture yet.
+///
+/// macOS captures through ScreenCaptureKit and Linux through PipeWire; neither is written yet,
+/// so those hosts stream picture without sound. A stream with no audio is a lesser session,
+/// not a failed one.
+///
+/// # Errors
+///
+/// Never fails. The signature matches the platform that can fail so the caller has one shape
+/// to handle rather than two.
+#[cfg(not(target_os = "windows"))]
+fn spawn_audio(
+    _sender: &SliceSender,
+    _bitrate_bps: u32,
+    _shared: &Arc<Shared>,
+    _stop: &Arc<AtomicBool>,
+) -> io::Result<Option<JoinHandle<()>>> {
+    Ok(None)
 }
 
 /// Records the counters a watcher reads, once per frame.

@@ -4,6 +4,8 @@
 //! with no Electron and no window, so the latency numbers describe the pipeline rather
 //! than a compositor. CI drives it for protocol regression runs.
 
+#[cfg(target_os = "macos")]
+mod audio;
 mod client;
 #[cfg(target_os = "macos")]
 mod display;

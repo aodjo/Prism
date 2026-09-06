@@ -147,6 +147,7 @@ pub fn describe(snapshot: &prism_core::control::host::Snapshot) -> crate::HostSn
         packets: snapshot.packets.into(),
         bytes: snapshot.bytes.into(),
         bitrate_bps: snapshot.bitrate_bps.into(),
+        audio_frames: snapshot.audio_frames.into(),
         error: snapshot.error.clone(),
     }
 }
@@ -161,6 +162,7 @@ pub fn stopped_snapshot() -> crate::HostSnapshot {
         packets: 0u64.into(),
         bytes: 0u64.into(),
         bitrate_bps: 0u64.into(),
+        audio_frames: 0u64.into(),
         error: None,
     }
 }
