@@ -10,6 +10,8 @@
 //! showing.
 
 use std::error::Error;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::thread;
 use std::time::Duration;
@@ -17,6 +19,7 @@ use std::time::Duration;
 use objc2_metal::MTLPixelFormat;
 use objc2_quartz_core::CAMetalLayer;
 use prism_core::render::metal::MetalRenderer;
+use prism_core::render::pacing::PresentPacer;
 use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use sdl3_sys::metal::{SDL_Metal_CreateView, SDL_Metal_DestroyView, SDL_Metal_GetLayer};
@@ -25,6 +28,37 @@ use crate::client::{self, ClientConfig};
 
 /// How many pictures may wait to be shown before the newest is dropped.
 const PICTURE_QUEUE_DEPTH: usize = 2;
+
+/// Prints what the pacer cost and what it bought.
+///
+/// The delay it added belongs next to the end-to-end latency rather than hidden inside
+/// it: smoothness is bought with latency, and the price should be visible.
+fn report_pacing(pacer: &mut PresentPacer) {
+    if !pacer.enabled() {
+        println!(
+            "pacing : off — every picture was shown the moment it decoded ({} pictures)",
+            pacer.total()
+        );
+        return;
+    }
+
+    let target = pacer.delay_us();
+    let late = pacer.shown_late();
+    let total = pacer.total();
+
+    let Some(held) = pacer.held_summary() else {
+        println!("pacing : no pictures were paced");
+        return;
+    };
+
+    println!(
+        "pacing : target {:.2} ms, held p50 {:.2} p99 {:.2} max {:.2} ms, {late}/{total} arrived late",
+        f64::from(target) / 1000.0,
+        f64::from(held.p50_us) / 1000.0,
+        f64::from(held.p99_us) / 1000.0,
+        f64::from(held.max_us) / 1000.0,
+    );
+}
 
 /// Opens a window and shows the stream until it ends or the window is closed.
 ///
@@ -36,7 +70,12 @@ const PICTURE_QUEUE_DEPTH: usize = 2;
 /// # Panics
 ///
 /// Panics if the receive thread panicked.
-pub fn run(config: ClientConfig, width: u32, height: u32) -> Result<(), Box<dyn Error>> {
+pub fn run(
+    config: ClientConfig,
+    width: u32,
+    height: u32,
+    pacing_us: u32,
+) -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
     let window = video
@@ -62,9 +101,14 @@ pub fn run(config: ClientConfig, width: u32, height: u32) -> Result<(), Box<dyn 
     );
 
     let (pictures_tx, pictures_rx) = sync_channel(PICTURE_QUEUE_DEPTH);
-    let worker = thread::spawn(move || client::run(config, Some(pictures_tx)));
+    let offset = Arc::new(AtomicI64::new(client::OFFSET_UNKNOWN));
+    let worker = {
+        let offset = Arc::clone(&offset);
+        thread::spawn(move || client::run(config, Some(pictures_tx), offset))
+    };
 
     let mut events = sdl.event_pump()?;
+    let mut pacer = PresentPacer::new(pacing_us);
     let mut shown = 0u64;
     let mut missed = 0u64;
 
@@ -82,6 +126,13 @@ pub fn run(config: ClientConfig, width: u32, height: u32) -> Result<(), Box<dyn 
 
         match pictures_rx.recv_timeout(Duration::from_millis(16)) {
             Ok(picture) => {
+                if let Some(age) = client::age_of(picture.pts_us, offset.load(Ordering::Relaxed)) {
+                    let hold = pacer.hold_for(age);
+                    if !hold.is_zero() {
+                        thread::sleep(hold);
+                    }
+                }
+
                 if renderer.present(picture.pixel_buffer(), layer)? {
                     shown += 1;
                 } else {
@@ -97,6 +148,7 @@ pub fn run(config: ClientConfig, width: u32, height: u32) -> Result<(), Box<dyn 
     unsafe { SDL_Metal_DestroyView(view) };
 
     println!("display: {shown} pictures shown, {missed} had no drawable available");
+    report_pacing(&mut pacer);
     worker
         .join()
         .expect("the receive thread should not panic")?;

@@ -8,6 +8,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod metal;
+pub mod pacing;
 
 /// Reason a picture could not be drawn.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
