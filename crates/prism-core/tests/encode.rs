@@ -133,7 +133,7 @@ mod videotoolbox {
 
         paint(&mut source, 0);
         encoder
-            .encode(&source, 0, true)
+            .encode(source.pixel_buffer(), 0, true)
             .expect("first frame encodes");
 
         let first = encoder
@@ -160,7 +160,7 @@ mod videotoolbox {
         for phase in 1..5 {
             paint(&mut source, phase);
             encoder
-                .encode(&source, phase as u64 * 33_333, false)
+                .encode(source.pixel_buffer(), phase as u64 * 33_333, false)
                 .expect("frame encodes");
 
             let frame = encoder
@@ -186,7 +186,7 @@ mod videotoolbox {
         for phase in 0..4 {
             paint(&mut source, phase);
             encoder
-                .encode(&source, phase as u64 * 33_333, phase == 0)
+                .encode(source.pixel_buffer(), phase as u64 * 33_333, phase == 0)
                 .expect("frame encodes");
 
             let frame = encoder
@@ -222,7 +222,7 @@ mod videotoolbox {
         for phase in 0..3 {
             paint(&mut source, phase);
             encoder
-                .encode(&source, phase as u64 * 33_333, phase == 0)
+                .encode(source.pixel_buffer(), phase as u64 * 33_333, phase == 0)
                 .expect("frame encodes");
             encoder
                 .poll(Duration::from_secs(5))
@@ -231,7 +231,7 @@ mod videotoolbox {
 
         paint(&mut source, 3);
         encoder
-            .encode(&source, 100_000, true)
+            .encode(source.pixel_buffer(), 100_000, true)
             .expect("forced keyframe encodes");
 
         let frame = encoder

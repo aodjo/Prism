@@ -71,7 +71,7 @@ pub fn run(config: EncodeConfig) -> Result<(), Box<dyn std::error::Error>> {
 
         let started = Instant::now();
         encoder.encode(
-            &source,
+            source.pixel_buffer(),
             u64::from(frame_id) * frame_interval_us,
             frame_id == 0,
         )?;

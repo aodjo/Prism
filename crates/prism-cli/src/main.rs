@@ -59,6 +59,10 @@ enum Command {
         #[arg(long)]
         encode: bool,
 
+        /// Capture the screen instead of painting a test pattern. Implies --encode.
+        #[arg(long)]
+        capture: bool,
+
         /// Frame width when encoding.
         #[arg(long, default_value_t = 1920)]
         width: u32,
@@ -169,6 +173,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             slices,
             frames,
             encode,
+            capture,
             width,
             height,
             bitrate,
@@ -181,8 +186,13 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 frames,
             };
 
-            if !encode {
+            if !encode && !capture {
                 return Ok(host::run(config)?);
+            }
+
+            #[cfg(target_os = "macos")]
+            if capture {
+                return host::run_captured(config, bitrate, width, height);
             }
 
             #[cfg(target_os = "macos")]

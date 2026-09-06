@@ -115,7 +115,7 @@ mod round_trip {
         for phase in 0..6usize {
             paint(&mut source, phase);
             encoder
-                .encode(&source, phase as u64 * 33_333, phase == 0)
+                .encode(source.pixel_buffer(), phase as u64 * 33_333, phase == 0)
                 .expect("frame encodes");
 
             let encoded = encoder

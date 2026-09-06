@@ -286,6 +286,9 @@ impl VideoToolboxEncoder {
 
     /// Submits a frame for encoding.
     ///
+    /// Takes the pixel buffer rather than a specific frame type, so a synthetic picture
+    /// and a captured one go down exactly the same path.
+    ///
     /// Returns as soon as VideoToolbox accepts the frame; the encoded result arrives
     /// through [`Self::poll`].
     ///
@@ -294,7 +297,7 @@ impl VideoToolboxEncoder {
     /// Returns [`EncodeError::Encode`] if VideoToolbox rejects the frame.
     pub fn encode(
         &mut self,
-        frame: &Nv12Frame,
+        frame: &CVPixelBuffer,
         pts_us: u64,
         force_idr: bool,
     ) -> Result<(), EncodeError> {
@@ -317,9 +320,7 @@ impl VideoToolboxEncoder {
         // source ref con is used so a null pointer is correct there.
         let status = unsafe {
             self.session.encode_frame(
-                &*(CFRetained::as_ptr(&frame.buffer)
-                    .as_ptr()
-                    .cast::<CVImageBuffer>()),
+                &*(core::ptr::from_ref(frame).cast::<CVImageBuffer>()),
                 pts,
                 duration,
                 properties.as_deref(),
