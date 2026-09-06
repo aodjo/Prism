@@ -23,8 +23,8 @@ use prism_core::net::ack::AckTracker;
 use prism_core::net::clocksync::ClockSync;
 use prism_core::net::packet::{
     CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
-    FEEDBACK_PACKET_LEN, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE, VideoPacket,
-    channel_of, control_type_of,
+    FEEDBACK_PACKET_LEN, FecPacket, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE,
+    VideoPacket, channel_of, control_type_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::transport::UdpTransport;
@@ -289,12 +289,27 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             continue;
         }
 
-        let Ok(packet) = VideoPacket::decode(bytes) else {
-            malformed += 1;
-            continue;
+        // Parity goes to the same reassembler, which is what lets it repair a slice the
+        // moment it has enough shards rather than at some later reconciliation step.
+        let outcome = if channel_of(bytes) == Ok(Channel::Fec) {
+            match FecPacket::decode(bytes) {
+                Ok(packet) => reassembler.push_fec(&packet),
+                Err(_) => {
+                    malformed += 1;
+                    continue;
+                }
+            }
+        } else {
+            match VideoPacket::decode(bytes) {
+                Ok(packet) => reassembler.push(&packet),
+                Err(_) => {
+                    malformed += 1;
+                    continue;
+                }
+            }
         };
 
-        if reassembler.push(&packet) != PushOutcome::FrameComplete {
+        if outcome != PushOutcome::FrameComplete {
             continue;
         }
 
@@ -395,6 +410,9 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         "frames   completed {}  dropped incomplete {}",
         stats.completed, stats.dropped_incomplete
     );
+    if stats.recovered > 0 {
+        println!("recovery {} slices rebuilt from parity", stats.recovered);
+    }
     println!("feedback sent {reports_sent}  failed to send {reports_failed}");
 
     Ok(())

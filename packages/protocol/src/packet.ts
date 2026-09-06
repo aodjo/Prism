@@ -6,6 +6,9 @@ import {
   CLOCK_PONG_LEN,
   CONTROL_HEADER_LEN,
   CURSOR_POSITION_LEN,
+  FEC_HEADER_LEN,
+  MAX_FEC_PAYLOAD,
+  MAX_FIELD_SHARDS,
   Channel,
   ControlType,
   FEEDBACK_PACKET_LEN,
@@ -75,7 +78,7 @@ export function channelOf(bytes: Uint8Array): Channel {
     throw new PrismProtocolError('packet is empty, no channel tag');
   }
 
-  if (tag > Channel.Feedback) {
+  if (tag > Channel.Fec) {
     throw new PrismProtocolError(`unknown channel tag ${tag}`);
   }
 
@@ -477,6 +480,178 @@ export function decodeClockPong(bytes: Uint8Array): ClockPong {
     t2Us: view.getBigUint64(10, true),
     t3Us: view.getBigUint64(18, true),
   };
+}
+
+/**
+ * One Reed-Solomon parity shard, as carried on `Channel.Fec`.
+ *
+ * Parity is computed per slice, over that slice's own packets. A slice is the unit the
+ * encoder emits and the unit the reassembler already stores as a contiguous shard matrix,
+ * so protecting it needs no rearranging of anything.
+ */
+export interface FecPacket {
+  /** Frame the repaired slice belongs to. */
+  frameId: number;
+  /** Slice within that frame this parity repairs. */
+  sliceId: number;
+  /** How many data shards the protected block has. */
+  dataCount: number;
+  /** How many parity shards were generated for it. */
+  parityCount: number;
+  /** Which parity shard this packet carries, counted from zero. */
+  shardIndex: number;
+  /**
+   * Bytes in the slice's final data shard, from 1 to `MAX_VIDEO_PAYLOAD`.
+   *
+   * This is the field that makes recovery correct rather than merely possible. A receiver
+   * learns a slice's true length from its final packet, so a slice whose final packet was
+   * lost and then rebuilt from parity would have a length of zero and yield an empty
+   * bitstream — recovered bytes with no framing, and no error to say so. Every other data
+   * shard is exactly `MAX_VIDEO_PAYLOAD`, so this is all that is needed to recover the
+   * length from any parity packet.
+   */
+  tailLen: number;
+  /** Host clock at capture time, copied from the frame the slice belongs to. */
+  captureTsUs: bigint;
+  /** The parity shard, as long as the data shards it repairs. */
+  payload: Uint8Array;
+}
+
+/**
+ * Returns the true byte length of the slice a parity packet repairs.
+ *
+ * @param {FecPacket} packet - The parity packet to measure against.
+ * @returns {number} Length of the protected slice in bytes.
+ *
+ * @example
+ * sliceLenOf({ dataCount: 3, tailLen: 100, ... }); // 2 * 1180 + 100
+ */
+export function sliceLenOf(packet: FecPacket): number {
+  return (packet.dataCount - 1) * MAX_VIDEO_PAYLOAD + packet.tailLen;
+}
+
+/**
+ * Serialises a parity shard into its 20-byte header plus the shard.
+ *
+ * @param {FecPacket} packet - Packet fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer of `FEC_HEADER_LEN` plus the shard.
+ * @throws {PrismProtocolError} If a field does not fit its width, the shard exceeds `MAX_FEC_PAYLOAD`, or the block description is one no encoder could have produced.
+ *
+ * @example
+ * encodeFecPacket({ frameId: 1, sliceId: 0, dataCount: 4, parityCount: 1, shardIndex: 0, tailLen: 10, captureTsUs: 0n, payload: new Uint8Array(4) }).length; // 24
+ */
+export function encodeFecPacket(packet: FecPacket): Uint8Array {
+  assertU32('frameId', packet.frameId);
+  assertU16('sliceId', packet.sliceId);
+  assertU64('captureTsUs', packet.captureTsUs);
+  assertFecBlock(packet);
+
+  if (packet.payload.length > MAX_FEC_PAYLOAD) {
+    throw new PrismProtocolError(
+      `parity shard is ${packet.payload.length} bytes, exceeds MAX_FEC_PAYLOAD of ${MAX_FEC_PAYLOAD}`,
+    );
+  }
+
+  const bytes = new Uint8Array(FEC_HEADER_LEN + packet.payload.length);
+  const view = new DataView(bytes.buffer);
+
+  view.setUint8(0, Channel.Fec);
+  view.setUint32(1, packet.frameId, true);
+  view.setUint16(5, packet.sliceId, true);
+  view.setUint8(7, packet.dataCount);
+  view.setUint8(8, packet.parityCount);
+  view.setUint8(9, packet.shardIndex);
+  view.setUint16(10, packet.tailLen, true);
+  view.setBigUint64(12, packet.captureTsUs, true);
+  bytes.set(packet.payload, FEC_HEADER_LEN);
+
+  return bytes;
+}
+
+/**
+ * Parses a parity packet, copying its shard out of the input.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {FecPacket} The decoded parity shard.
+ * @throws {PrismProtocolError} If the packet is not on the parity channel, is shorter than its header, or describes a block no encoder could have produced.
+ *
+ * @example
+ * decodeFecPacket(encodeFecPacket(packet)).shardIndex; // 0
+ */
+export function decodeFecPacket(bytes: Uint8Array): FecPacket {
+  const channel = channelOf(bytes);
+  if (channel !== Channel.Fec) {
+    throw new PrismProtocolError(
+      `expected channel ${Channel.Fec}, got tag ${bytes[0]}`,
+    );
+  }
+
+  if (bytes.length < FEC_HEADER_LEN) {
+    throw new PrismProtocolError(
+      `fec packet is ${bytes.length} bytes, needs at least ${FEC_HEADER_LEN}`,
+    );
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const packet: FecPacket = {
+    frameId: view.getUint32(1, true),
+    sliceId: view.getUint16(5, true),
+    dataCount: view.getUint8(7),
+    parityCount: view.getUint8(8),
+    shardIndex: view.getUint8(9),
+    tailLen: view.getUint16(10, true),
+    captureTsUs: view.getBigUint64(12, true),
+    payload: bytes.slice(FEC_HEADER_LEN),
+  };
+
+  assertFecBlock(packet);
+
+  return packet;
+}
+
+/**
+ * Throws unless a parity packet describes a block an encoder could have produced.
+ *
+ * Refused rather than repaired: the recovery path is driven directly by these counts, and a
+ * corrupted header would send it looking for shards that do not exist.
+ *
+ * @param {FecPacket} packet - The packet whose block description to check.
+ * @returns {void} Nothing; the check either passes or throws.
+ * @throws {PrismProtocolError} Naming the field that is impossible.
+ *
+ * @example
+ * assertFecBlock({ dataCount: 4, parityCount: 1, shardIndex: 0, tailLen: 10, payload: new Uint8Array(1) }); // passes
+ */
+function assertFecBlock(packet: FecPacket): void {
+  if (packet.payload.length === 0) {
+    throw new PrismProtocolError('a parity packet carries no shard');
+  }
+  if (packet.dataCount === 0) {
+    throw new PrismProtocolError('a block with no data shards repairs nothing');
+  }
+  if (packet.parityCount === 0) {
+    throw new PrismProtocolError(
+      'a block with no parity shards cannot contain this packet',
+    );
+  }
+  if (packet.shardIndex >= packet.parityCount) {
+    throw new PrismProtocolError(
+      'the parity shard index is not below the parity count',
+    );
+  }
+  if (packet.dataCount + packet.parityCount > MAX_FIELD_SHARDS) {
+    throw new PrismProtocolError(
+      'data and parity shards exceed what the field allows',
+    );
+  }
+  if (packet.tailLen === 0) {
+    throw new PrismProtocolError('the final data shard cannot be empty');
+  }
+  if (packet.tailLen > MAX_VIDEO_PAYLOAD) {
+    throw new PrismProtocolError(
+      'the final data shard cannot exceed MAX_VIDEO_PAYLOAD',
+    );
+  }
 }
 
 /**

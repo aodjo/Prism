@@ -118,6 +118,13 @@ enum Command {
         /// Seed for the loss injector, so a failing run repeats exactly.
         #[arg(long, default_value_t = 1)]
         loss_seed: u64,
+
+        /// Send Reed-Solomon parity sized for this much loss, as a percentage.
+        ///
+        /// Omitted means no parity at all. The codec clamps the ratio to ten to twenty
+        /// percent of the block, so a wild figure cannot spend the whole bitrate on repair.
+        #[arg(long)]
+        parity: Option<f64>,
     },
 
     /// Receive frames and report latency.
@@ -240,6 +247,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             bitrate,
             loss,
             loss_seed,
+            parity,
         } => {
             let config = host::HostConfig {
                 peer,
@@ -249,6 +257,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 frames,
                 loss_ppm: percent_to_ppm(loss),
                 loss_seed,
+                parity_loss: parity.map(|percent| (percent.clamp(0.0, 100.0) / 100.0) as f32),
             };
 
             if !encode && !capture {

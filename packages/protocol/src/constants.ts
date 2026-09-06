@@ -37,6 +37,26 @@ export const INPUT_PACKET_LEN = 15;
 export const CURSOR_POSITION_LEN = 18;
 
 /**
+ * Byte length of a parity packet header, including the leading channel tag.
+ *
+ * Deliberately the same as `VIDEO_HEADER_LEN`. A parity shard has to be exactly as long as
+ * the data shards it repairs, so a header even one byte longer would push the packet past
+ * `MAX_PACKET_SIZE` and fragment it.
+ */
+export const FEC_HEADER_LEN = 20;
+
+/** Largest parity shard that fits in one packet. */
+export const MAX_FEC_PAYLOAD = MAX_PACKET_SIZE - FEC_HEADER_LEN;
+
+/**
+ * Most shards a Reed-Solomon block may hold, data and parity together.
+ *
+ * GF(2^8) has 256 elements, and Prism stops one short so a block's shard count fits a
+ * single byte on the wire.
+ */
+export const MAX_FIELD_SHARDS = 255;
+
+/**
  * What an input packet describes.
  *
  * The wire layout is one fixed size for all four, with the two coordinate fields
@@ -61,7 +81,7 @@ export enum MouseButton {
 /**
  * Channel tag carried in the first byte of every packet.
  *
- * A single UDP flow multiplexes all five channels. The tag is read before anything
+ * A single UDP flow multiplexes all six channels. The tag is read before anything
  * else and decides which decoder handles the remaining bytes.
  */
 export enum Channel {
@@ -70,6 +90,7 @@ export enum Channel {
   Audio = 2,
   Input = 3,
   Feedback = 4,
+  Fec = 5,
 }
 
 /**

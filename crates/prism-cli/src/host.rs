@@ -33,6 +33,8 @@ pub struct HostConfig {
     pub loss_ppm: u32,
     /// Seed for the loss injector, so a failing run repeats exactly.
     pub loss_seed: u64,
+    /// Loss estimate to size Reed-Solomon parity against, or `None` to send none.
+    pub parity_loss: Option<f32>,
 }
 
 /// Sends `config.frames` synthetic frames and reports what was transmitted.
@@ -58,6 +60,9 @@ pub fn run(config: HostConfig) -> io::Result<()> {
 
     let mut sender = SliceSender::connect(config.peer)?;
     sender.serve_return_path(true)?;
+    if let Some(loss) = config.parity_loss {
+        sender.enable_parity(loss);
+    }
     if config.loss_ppm > 0 {
         sender.inject_loss(config.loss_ppm, config.loss_seed);
     }
@@ -112,6 +117,9 @@ pub fn run_encoded(
 
     let mut sender = SliceSender::connect(config.peer)?;
     sender.serve_return_path(true)?;
+    if let Some(loss) = config.parity_loss {
+        sender.enable_parity(loss);
+    }
     if config.loss_ppm > 0 {
         sender.inject_loss(config.loss_ppm, config.loss_seed);
     }
@@ -214,6 +222,9 @@ pub fn run_captured(
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     let mut sender = SliceSender::connect(config.peer)?;
     sender.serve_return_path(true)?;
+    if let Some(loss) = config.parity_loss {
+        sender.enable_parity(loss);
+    }
     if config.loss_ppm > 0 {
         sender.inject_loss(config.loss_ppm, config.loss_seed);
     }
@@ -293,6 +304,9 @@ fn report(sender: &SliceSender, elapsed: Duration) {
         elapsed.as_secs_f64(),
         sender.bytes() as f64 * 8.0 / elapsed.as_secs_f64() / 1e6
     );
+    if sender.parity_sent() > 0 {
+        println!("parity  : {} shards sent", sender.parity_sent());
+    }
     sender.report_loss();
     sender.report_feedback();
 }

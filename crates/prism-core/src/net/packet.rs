@@ -40,6 +40,24 @@ pub const INPUT_PACKET_LEN: usize = 15;
 /// Exact byte length of a cursor position message.
 pub const CURSOR_POSITION_LEN: usize = 18;
 
+/// Byte length of a parity packet header, including the leading channel tag.
+///
+/// Deliberately the same as [`VIDEO_HEADER_LEN`]. A parity shard has to be exactly as long
+/// as the data shards it repairs, so a header even one byte longer than the video header
+/// would push the packet past [`MAX_PACKET_SIZE`] and fragment it.
+pub const FEC_HEADER_LEN: usize = 20;
+
+/// Largest parity shard that fits in one packet.
+pub const MAX_FEC_PAYLOAD: usize = MAX_PACKET_SIZE - FEC_HEADER_LEN;
+
+/// Most shards a Reed-Solomon block may hold, data and parity together.
+///
+/// GF(2^8) has 256 elements, and Prism stops one short so a block's shard count fits a
+/// single byte on the wire. Mirrored by `net::fec::MAX_TOTAL_SHARDS`, which is where the
+/// codec enforces it; the wire refuses the same thing so a corrupted header is rejected
+/// before it reaches the codec.
+const MAX_FIELD_SHARDS: usize = 255;
+
 /// Reserved video flag bits; any packet setting one of these is rejected.
 pub const VIDEO_FLAGS_RESERVED_MASK: u8 = 0xf8;
 
@@ -69,6 +87,13 @@ pub enum Channel {
     Input = 3,
     /// Frame acknowledgements and clock sync samples, client to host.
     Feedback = 4,
+    /// Reed-Solomon parity for video slices, host to client.
+    ///
+    /// A separate channel rather than a flag on a video packet, because parity is not a
+    /// fragment of the picture: it has its own header fields, it must not reach the
+    /// reassembler's ordinary path, and a receiver that does not understand it has to be
+    /// able to ignore it wholesale rather than mistake it for missing picture data.
+    Fec = 5,
 }
 
 impl TryFrom<u8> for Channel {
@@ -89,6 +114,7 @@ impl TryFrom<u8> for Channel {
             2 => Ok(Channel::Audio),
             3 => Ok(Channel::Input),
             4 => Ok(Channel::Feedback),
+            5 => Ok(Channel::Fec),
             other => Err(ProtocolError::UnknownChannel(other)),
         }
     }
@@ -188,6 +214,16 @@ pub enum ProtocolError {
     PayloadTooLarge {
         /// Payload length that was rejected.
         actual: usize,
+    },
+
+    /// Parity packet described a block no encoder could have produced.
+    ///
+    /// Refused rather than repaired: the recovery path is driven directly by these counts,
+    /// and a corrupted header would send it looking for shards that do not exist.
+    #[error("invalid parity block: {reason}")]
+    InvalidFecBlock {
+        /// Which part of the description is impossible.
+        reason: &'static str,
     },
 
     /// Cursor position claimed a screen with no area.
@@ -626,6 +662,177 @@ impl ClockPong {
             t2_us: read_u64(bytes, 10),
             t3_us: read_u64(bytes, 18),
         })
+    }
+}
+
+/// One Reed-Solomon parity shard, as carried on [`Channel::Fec`].
+///
+/// Parity is computed per slice, over that slice's own packets. A slice is the unit the
+/// encoder emits and the unit the reassembler already stores as a contiguous shard matrix,
+/// so protecting it needs no rearranging of anything.
+///
+/// `tail_len` is the field that makes recovery correct rather than merely possible. The
+/// reassembler learns a slice's true length from its final packet, so a slice whose final
+/// packet was lost and then rebuilt from parity would have a length of zero and hand the
+/// decoder an empty bitstream — recovered bytes with no framing, and no error anywhere to
+/// say so. Carrying the last shard's length here means the length is known from any parity
+/// packet, whichever data packets went missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FecPacket<'a> {
+    /// Frame the repaired slice belongs to.
+    pub frame_id: u32,
+    /// Slice within that frame this parity repairs.
+    pub slice_id: u16,
+    /// How many data shards the protected block has.
+    pub data_count: u8,
+    /// How many parity shards were generated for it.
+    pub parity_count: u8,
+    /// Which parity shard this packet carries, counted from zero.
+    pub shard_index: u8,
+    /// Bytes in the slice's final data shard, from 1 to [`MAX_VIDEO_PAYLOAD`].
+    ///
+    /// Every other data shard is exactly [`MAX_VIDEO_PAYLOAD`] bytes, so this is the only
+    /// thing needed to recover the slice's true length without its final packet.
+    pub tail_len: u16,
+    /// Host clock at capture time, copied from the frame the slice belongs to.
+    pub capture_ts_us: u64,
+    /// The parity shard, as long as the data shards it repairs.
+    pub payload: &'a [u8],
+}
+
+impl<'a> FecPacket<'a> {
+    /// Returns the true byte length of the slice this parity repairs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{FecPacket, MAX_VIDEO_PAYLOAD};
+    /// let packet = FecPacket {
+    ///     frame_id: 0,
+    ///     slice_id: 0,
+    ///     data_count: 3,
+    ///     parity_count: 1,
+    ///     shard_index: 0,
+    ///     tail_len: 100,
+    ///     capture_ts_us: 0,
+    ///     payload: &[0u8; 4],
+    /// };
+    /// assert_eq!(packet.slice_len(), 2 * MAX_VIDEO_PAYLOAD + 100);
+    /// ```
+    #[must_use]
+    pub fn slice_len(&self) -> usize {
+        (usize::from(self.data_count) - 1) * MAX_VIDEO_PAYLOAD + usize::from(self.tail_len)
+    }
+
+    /// Serialises this parity shard into `buf` and returns how many bytes were written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` cannot hold the packet,
+    /// [`ProtocolError::PayloadTooLarge`] if the shard exceeds [`MAX_FEC_PAYLOAD`], and
+    /// [`ProtocolError::InvalidFecBlock`] if the block description is not one that could
+    /// have been produced.
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        self.validate()?;
+
+        if self.payload.len() > MAX_FEC_PAYLOAD {
+            return Err(ProtocolError::PayloadTooLarge {
+                actual: self.payload.len(),
+            });
+        }
+
+        let total = FEC_HEADER_LEN + self.payload.len();
+        if buf.len() < total {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: total,
+            });
+        }
+
+        buf[0] = Channel::Fec as u8;
+        buf[1..5].copy_from_slice(&self.frame_id.to_le_bytes());
+        buf[5..7].copy_from_slice(&self.slice_id.to_le_bytes());
+        buf[7] = self.data_count;
+        buf[8] = self.parity_count;
+        buf[9] = self.shard_index;
+        buf[10..12].copy_from_slice(&self.tail_len.to_le_bytes());
+        buf[12..20].copy_from_slice(&self.capture_ts_us.to_le_bytes());
+        buf[FEC_HEADER_LEN..total].copy_from_slice(self.payload);
+
+        Ok(total)
+    }
+
+    /// Parses a parity packet, borrowing its shard from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`] for another channel's packet,
+    /// [`ProtocolError::TooShort`] if the header is incomplete, and
+    /// [`ProtocolError::InvalidFecBlock`] if the block description could not have been
+    /// produced by an encoder — which is how a corrupted header is refused rather than
+    /// driving the recovery path with nonsense.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, ProtocolError> {
+        match channel_of(bytes)? {
+            Channel::Fec => {}
+            _ => {
+                return Err(ProtocolError::WrongChannel {
+                    expected: Channel::Fec,
+                    got: bytes[0],
+                });
+            }
+        }
+
+        if bytes.len() < FEC_HEADER_LEN {
+            return Err(ProtocolError::TooShort {
+                actual: bytes.len(),
+                needed: FEC_HEADER_LEN,
+            });
+        }
+
+        let packet = Self {
+            frame_id: u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
+            slice_id: read_u16(bytes, 5),
+            data_count: bytes[7],
+            parity_count: bytes[8],
+            shard_index: bytes[9],
+            tail_len: read_u16(bytes, 10),
+            capture_ts_us: read_u64(bytes, 12),
+            payload: &bytes[FEC_HEADER_LEN..],
+        };
+
+        packet.validate()?;
+
+        Ok(packet)
+    }
+
+    /// Checks that the block this packet describes is one an encoder could have produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::InvalidFecBlock`] naming the field that is impossible.
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let reason = if self.payload.is_empty() {
+            Some("a parity packet carries no shard")
+        } else if self.data_count == 0 {
+            Some("a block with no data shards repairs nothing")
+        } else if self.parity_count == 0 {
+            Some("a block with no parity shards cannot contain this packet")
+        } else if self.shard_index >= self.parity_count {
+            Some("the parity shard index is not below the parity count")
+        } else if usize::from(self.data_count) + usize::from(self.parity_count) > MAX_FIELD_SHARDS {
+            Some("data and parity shards exceed what the field allows")
+        } else if self.tail_len == 0 {
+            Some("the final data shard cannot be empty")
+        } else if usize::from(self.tail_len) > MAX_VIDEO_PAYLOAD {
+            Some("the final data shard cannot exceed MAX_VIDEO_PAYLOAD")
+        } else {
+            None
+        };
+
+        match reason {
+            Some(reason) => Err(ProtocolError::InvalidFecBlock { reason }),
+            None => Ok(()),
+        }
     }
 }
 
