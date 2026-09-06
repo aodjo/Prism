@@ -1,8 +1,9 @@
 # Prism Wire Format v1
 
 All integers are **little-endian**. All packets travel over a single UDP flow and are
-sealed with AES-GCM after the Noise_IK handshake (M5); the layouts below describe the
-**plaintext** that goes inside that seal.
+sealed with ChaCha20-Poly1305 under keys a Noise_IK handshake produced. **Every layout below
+describes the plaintext inside that seal** — nothing in this document ever appears on the
+wire in the form it is written here.
 
 The first byte of every packet is the channel tag.
 
@@ -19,17 +20,72 @@ The first byte of every packet is the channel tag.
 
 | Constant | Value | Reason |
 |---|---|---|
-| `MAX_PACKET_SIZE` | 1200 | Stays under the safe PMTU floor so packets never fragment |
+| `MAX_PACKET_SIZE` | 1200 | What leaves the socket. Stays under the safe PMTU floor so packets never fragment |
+| `SEAL_OVERHEAD` | 24 | 8-byte nonce counter in the clear + 16-byte authentication tag |
+| `MAX_PLAINTEXT_SIZE` | 1176 | `MAX_PACKET_SIZE - SEAL_OVERHEAD`. Every layout below is budgeted against this, not against `MAX_PACKET_SIZE` |
 | `CONTROL_HEADER_LEN` | 2 | Channel tag + control message type |
 | `CLOCK_PING_LEN` | 10 | Fixed size |
 | `CLOCK_PONG_LEN` | 26 | Fixed size |
 | `INPUT_PACKET_LEN` | 15 | Fixed size, every kind |
 | `CURSOR_POSITION_LEN` | 18 | Fixed size |
 | `VIDEO_HEADER_LEN` | 20 | Channel tag + video header |
-| `MAX_VIDEO_PAYLOAD` | 1180 | `MAX_PACKET_SIZE - VIDEO_HEADER_LEN` |
+| `MAX_VIDEO_PAYLOAD` | 1156 | `MAX_PLAINTEXT_SIZE - VIDEO_HEADER_LEN` |
 | `FEEDBACK_PACKET_LEN` | 17 | Fixed size |
 | `FEC_HEADER_LEN` | 20 | Same as the video header, so a parity shard is exactly as long as the data shards it repairs |
-| `MAX_FEC_PAYLOAD` | 1180 | `MAX_PACKET_SIZE - FEC_HEADER_LEN` |
+| `MAX_FEC_PAYLOAD` | 1156 | `MAX_PLAINTEXT_SIZE - FEC_HEADER_LEN` |
+
+## Sealing
+
+Every datagram on the wire is:
+
+```
+[8B nonce counter, little-endian, in the clear][ciphertext][16B Poly1305 tag]
+```
+
+The counter is the only thing an observer can read. The channel tag and every header are
+inside the seal, so a packet's size is all that leaks — not whether it carries video, a
+keystroke, or an acknowledgement.
+
+**Nonce.** 96 bits: the counter in the low 64, zero above. One counter per direction,
+never reused, never allowed to wrap. Reuse would leak both the plaintexts' XOR and the
+authentication key, so a session that reaches the ceiling ends rather than wrapping.
+
+**Replay.** A 64-counter sliding window per direction. The window has to slide rather than
+demand order, because UDP reorders and a receiver insisting on monotonic counters would
+discard good packets on every path with jitter. **The tag is verified before the counter is
+judged** — the other order would let anyone who can guess a counter push the window forward
+without holding the key, and every genuine packet after it would fall outside.
+
+**Cipher.** ChaCha20-Poly1305 rather than AES-256-GCM. Measured on the client machine
+(Apple Silicon, stable Rust), a full 1176-byte packet costs **3.7 us** to seal and open with
+ChaCha against **10.9 us** with AES-GCM, because the pure-Rust `aes` crate reaches its
+hardware instructions on x86 at run time but not on stable aarch64. ChaCha needs no
+per-platform story anywhere.
+
+## Handshake
+
+Two messages, before anything above exists. `Noise_IK_25519_ChaChaPoly_BLAKE2s`, with
+`prism-handshake-v1` as the prologue so the version cannot be stripped or downgraded.
+
+| Message | Direction | Size |
+|---|---|---|
+| init | dialler → answerer | 96 + payload |
+| response | answerer → dialler | 48 + payload |
+
+`IK` means the dialler already knows the answerer's static key — pairing put it there — which
+is what makes one round trip enough. Both sides then check the key they ended up facing
+against what pairing recorded; a peer that does not match gets **silence**, not a refusal,
+because a refusal tells a scan it found a live host.
+
+Neither message is sealed, and neither needs a type byte to be told apart from a sealed
+packet: authentication itself separates them. A sealed packet never verifies as a handshake
+message, and a handshake message never opens under a session key.
+
+**Losing a message.** The dialler resends the *same bytes* until it is answered — a second
+message would carry a second ephemeral key and the answerer would derive keys the dialler
+has discarded. The answerer replies to a repeat with the bytes it sent before, and stays
+ready to do so until the first sealed packet arrives, which is its only proof that its
+answer got through.
 
 ## Video packet (channel 1)
 
@@ -42,7 +98,7 @@ offset  size  field           type   notes
 9       2     pkt_count       u16    total packets in this slice
 11      1     flags           u8     see below
 12      8     capture_ts_us   u64    host clock, microseconds
-20      ..    payload         bytes  <= 1180
+20      ..    payload         bytes  <= 1156
 ```
 
 ### Flags
@@ -216,7 +272,7 @@ offset  size  field           type   notes
 9       1     shard_index     u8     which parity shard this is, from zero
 10      2     tail_len        u16    bytes in the slice's final data shard
 12      8     capture_ts_us   u64    copied from the frame
-20      ..    payload         bytes  one parity shard, exactly 1180 bytes
+20      ..    payload         bytes  one parity shard, exactly 1156 bytes
 ```
 
 The header is exactly as long as the video header, and that is a constraint rather than a
