@@ -12,6 +12,8 @@
 
 #[cfg(target_os = "windows")]
 pub mod nv12;
+#[cfg(target_os = "windows")]
+pub mod nvenc;
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
 
