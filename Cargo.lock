@@ -884,6 +884,7 @@ name = "prism-rendezvous"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "getrandom 0.3.4",
  "prism-core",
 ]
 

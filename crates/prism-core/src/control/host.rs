@@ -317,42 +317,104 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<Atom
 }
 
 /// Binds, becomes reachable, and waits for a paired client to open a session.
+///
+/// Direct first, then through the relay. Punching either works within a couple of round trips
+/// or does not work at all — both routers have already been told to send, and one that will
+/// pass a packet has already passed one — so waiting longer before falling back would only
+/// lengthen a pause somebody is sitting through.
 fn open(
     config: &HostConfig,
     keys: &HostKeys,
     shared: &Shared,
     stop: &AtomicBool,
 ) -> io::Result<SliceSender> {
+    use crate::control::session::{DIRECT_PATIENCE, RELAYED_PATIENCE};
     use crate::net::transport::UdpTransport;
 
     let transport = UdpTransport::bind(config.bind)?;
 
-    if let Some(server) = config.rendezvous {
-        let observed = crate::control::rendezvous::register(&transport, server, &keys.identity)?;
-        if let Ok(mut slot) = shared.observed.lock() {
-            *slot = Some(observed);
-        }
-
-        // Held for the life of the session. Both the registration and the router's mapping
-        // lapse in well under a minute of silence, so a host that went quiet would be
-        // unreachable for the next client with nothing appearing to have failed.
-        let keepalive_stop = Arc::new(AtomicBool::new(false));
-        crate::control::rendezvous::spawn_keepalive(
-            &transport,
-            server,
-            *keys.identity.public(),
-            Arc::clone(&keepalive_stop),
-        )?;
-        std::mem::forget(keepalive_stop);
-
+    let Some(server) = config.rendezvous else {
+        // Reachable only where a client can already address this machine: the same network, a
+        // virtual one, or a forwarded port. Nothing to punch and nothing to fall back to.
         shared.set_phase(Phase::Waiting);
-        let (_, address) =
-            crate::control::rendezvous::await_caller(&transport, server, config.patience)?;
-        let _ = address;
-    } else {
-        shared.set_phase(Phase::Waiting);
+        stopped(stop)?;
+
+        return ready(
+            SliceSender::serve_on(
+                transport,
+                &keys.identity,
+                keys.allowed.clone(),
+                config.patience,
+            )?,
+            config,
+            shared,
+        );
+    };
+
+    let observed = crate::control::rendezvous::register(&transport, server, &keys.identity)?;
+    if let Ok(mut slot) = shared.observed.lock() {
+        *slot = Some(observed);
     }
 
+    // Held for the life of the session. Both the registration and the router's mapping lapse
+    // in well under a minute of silence, so a host that went quiet would be unreachable for
+    // the next client with nothing appearing to have failed.
+    let keepalive_stop = Arc::new(AtomicBool::new(false));
+    crate::control::rendezvous::spawn_keepalive(
+        &transport,
+        server,
+        *keys.identity.public(),
+        Arc::clone(&keepalive_stop),
+    )?;
+    std::mem::forget(keepalive_stop);
+
+    shared.set_phase(Phase::Waiting);
+
+    let (caller, _) =
+        crate::control::rendezvous::await_caller(&transport, server, config.patience)?;
+    stopped(stop)?;
+
+    let direct = SliceSender::serve_on(
+        transport.try_clone()?,
+        &keys.identity,
+        keys.allowed.clone(),
+        DIRECT_PATIENCE,
+    );
+
+    let sender = match direct {
+        Ok(sender) => sender,
+        Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+            // Both routers give every destination a different mapping, so there is no address
+            // at which the two can reach each other. The server carries it instead — at the
+            // cost of its bandwidth and its distance added to every round trip.
+            let relayed = crate::control::rendezvous::relay(
+                &transport,
+                server,
+                *keys.identity.public(),
+                caller,
+            )?;
+
+            SliceSender::serve_on(
+                transport,
+                &keys.identity,
+                keys.allowed.clone(),
+                RELAYED_PATIENCE,
+            )
+            .map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("no session opened through the relay at {}", relayed.address),
+                )
+            })?
+        }
+        Err(err) => return Err(err),
+    };
+
+    ready(sender, config, shared)
+}
+
+/// Fails if the session was stopped before it opened.
+fn stopped(stop: &AtomicBool) -> io::Result<()> {
     if stop.load(Ordering::Relaxed) {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
@@ -360,13 +422,11 @@ fn open(
         ));
     }
 
-    let mut sender = SliceSender::serve_on(
-        transport,
-        &keys.identity,
-        keys.allowed.clone(),
-        config.patience,
-    )?;
+    Ok(())
+}
 
+/// Configures a sender whose handshake has completed, and starts its return path.
+fn ready(mut sender: SliceSender, config: &HostConfig, shared: &Shared) -> io::Result<SliceSender> {
     if let Ok(mut slot) = shared.peer.lock() {
         *slot = Some(sender.peer());
     }

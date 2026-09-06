@@ -37,16 +37,30 @@ use crate::net::transport::UdpTransport;
 /// that a slow path is not mistaken for a lost packet.
 const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How long to keep trying before giving up on the peer entirely.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to try a direct path before deciding it will not open.
+///
+/// Punching either works within a couple of round trips or does not work at all: both routers
+/// have already been told to send, and one that will pass a packet has already passed one.
+/// Waiting longer only delays the fallback a person is waiting through.
+pub const DIRECT_PATIENCE: Duration = Duration::from_secs(4);
+
+/// How long to keep trying once a path is known to work.
+///
+/// Longer, because by this point the only thing that can go wrong is loss, and a relay that
+/// has opened is a path that will carry the next attempt.
+pub const RELAYED_PATIENCE: Duration = Duration::from_secs(10);
 
 /// Largest reply the answering side will write.
 const REPLY_CAPACITY: usize = RESPONSE_OVERHEAD + MAX_HANDSHAKE_PAYLOAD;
 
-/// Runs the dialling side of a handshake on a connected socket.
+/// Runs the dialling side of a handshake against `peer`.
 ///
-/// The socket's read timeout is left set to [`RETRY_INTERVAL`]; the caller sets whatever it
-/// wants for the session that follows.
+/// The socket is left unconnected. That matters: if the handshake times out the caller may
+/// want to try again through a relay, and a connected socket refuses to send anywhere else —
+/// so the socket is connected only once it is settled where the session will run.
+///
+/// The read timeout is left set to [`RETRY_INTERVAL`]; the caller sets whatever it wants for
+/// the session that follows.
 ///
 /// # Errors
 ///
@@ -55,29 +69,38 @@ const REPLY_CAPACITY: usize = RESPONSE_OVERHEAD + MAX_HANDSHAKE_PAYLOAD;
 /// underlying [`io::Error`] for a socket failure.
 pub fn dial(
     transport: &UdpTransport,
+    peer: SocketAddr,
     identity: &Identity,
     peer_key: &[u8; KEY_LEN],
+    patience: Duration,
 ) -> io::Result<Established> {
     let mut initiator =
         Initiator::new(identity, peer_key, &[]).map_err(|err| io::Error::other(err.to_string()))?;
 
     transport.set_read_timeout(Some(RETRY_INTERVAL))?;
 
-    let give_up = Instant::now() + DIAL_TIMEOUT;
+    let give_up = Instant::now() + patience;
     let mut buf = [0u8; MAX_PACKET_SIZE];
 
     while Instant::now() < give_up {
-        transport.send(initiator.first_message())?;
+        transport.send_to(initiator.first_message(), peer)?;
 
         let retry_at = Instant::now() + RETRY_INTERVAL;
         while Instant::now() < retry_at {
-            let bytes = match transport.recv_into(&mut buf) {
-                Ok(bytes) => bytes,
+            let (len, from) = match transport.recv_from_into(&mut buf) {
+                Ok((bytes, from)) => (bytes.len(), from),
                 Err(err) if is_timeout(&err) => break,
                 Err(err) => return Err(err),
             };
 
-            if !initiator.accept(bytes) {
+            // Only the address being dialled. Anything else is a stray packet or a scan, and
+            // the handshake would refuse it anyway — but refusing it here keeps the count of
+            // what the handshake rejected honest.
+            if from != peer {
+                continue;
+            }
+
+            if !initiator.accept(&buf[..len]) {
                 continue;
             }
 

@@ -234,9 +234,25 @@ struct DecodeReport {
 /// Returns [`io::ErrorKind::InvalidInput`] if neither an address nor a server was given,
 /// [`io::ErrorKind::NotFound`] if the server knows no such host, and the underlying
 /// [`io::Error`] for a socket failure.
-fn locate(transport: &UdpTransport, config: &ClientConfig) -> io::Result<SocketAddr> {
+fn open(
+    transport: &UdpTransport,
+    config: &ClientConfig,
+) -> io::Result<(prism_core::net::handshake::Established, SocketAddr)> {
+    use prism_core::control::rendezvous;
+    use prism_core::control::session::{DIRECT_PATIENCE, RELAYED_PATIENCE, dial};
+
+    // An address given by hand is one somebody has arranged to be reachable, so there is
+    // nothing to fall back to and nothing to punch.
     if let Some(host) = config.host {
-        return Ok(host);
+        let established = dial(
+            transport,
+            host,
+            &config.identity,
+            &config.peer_key,
+            RELAYED_PATIENCE,
+        )?;
+
+        return Ok((established, host));
     }
 
     let Some(server) = config.rendezvous else {
@@ -246,23 +262,52 @@ fn locate(transport: &UdpTransport, config: &ClientConfig) -> io::Result<SocketA
         ));
     };
 
-    let found = prism_core::control::rendezvous::lookup(
-        transport,
-        server,
-        config.peer_key,
-        *config.identity.public(),
-    )?;
+    let me = *config.identity.public();
+    let found = rendezvous::lookup(transport, server, config.peer_key, me)?;
     println!(
         "client: the host is at {}, and this machine appears at {}",
         found.address, found.observed
     );
 
-    // Both sides punch. The handshake message this side is about to send repeatedly is its
-    // own punch, but the host's router will only pass it once the host has sent outward here
-    // — which the server has just told it to do.
-    prism_core::control::rendezvous::punch(transport, found.address)?;
+    // Both sides punch. The handshake message about to be sent repeatedly is this side's own
+    // punch, but the host's router will only pass it once the host has sent outward here —
+    // which the server has just told it to do.
+    rendezvous::punch(transport, found.address)?;
 
-    Ok(found.address)
+    match dial(
+        transport,
+        found.address,
+        &config.identity,
+        &config.peer_key,
+        DIRECT_PATIENCE,
+    ) {
+        Ok(established) => {
+            println!("client: connected directly to {}", found.address);
+
+            return Ok((established, found.address));
+        }
+        Err(err) if err.kind() != io::ErrorKind::TimedOut => return Err(err),
+        Err(_) => {}
+    }
+
+    // Punching failed, which means both routers hand out a different mapping for every
+    // destination. There is no address to reach the host at, so the server carries it — at the
+    // cost of its bandwidth and its distance added to every round trip, which is why this is
+    // reached rather than chosen.
+    println!("client: no direct path opened; asking the rendezvous server to relay");
+
+    let relayed = rendezvous::relay(transport, server, config.peer_key, me)?;
+    let established = dial(
+        transport,
+        relayed.address,
+        &config.identity,
+        &config.peer_key,
+        RELAYED_PATIENCE,
+    )?;
+
+    println!("client: relaying through {}", relayed.address);
+
+    Ok((established, relayed.address))
 }
 
 /// Receives packets until the frame budget or the idle timeout is reached.
@@ -281,19 +326,21 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     } = hooks;
     let offset = offset.unwrap_or_else(|| Arc::new(AtomicI64::new(OFFSET_UNKNOWN)));
     let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
-    let host = locate(&transport, &config)?;
-    transport.connect(host)?;
 
     println!(
-        "client: connecting to {host} ({} frames in flight, decode {})",
+        "client: connecting ({} frames in flight, decode {})",
         config.in_flight,
         if config.decode { "on" } else { "off" }
     );
 
     // Nothing is read as a packet until the handshake completes, and it only completes with
     // the host pairing recorded: the first message is encrypted to that key and no other.
-    let established =
-        prism_core::control::session::dial(&transport, &config.identity, &config.peer_key)?;
+    let (established, host) = open(&transport, &config)?;
+
+    // Connected only now that it is settled where the session runs. Doing it earlier would
+    // have made the fallback to a relay impossible: a connected socket refuses to send
+    // anywhere else.
+    transport.connect(host)?;
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
     println!(

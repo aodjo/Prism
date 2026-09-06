@@ -26,10 +26,14 @@ use std::net::{SocketAddr, UdpSocket};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use std::sync::{Arc, Mutex};
+
 use clap::Parser;
-use prism_core::net::rendezvous::{MAX_MESSAGE_LEN, Message, challenge};
+use prism_core::net::packet::MAX_PACKET_SIZE;
+use prism_core::net::rendezvous::{MAX_MESSAGE_LEN, Message, RELAY_TOKEN_LEN, challenge};
 
 use prism_rendezvous::registry::{Proved, Registry};
+use prism_rendezvous::relay::{Forward, Relays};
 
 /// How often expired entries are swept out.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
@@ -54,6 +58,14 @@ struct Cli {
     /// Print a line for every message, rather than a summary every minute.
     #[arg(long)]
     verbose: bool,
+
+    /// Refuse to carry traffic for peers that could not reach each other directly.
+    ///
+    /// Relaying costs this machine's bandwidth and adds its distance to every round trip, so
+    /// an operator who does not want to pay either can turn it off. Peers behind two symmetric
+    /// NATs then cannot connect at all, which is the honest outcome.
+    #[arg(long)]
+    no_relay: bool,
 }
 
 /// Parses the command line and runs the server.
@@ -82,6 +94,22 @@ fn serve(cli: &Cli) -> io::Result<()> {
 
     println!("prism-rendezvous: listening on {}", socket.local_addr()?);
 
+    // The relay lives on its own port and its own thread. Its own port so a sealed packet
+    // never has to be told apart from a signalling message — see `relay` for why guessing
+    // would be a bug rather than an inefficiency — and its own thread because it carries tens
+    // of megabits while this loop handles a message every few minutes.
+    let relays = Arc::new(Mutex::new(Relays::new()));
+    let relay_port = if cli.no_relay {
+        println!(
+            "prism-rendezvous: relaying is off; peers behind two symmetric NATs cannot connect"
+        );
+        None
+    } else {
+        let port = spawn_relay(cli.bind, Arc::clone(&relays))?;
+        println!("prism-rendezvous: relaying on port {port}");
+        Some(port)
+    };
+
     let mut registry = Registry::new();
     let mut buf = [0u8; MAX_MESSAGE_LEN];
     let mut reply = [0u8; MAX_MESSAGE_LEN];
@@ -94,12 +122,19 @@ fn serve(cli: &Cli) -> io::Result<()> {
 
         if now.duration_since(swept) >= SWEEP_INTERVAL {
             registry.expire(now);
+            if let Ok(mut relays) = relays.lock() {
+                relays.expire(now);
+            }
             swept = now;
         }
 
         if now.duration_since(reported) >= REPORT_INTERVAL {
+            let (open, waiting) = relays
+                .lock()
+                .map_or((0, 0), |relays| (relays.open(), relays.waiting()));
             println!(
-                "prism-rendezvous: {} hosts registered, {} challenges outstanding",
+                "prism-rendezvous: {} hosts registered, {} challenges outstanding, \
+                 {open} relays open ({waiting} waiting)",
                 registry.registered(),
                 registry.outstanding()
             );
@@ -126,14 +161,26 @@ fn serve(cli: &Cli) -> io::Result<()> {
             println!("prism-rendezvous: {from} sent {}", name_of(&message));
         }
 
-        handle(&socket, &mut registry, &mut reply, message, from, now);
+        handle(
+            &socket,
+            &mut registry,
+            &relays,
+            relay_port,
+            &mut reply,
+            message,
+            from,
+            now,
+        );
     }
 }
 
 /// Acts on one message.
+#[allow(clippy::too_many_arguments)]
 fn handle(
     socket: &UdpSocket,
     registry: &mut Registry,
+    relays: &Mutex<Relays>,
+    relay_port: Option<u16>,
     reply: &mut [u8],
     message: Message,
     from: SocketAddr,
@@ -198,14 +245,129 @@ fn handle(
             );
         }
 
+        Message::Relay { host, client } => {
+            let Some(port) = relay_port else {
+                return;
+            };
+            if !registry.may_connect(from, now) {
+                return;
+            }
+
+            // Only a pair the server has already introduced. Without this anyone could ask it
+            // to carry traffic for two keys it has never heard of, which is a machine
+            // volunteering its bandwidth to strangers.
+            let Some(address) = registry.lookup(&host, now) else {
+                send(socket, reply, &Message::UnknownHost, from);
+                return;
+            };
+
+            let Ok(token) = relay_token() else {
+                return;
+            };
+
+            let allocated = relays
+                .lock()
+                .is_ok_and(|mut relays| relays.allocate(token, now));
+
+            if !allocated {
+                return;
+            }
+
+            // Both sides are told at once. They present the token at the relay port and the
+            // first two addresses to do so are paired, which is why the token has to be
+            // unguessable: it is the only thing that says which two.
+            let offer = Message::Relaying { port, token };
+            send(socket, reply, &offer, from);
+            send(socket, reply, &offer, address);
+
+            // The caller's key is carried so a log line can name who asked. The server cannot
+            // check it — it holds no keys — and does not need to: the session's own handshake
+            // is what decides who is at each end, relayed or not.
+            let _ = client;
+        }
+
         // Messages the server sends rather than receives. Arriving here means a peer is
         // confused or someone is probing; either way there is nothing to answer.
         Message::Challenge { .. }
         | Message::Registered { .. }
         | Message::Incoming { .. }
         | Message::Found { .. }
+        | Message::Relaying { .. }
         | Message::UnknownHost => {}
     }
+}
+
+/// Starts the thread that carries relayed traffic.
+///
+/// Binds the port after the signalling one, on the same address, and returns it so peers can
+/// be told where to send.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the port cannot be bound, which usually means
+/// something else already has it.
+fn spawn_relay(bind: SocketAddr, relays: Arc<Mutex<Relays>>) -> io::Result<u16> {
+    let mut relay_bind = bind;
+    relay_bind.set_port(bind.port().wrapping_add(1));
+
+    let socket = UdpSocket::bind(relay_bind)?;
+    let port = socket.local_addr()?.port();
+    socket.set_read_timeout(Some(RECV_TIMEOUT))?;
+
+    std::thread::Builder::new()
+        .name("prism-relay".into())
+        .spawn(move || {
+            // A full packet, because what arrives here is a session's own traffic rather than
+            // a signalling message.
+            let mut buf = [0u8; MAX_PACKET_SIZE];
+
+            loop {
+                let Ok((len, from)) = socket.recv_from(&mut buf) else {
+                    continue;
+                };
+
+                let now = Instant::now();
+                let Ok(mut held) = relays.lock() else {
+                    return;
+                };
+
+                match held.accept(from, &buf[..len], now) {
+                    // Forwarded byte for byte. No header, no rewriting, no length change: a
+                    // relayed session and a direct one are the same session.
+                    Forward::To(peer) => {
+                        drop(held);
+                        let _ = socket.send_to(&buf[..len], peer);
+                    }
+                    Forward::Registered => {
+                        drop(held);
+                        let _ = socket.send_to(&buf[..len], from);
+                    }
+                    Forward::Opened(other) => {
+                        drop(held);
+                        // Both sides are told, so the one that was already waiting stops
+                        // presenting its token and starts sending.
+                        let _ = socket.send_to(&buf[..len], from);
+                        let _ = socket.send_to(&buf[..len], other);
+                    }
+                    Forward::Ignored => {}
+                }
+            }
+        })?;
+
+    Ok(port)
+}
+
+/// Makes a token for one relay session.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the platform has no usable randomness, which is a
+/// condition no session should be allocated under.
+fn relay_token() -> io::Result<[u8; RELAY_TOKEN_LEN]> {
+    let mut token = [0u8; RELAY_TOKEN_LEN];
+    getrandom::fill(&mut token).map_err(|err| io::Error::other(err.to_string()))?;
+
+    Ok(token)
 }
 
 /// Sends one message, dropping it if the socket refuses.
@@ -230,6 +392,8 @@ fn name_of(message: &Message) -> &'static str {
         Message::Found { .. } => "found",
         Message::UnknownHost => "unknown-host",
         Message::Keepalive { .. } => "keepalive",
+        Message::Relay { .. } => "relay",
+        Message::Relaying { .. } => "relaying",
     }
 }
 

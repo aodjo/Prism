@@ -41,6 +41,14 @@ use crate::net::handshake::KEY_LEN;
 /// Bytes in the secret a challenge carries.
 pub const PROOF_LEN: usize = 16;
 
+/// Bytes in a relay token.
+///
+/// Eight random bytes, which is what the two peers present at the relay port to be paired with
+/// each other. It authorises nothing — the session's own handshake does that — so its only job
+/// is to be unguessable enough that a stranger cannot be spliced into somebody's relay by
+/// chance. Sixty-four bits is far past that.
+pub const RELAY_TOKEN_LEN: usize = 8;
+
 /// Bytes of authentication tag on a sealed challenge.
 const TAG_LEN: usize = 16;
 
@@ -116,6 +124,10 @@ mod tag {
     pub const UNKNOWN_HOST: u8 = 0x08;
     /// A host keeping its registration and its NAT mapping alive.
     pub const KEEPALIVE: u8 = 0x09;
+    /// A peer asking for the server to carry its traffic after punching failed.
+    pub const RELAY: u8 = 0x0a;
+    /// The server naming the port and token to relay through.
+    pub const RELAYING: u8 = 0x0b;
 }
 
 /// One message in the rendezvous protocol.
@@ -188,6 +200,34 @@ pub enum Message {
     /// indistinguishable from here and the client can say only the former.
     UnknownHost,
 
+    /// A peer asks the server to carry its traffic.
+    ///
+    /// Sent when punching has failed, which is what happens when both ends are behind a NAT
+    /// that gives each destination a different mapping. Relaying is the exception path: it
+    /// costs the server's bandwidth and adds its distance to the round trip, so it is asked
+    /// for rather than used by default.
+    Relay {
+        /// The host of the pair.
+        host: [u8; KEY_LEN],
+        /// The client of the pair.
+        client: [u8; KEY_LEN],
+    },
+
+    /// The server names where to send and what to present.
+    ///
+    /// Sent to both peers. Each then sends its token to the relay port, and once both have
+    /// been seen the server forwards between the two addresses verbatim.
+    Relaying {
+        /// The port to send to, on the same address the server was reached at.
+        ///
+        /// A different port from signalling, so a datagram arriving there needs no inspection
+        /// to know it is traffic to forward — which is what keeps the relay from having to
+        /// parse, and therefore from being able to misread, a sealed packet.
+        port: u16,
+        /// What to present at that port.
+        token: [u8; RELAY_TOKEN_LEN],
+    },
+
     /// A host holds its registration and its router's mapping open.
     ///
     /// A NAT mapping expires after tens of seconds of silence, so a host that only spoke at
@@ -248,6 +288,16 @@ impl Message {
                 writer.byte(tag::KEEPALIVE)?;
                 writer.key(host)?;
             }
+            Self::Relay { host, client } => {
+                writer.byte(tag::RELAY)?;
+                writer.key(host)?;
+                writer.key(client)?;
+            }
+            Self::Relaying { port, token } => {
+                writer.byte(tag::RELAYING)?;
+                writer.bytes(&port.to_le_bytes())?;
+                writer.bytes(token)?;
+            }
         }
 
         Ok(writer.written())
@@ -295,6 +345,14 @@ impl Message {
             tag::KEEPALIVE => Self::Keepalive {
                 host: reader.key("keepalive")?,
             },
+            tag::RELAY => Self::Relay {
+                host: reader.key("relay")?,
+                client: reader.key("relay")?,
+            },
+            tag::RELAYING => Self::Relaying {
+                port: u16::from_le_bytes(reader.array("relaying")?),
+                token: reader.array("relaying")?,
+            },
             other => return Err(RendezvousError::UnknownType { tag: other }),
         };
 
@@ -318,6 +376,8 @@ fn kind_of(tag: u8) -> &'static str {
         tag::FOUND => "found",
         tag::UNKNOWN_HOST => "unknown-host",
         tag::KEEPALIVE => "keepalive",
+        tag::RELAY => "relay",
+        tag::RELAYING => "relaying",
         _ => "unknown",
     }
 }

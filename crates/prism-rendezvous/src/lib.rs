@@ -7,3 +7,4 @@
 //! See the binary's own documentation for what the server is trusted with, which is nothing.
 
 pub mod registry;
+pub mod relay;

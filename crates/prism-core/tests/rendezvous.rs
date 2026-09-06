@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 
 use prism_core::net::handshake::Identity;
 use prism_core::net::rendezvous::{
-    MAX_MESSAGE_LEN, Message, PROOF_LEN, RendezvousError, answer, challenge,
+    MAX_MESSAGE_LEN, Message, PROOF_LEN, RELAY_TOKEN_LEN, RendezvousError, answer, challenge,
 };
 
 /// A key that is not all one byte, so a field-order mistake would show.
@@ -59,6 +59,14 @@ fn every_message() -> Vec<Message> {
         },
         Message::UnknownHost,
         Message::Keepalive { host: HOST },
+        Message::Relay {
+            host: HOST,
+            client: CLIENT,
+        },
+        Message::Relaying {
+            port: 47_301,
+            token: [0x5a, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
+        },
     ]
 }
 
@@ -103,7 +111,7 @@ fn an_ipv6_address_survives_intact() {
 fn an_unknown_type_byte_is_refused() {
     // The version after this one will send messages this one has never heard of, and acting
     // on a message only half understood is how a parser becomes a vulnerability.
-    for tag in [0x00u8, 0x0a, 0x7f, 0xff] {
+    for tag in [0x00u8, 0x0c, 0x7f, 0xff] {
         assert_eq!(
             Message::decode(&[tag]),
             Err(RendezvousError::UnknownType { tag })
@@ -265,4 +273,18 @@ fn each_challenge_is_new() {
 
     assert_ne!(first, second);
     assert_ne!(first_secret, second_secret);
+}
+
+#[test]
+fn a_relay_token_is_shorter_than_the_shortest_sealed_packet() {
+    // The relay tells a peer presenting its token from a peer sending traffic by length alone.
+    // That is only safe while a token cannot be as long as a packet, and this is where that
+    // stops being an assumption.
+    const {
+        assert!(
+            RELAY_TOKEN_LEN < prism_core::net::packet::SEAL_OVERHEAD,
+            "a token is as long as the shortest sealed packet, so the relay cannot tell them \
+             apart"
+        );
+    };
 }

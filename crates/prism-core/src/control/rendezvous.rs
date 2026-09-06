@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::net::handshake::{Identity, KEY_LEN};
-use crate::net::rendezvous::{MAX_MESSAGE_LEN, Message, answer};
+use crate::net::rendezvous::{MAX_MESSAGE_LEN, Message, RELAY_TOKEN_LEN, answer};
 use crate::net::transport::UdpTransport;
 
 /// How long to wait for the server before asking again.
@@ -305,4 +305,98 @@ fn is_timeout(err: &io::Error) -> bool {
         err.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
     )
+}
+
+/// Where a relay was opened and how to reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Relayed {
+    /// The address to send the session's traffic to from now on.
+    pub address: SocketAddr,
+}
+
+/// Asks the server to carry this session's traffic, and waits for it to open.
+///
+/// Called after punching has failed, which is what happens when both ends sit behind a NAT
+/// that gives every destination a different mapping. Both peers are told the same token; each
+/// presents it at the relay port and the server pairs the first two addresses that do.
+///
+/// The session that follows is byte for byte the session that would have run directly. The
+/// server holds no key and forwards without looking, so relaying costs latency and the
+/// server's bandwidth, and costs nothing in what the peers can prove about each other.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] if the server will not relay — it may have been started
+/// with relaying off, or be full — and [`io::ErrorKind::TimedOut`] if the relay never opens,
+/// which means the other peer never presented its token.
+pub fn relay(
+    transport: &UdpTransport,
+    server: SocketAddr,
+    host: [u8; KEY_LEN],
+    client: [u8; KEY_LEN],
+) -> io::Result<Relayed> {
+    let mut out = [0u8; MAX_MESSAGE_LEN];
+    let mut buf = [0u8; MAX_MESSAGE_LEN];
+
+    transport.set_read_timeout(Some(RETRY_INTERVAL))?;
+    let give_up = Instant::now() + SERVER_TIMEOUT;
+
+    let request = Message::Relay { host, client };
+    let mut offered: Option<(SocketAddr, [u8; RELAY_TOKEN_LEN])> = None;
+
+    while Instant::now() < give_up {
+        match offered {
+            // Still asking for a relay.
+            None => send(transport, &mut out, &request, server)?,
+            // Presenting the token at the relay port until the server answers, which it does
+            // once the other peer has presented the same one.
+            Some((relay_address, token)) => {
+                transport.send_to(&token, relay_address)?;
+            }
+        }
+
+        let retry_at = Instant::now() + RETRY_INTERVAL;
+        while Instant::now() < retry_at {
+            let (len, from) = match transport.recv_from_into(&mut buf) {
+                Ok((bytes, from)) => (bytes.len(), from),
+                Err(err) if is_timeout(&err) => break,
+                Err(err) => return Err(err),
+            };
+
+            // The relay answers with the token itself, from the relay port. Nothing else on
+            // this socket looks like that, and it is the only thing that says the relay is
+            // carrying traffic rather than merely allocated.
+            if let Some((relay_address, token)) = offered {
+                if from == relay_address && buf[..len] == token {
+                    return Ok(Relayed {
+                        address: relay_address,
+                    });
+                }
+            }
+
+            if from != server {
+                continue;
+            }
+
+            match Message::decode(&buf[..len]) {
+                Ok(Message::Relaying { port, token }) => {
+                    let mut relay_address = server;
+                    relay_address.set_port(port);
+                    offered = Some((relay_address, token));
+                }
+                Ok(Message::UnknownHost) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "the rendezvous server will not relay for this pair",
+                    ));
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "the relay never opened, so the other side did not arrive",
+    ))
 }
