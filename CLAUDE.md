@@ -80,6 +80,30 @@ TS(`vitest`) 양쪽이 같은 벡터로 테스트하며, 포맷을 바꾸면 벡
 - 캡처된 GPU 텍스처를 CPU로 내리지 않는다 (제로카피 필수)
 
 
+## README
+
+`README.md`는 **저장소 소유자가 직접 작성한다.** 에이전트는 생성하지도, 수정하지도 않는다.
+프로젝트 설명이 필요하면 `docs/` 아래에 쓴다.
+
+## 브랜치 전략 (git flow)
+
+| 브랜치 | 역할 | 분기 출발 | 병합 대상 |
+|---|---|---|---|
+| `main` | 릴리스만. 모든 커밋에 `v*` 태그 | — | — |
+| `develop` | 통합 브랜치. 평소 작업의 기준점 | `main` | — |
+| `feature/*` | 기능 개발 | `develop` | `develop` |
+| `bugfix/*` | `develop`의 버그 수정 | `develop` | `develop` |
+| `release/*` | 릴리스 준비 (버전 범프, 안정화) | `develop` | `main` + `develop` |
+| `hotfix/*` | 배포본 긴급 수정 | `main` | `main` + `develop` |
+
+- **`main`과 `develop`에 직접 푸시하지 않는다.** PR로만 병합한다.
+- 마일스톤 단위 작업은 `feature/m1-vertical-slice` 처럼 마일스톤 번호를 붙인다.
+- 태그는 `v0.1.0` 형식. `release/*`를 `main`에 병합할 때만 붙인다.
+- CI는 `main`·`develop` 푸시와 두 브랜치를 향한 PR에서 돈다.
+
+`git flow` CLI 없이 순수 git으로도 동일하게 운용 가능하다. CLI를 쓰려면
+`brew install git-flow-avh` 후 `git flow init -d` (설정은 이미 `.git/config`에 있음).
+
 ## 커밋 메시지 컨벤션
 
 Conventional Commits를 따른다. **영문 한 줄**로만 작성한다.
