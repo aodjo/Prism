@@ -288,6 +288,28 @@ macOS ARM64 호스트 → Windows 11 ARM64 클라이언트(UTM VM), 실제 네�
 두 시계가 어긋나 뺄셈이 음수가 되고 `saturating_sub`가 0으로 뭉갠 결과였다. 완벽한 지연처럼 보이는 거짓 숫자였다.
 이제 측정 불가를 명시적으로 보고한다. **M2의 클럭 동기화는 선택이 아니라 두 머신 측정의 전제 조건이다.**
 
+### Windows 캡처 (WGC) 첫 동작 (2026-09-06)
+
+Windows 11 amd64 VM(UTM, GPU 패스스루 없음)에서 `Windows.Graphics.Capture`가 동작한다.
+
+| 항목 | 결과 |
+|---|---|
+| 세션 | 1280x800, D3D11 하드웨어 디바이스 생성 성공 |
+| 텍스처 | `DXGI_FORMAT_B8G8R8A8_UNORM`, `D3D11_USAGE_DEFAULT` |
+| 바인드 플래그 | `SHADER_RESOURCE \| RENDER_TARGET`, CPU 접근 플래그 0 |
+
+바인드 플래그와 CPU 접근 0이 **제로카피 계약 그 자체다.** 인코더가 그대로 바인드할 수 있고
+CPU가 읽을 수 없다는 것은 GPU가 사본을 만들지 않았다는 뜻이다.
+
+**처리량은 이 VM에서 측정할 수 없다.** 39프레임/10초(3.9 fps)가 나왔고 화면을 계속 바꿔도 오르지 않는데,
+원인은 코드가 아니다 — `Microsoft Basic Display Adapter`가 **`CurrentRefreshRate: 1`(1 Hz)**을 보고한다.
+WGC는 화면이 바뀔 때만 프레임을 주고, 이 가상 디스플레이는 사실상 갱신되지 않는다.
+**실측은 NVIDIA PC가 필요하다.** 그래서 테스트는 프레임레이트를 일절 단언하지 않는다 —
+여기서 잰 숫자는 아무 의미가 없다.
+
+`hardware=true`가 나온 것은 뜻밖이다. Basic Display Adapter인데도 `D3D_DRIVER_TYPE_HARDWARE`로
+디바이스가 만들어졌다. WARP 폴백은 그래서 이번엔 쓰이지 않았지만, 없으면 언젠가 막힐 경로라 남겨둔다.
+
 ### 인코더: LTR은 안 되고, 진짜 문제는 다른 데 있었다 (2026-09-06)
 
 **Apple Silicon 하드웨어 H.264 인코더는 `EnableLTR`을 거부한다.** 실제로 열어서 확인한 결과다
