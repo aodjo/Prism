@@ -29,3 +29,6 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }
 objc2-metal = { version = "0.3", features = ["MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLResource", "MTLRenderPass", "MTLRenderCommandEncoder", "MTLPixelFormat", "MTLTypes", "MTLDrawable", "MTLBlitCommandEncoder"] }
 objc2-video-toolbox = { version = "0.3", features = ["VTBase", "VTErrors", "VTSession", "VTCompressionSession", "VTCompressionProperties", "VTDecompressionSession", "VTDecompressionProperties", "objc2-core-media", "objc2-core-video", "objc2"] }
+objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShareableContent", "SCError"] }
+block2 = "0.6.2"
+dispatch2 = "0.3.1"

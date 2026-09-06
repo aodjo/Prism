@@ -124,7 +124,7 @@ pub fn run_encoded(
 
         crate::pattern::paint(&mut picture, frame_id as usize)?;
         let capture_ts_us = now_us();
-        encoder.encode(&picture, capture_ts_us, frame_id == 0)?;
+        encoder.encode(picture.pixel_buffer(), capture_ts_us, frame_id == 0)?;
 
         let Some(frame) = encoder.poll(Duration::from_millis(200)) else {
             dropped += 1;
@@ -153,6 +153,94 @@ pub fn run_encoded(
         println!("host: {dropped} frames produced nothing within the encode deadline");
     }
 
+    Ok(())
+}
+
+/// Captures the screen, encodes it, and sends the result.
+///
+/// The capture timestamp is taken when the compositor hands the frame over, so the
+/// latency the client measures covers everything from that moment onward.
+///
+/// # Errors
+///
+/// Returns an error if capture cannot start — most often because Screen Recording has not
+/// been granted — or if the encoder or socket fails.
+#[cfg(target_os = "macos")]
+pub fn run_captured(
+    config: HostConfig,
+    bitrate_bps: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use prism_core::capture::CaptureConfig;
+    use prism_core::capture::screencapturekit::ScreenCapture;
+    use prism_core::encode::videotoolbox::VideoToolboxEncoder;
+
+    let mut capture = ScreenCapture::start(CaptureConfig {
+        fps: config.fps,
+        width,
+        height,
+        ..CaptureConfig::default()
+    })?;
+
+    let (width, height) = (capture.width(), capture.height());
+    let encoder_config = prism_core::encode::EncoderConfig {
+        width,
+        height,
+        fps: config.fps,
+        bitrate_bps,
+        max_slice_bytes: bitrate_bps / 8 / config.fps.max(1) / 4,
+    };
+
+    let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
+    let mut sender = SliceSender::connect(config.peer)?;
+
+    println!(
+        "host: capturing the screen at {width}x{height} {} fps, {} kbps, to {}",
+        config.fps,
+        bitrate_bps / 1000,
+        config.peer
+    );
+
+    let start = Instant::now();
+    let mut sent_frames = 0u32;
+    let mut idle = 0u32;
+
+    while sent_frames < config.frames {
+        let Some(captured) = capture.poll(Duration::from_millis(500)) else {
+            idle += 1;
+            if idle > 20 {
+                return Err("the compositor stopped delivering frames".into());
+            }
+            continue;
+        };
+        idle = 0;
+
+        let capture_ts_us = captured.capture_ts_us;
+        encoder.encode(captured.pixel_buffer(), capture_ts_us, sent_frames == 0)?;
+
+        let Some(frame) = encoder.poll(Duration::from_millis(200)) else {
+            continue;
+        };
+
+        let is_idr = frame.is_idr;
+        let last = frame.slices.len() - 1;
+        for slice_id in 0..frame.slices.len() {
+            let data = frame.slice(slice_id).expect("slice index is in range");
+            sender.send_slice(
+                sent_frames,
+                slice_id as u16,
+                data,
+                frame.pts_us,
+                is_idr,
+                slice_id == last,
+            )?;
+        }
+
+        sent_frames += 1;
+    }
+
+    report(&sender, start.elapsed());
     Ok(())
 }
 
