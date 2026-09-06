@@ -166,6 +166,8 @@ pub fn run_encoded(
         pace(start, interval, frame_id);
         sender.send_cursor()?;
 
+        follow_target(&mut encoder, &sender);
+
         crate::pattern::paint(&mut picture, frame_id as usize)?;
         let capture_ts_us = now_us();
         encoder.encode(picture.pixel_buffer(), capture_ts_us, frame_id == 0)?;
@@ -271,6 +273,7 @@ pub fn run_captured(
         };
         idle = 0;
         sender.send_cursor()?;
+        follow_target(&mut encoder, &sender);
 
         let capture_ts_us = captured.capture_ts_us;
         encoder.encode(captured.pixel_buffer(), capture_ts_us, sent_frames == 0)?;
@@ -332,6 +335,28 @@ fn report(sender: &SliceSender, elapsed: Duration) {
     }
     sender.report_loss();
     sender.report_feedback();
+}
+
+/// Points the encoder at whatever bitrate the congestion controller currently wants.
+///
+/// The pacer follows the controller on its own, but pacing is not an actuator: slowing the
+/// wire while the encoder keeps producing the same bytes moves the queue into the host
+/// instead of removing it. This is the half that changes how much there is to send.
+///
+/// A refusal is reported once and then ignored. A session that keeps running at the old
+/// rate is a worse picture than asked for; a session that stops is no picture at all.
+#[cfg(target_os = "macos")]
+fn follow_target(
+    encoder: &mut prism_core::encode::videotoolbox::VideoToolboxEncoder,
+    sender: &SliceSender,
+) {
+    let Some(target) = sender.target_bps() else {
+        return;
+    };
+
+    if let Err(err) = encoder.set_bitrate_bps(target) {
+        eprintln!("host: the encoder would not take {target} bps: {err}");
+    }
 }
 
 /// Returns how many bytes this frame may carry, given what the controller wants.
