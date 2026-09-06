@@ -21,7 +21,7 @@ use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags, kCMVideoCodecType_H2
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
     CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-    CVPixelBufferUnlockBaseAddress,
+    CVPixelBufferUnlockBaseAddress, kCVPixelBufferMetalCompatibilityKey,
 };
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSession, VTSessionSetProperty,
@@ -77,6 +77,7 @@ impl Nv12Frame {
     ///
     /// Returns [`EncodeError::InputBuffer`] if CoreVideo will not allocate the buffer.
     pub fn new(width: u32, height: u32) -> Result<Self, EncodeError> {
+        let attributes = surface_backed_attributes();
         let mut raw: *mut CVPixelBuffer = null_mut();
 
         // SAFETY: `raw` is a valid, writable pointer for the duration of the call, and
@@ -87,7 +88,7 @@ impl Nv12Frame {
                 width as usize,
                 height as usize,
                 NV12,
-                None,
+                Some(&attributes),
                 NonNull::from(&mut raw),
             )
         };
@@ -119,6 +120,16 @@ impl Nv12Frame {
     #[must_use]
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Returns the underlying pixel buffer.
+    ///
+    /// Exposed so a synthetic picture can be handed to the renderer on the same path a
+    /// decoded one takes, which is what lets the colour conversion be tested without a
+    /// full encode and decode round trip.
+    #[must_use]
+    pub fn pixel_buffer(&self) -> &CVPixelBuffer {
+        &self.buffer
     }
 
     /// Locks the frame and hands its two planes to `fill`.
@@ -482,6 +493,37 @@ impl Drop for VideoToolboxEncoder {
         // SAFETY: the session is alive here, and invalidating it guarantees no further
         // callback can run against the ref con that is about to be dropped.
         unsafe { self.session.invalidate() };
+    }
+}
+
+/// Builds the attributes that make a pixel buffer IOSurface backed.
+///
+/// Without these, `CVPixelBufferCreate` returns plain heap memory. That still encodes,
+/// but it cannot be bound as a Metal texture and it cannot reach the encoder without a
+/// copy. Asking for Metal compatibility implies an IOSurface, which is what keeps both
+/// paths zero copy.
+fn surface_backed_attributes() -> CFRetained<objc2_core_foundation::CFDictionary> {
+    use objc2_core_foundation::{
+        CFDictionary, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
+    };
+
+    // SAFETY: both entries are CoreFoundation constants with static lifetime, and
+    // CFDictionaryCreate reads the two arrays without retaining the arrays themselves.
+    unsafe {
+        let mut keys = [core::ptr::from_ref(kCVPixelBufferMetalCompatibilityKey).cast::<c_void>()];
+        let mut values = [kCFBooleanTrue.map_or(core::ptr::null(), |b| {
+            core::ptr::from_ref(b).cast::<c_void>()
+        })];
+
+        CFDictionary::new(
+            None,
+            keys.as_mut_ptr(),
+            values.as_mut_ptr(),
+            1,
+            &raw const kCFTypeDictionaryKeyCallBacks,
+            &raw const kCFTypeDictionaryValueCallBacks,
+        )
+        .expect("a one entry dictionary is always constructible")
     }
 }
 
