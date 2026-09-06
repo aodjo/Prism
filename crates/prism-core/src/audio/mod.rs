@@ -27,6 +27,10 @@
 pub mod codec;
 pub mod jitter;
 
+/// Capturing what a Windows machine is playing, through WASAPI's loopback mode.
+#[cfg(target_os = "windows")]
+pub mod wasapi;
+
 /// Samples per second on the wire.
 ///
 /// Fixed at 48 kHz rather than negotiated. It is what Opus works in natively, what every
