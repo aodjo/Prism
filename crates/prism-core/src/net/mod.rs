@@ -14,5 +14,6 @@ pub mod reassemble;
 pub mod rendezvous;
 pub mod seal;
 pub mod secure;
+pub mod sender;
 pub mod sendpace;
 pub mod transport;

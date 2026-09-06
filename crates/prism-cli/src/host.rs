@@ -13,7 +13,7 @@ use prism_core::clock::now_us;
 use prism_core::net::handshake::{Identity, KEY_LEN};
 use prism_core::net::transport::UdpTransport;
 
-use crate::wire::SliceSender;
+use prism_core::net::sender::SliceSender;
 
 /// Binds the session socket and, if a rendezvous server was named, becomes reachable through
 /// it before waiting for a client.

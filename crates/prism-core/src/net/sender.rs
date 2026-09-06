@@ -1,31 +1,35 @@
-//! Sending encoded slices over the wire.
+//! The host's send path: slices in, sealed and paced packets out.
 //!
-//! Shared by both host modes so the synthetic source and the real encoder put identical
-//! packets on the network — the only difference between them is where the bytes came
-//! from.
+//! Shared by every host mode so the synthetic source and the real encoder put identical
+//! packets on the network — the only difference between them is where the bytes came from.
+//!
+//! Everything that shapes traffic converges here: packetisation, forward error correction,
+//! send pacing, congestion control, and the seal. There is one place a byte leaves the socket
+//! and it is [`SliceSender::emit`], which is what makes it possible to say with confidence
+//! that nothing is sent unsealed, unpaced, or uncounted.
 
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use prism_core::clock::now_us;
-use prism_core::input::{Injector, PlatformInjector};
-use prism_core::net::ack::{is_newer, missing_in_history};
-use prism_core::net::cc::{CongestionConfig, CongestionController, DelaySample};
-use prism_core::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
-use prism_core::net::handshake::{Identity, KEY_LEN, PeerPolicy};
-use prism_core::net::loss::LossInjector;
-use prism_core::net::packet::{
+use crate::clock::now_us;
+use crate::input::{Injector, PlatformInjector};
+use crate::net::ack::{is_newer, missing_in_history};
+use crate::net::cc::{CongestionConfig, CongestionController, DelaySample};
+use crate::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
+use crate::net::handshake::{Identity, KEY_LEN, PeerPolicy};
+use crate::net::loss::LossInjector;
+use crate::net::packet::{
     CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR, FLAG_LAST_OF_FRAME,
     FecPacket, FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD,
     channel_of,
 };
-use prism_core::net::packetize::SlicePacketizer;
-use prism_core::net::seal::Opener;
-use prism_core::net::secure::SecureSender;
-use prism_core::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
-use prism_core::net::transport::UdpTransport;
-use prism_core::stats::LatencyRecorder;
+use crate::net::packetize::SlicePacketizer;
+use crate::net::seal::Opener;
+use crate::net::secure::SecureSender;
+use crate::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
+use crate::net::transport::UdpTransport;
+use crate::stats::LatencyRecorder;
 
 /// How many recent frames the host remembers the capture time of.
 ///
@@ -182,7 +186,7 @@ impl SliceSender {
         allowed: Vec<[u8; KEY_LEN]>,
         patience: std::time::Duration,
     ) -> io::Result<Self> {
-        let (established, peer, _) = prism_core::control::session::serve(
+        let (established, peer, _) = crate::control::session::serve(
             &transport,
             identity.clone(),
             PeerPolicy::Paired(allowed),
@@ -489,7 +493,7 @@ impl SliceSender {
     ///
     /// Returns the underlying [`io::Error`] if the message cannot be sent.
     pub fn send_cursor(&mut self) -> io::Result<bool> {
-        let Some(sample) = prism_core::input::pointer() else {
+        let Some(sample) = crate::input::pointer() else {
             return Ok(false);
         };
 

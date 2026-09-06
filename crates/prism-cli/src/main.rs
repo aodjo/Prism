@@ -11,7 +11,6 @@ mod display;
 mod encode;
 mod host;
 mod pattern;
-mod wire;
 
 use std::error::Error;
 use std::net::SocketAddr;
