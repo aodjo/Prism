@@ -19,7 +19,34 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// How the client trades latency against even presentation.
+///
+/// Pictures do not arrive at a steady rate — encoding, the network and decoding each vary
+/// a little — so showing each one the moment it is ready reproduces that unevenness on
+/// screen. Holding them to a common age removes it, at the cost of the delay needed to
+/// cover the spread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PacingMode {
+    /// Show every picture as soon as it decodes: the lowest latency the pipeline can give.
+    Performance,
+    /// Even out arrival jitter, which on a loopback path costs about six milliseconds.
+    Smooth,
+}
+
+impl PacingMode {
+    /// Returns the longest a picture may be held under this mode, in microseconds.
+    ///
+    /// A ceiling rather than a target: the pacer measures what the path actually needs and
+    /// stays under this, so a steady path is barely delayed even in smooth mode.
+    fn ceiling_us(self) -> u32 {
+        match self {
+            PacingMode::Performance => 0,
+            PacingMode::Smooth => 16_000,
+        }
+    }
+}
 
 /// Command line for the headless host and client.
 #[derive(Debug, Parser)]
@@ -113,6 +140,14 @@ enum Command {
         /// Window height when showing the stream.
         #[arg(long, default_value_t = 720)]
         window_height: u32,
+
+        /// Whether to favour latency or even presentation.
+        #[arg(long, value_enum, default_value_t = PacingMode::Performance)]
+        mode: PacingMode,
+
+        /// Override the mode's hold ceiling, in milliseconds. For measurement.
+        #[arg(long)]
+        pacing_ms: Option<u32>,
     },
 
     /// Encode synthetic frames to an Annex B file to verify the encoder.
@@ -226,7 +261,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             display,
             window_width,
             window_height,
+            mode,
+            pacing_ms,
         } => {
+            let pacing_us = pacing_ms.map_or_else(|| mode.ceiling_us(), |ms| ms * 1_000);
             let config = client::ClientConfig {
                 bind,
                 frames,
@@ -236,21 +274,24 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 decode: decode || display,
             };
 
+            let offset =
+                std::sync::Arc::new(std::sync::atomic::AtomicI64::new(client::OFFSET_UNKNOWN));
+
             #[cfg(not(target_os = "macos"))]
             {
-                let _ = (window_width, window_height);
+                let _ = (window_width, window_height, pacing_us);
                 if config.decode {
                     return Err("decoding is not implemented on this platform yet".into());
                 }
-                Ok(client::run(config, None)?)
+                Ok(client::run(config, None, offset)?)
             }
 
             #[cfg(target_os = "macos")]
             {
                 if display {
-                    display::run(config, window_width, window_height)
+                    display::run(config, window_width, window_height, pacing_us)
                 } else {
-                    Ok(client::run(config, None)?)
+                    Ok(client::run(config, None, offset)?)
                 }
             }
         }

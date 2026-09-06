@@ -51,7 +51,10 @@ const DECODE_QUEUE_DEPTH: usize = 2;
 const PING_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Sentinel for "no clock offset has been established yet".
-const OFFSET_UNKNOWN: i64 = i64::MIN;
+///
+/// Shared with whoever else needs to convert host timestamps — the display thread reads
+/// the same value to work out how old each picture is.
+pub const OFFSET_UNKNOWN: i64 = i64::MIN;
 
 /// How the receiving client should behave.
 #[derive(Debug, Clone, Copy)]
@@ -101,7 +104,11 @@ struct DecodeReport {
 ///
 /// Returns an [`io::Error`] if the socket cannot be bound or read, other than the
 /// timeout that ends the run normally.
-pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()> {
+pub fn run(
+    config: ClientConfig,
+    pictures: Option<PictureSink>,
+    offset: Arc<AtomicI64>,
+) -> io::Result<()> {
     let transport = UdpTransport::bind(config.bind)?;
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
@@ -114,7 +121,6 @@ pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
     let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
-    let offset = Arc::new(AtomicI64::new(OFFSET_UNKNOWN));
     let decoder = config
         .decode
         .then(|| spawn_decoder(frames_rx, recycle_tx, pictures, Arc::clone(&offset)));
@@ -363,7 +369,7 @@ fn spawn_decoder(
 /// Returns `None` when the corrected stamp is still in the future. Reporting that as zero
 /// would be worse than reporting nothing: it showed a flawless sub-millisecond pipeline on
 /// the first cross-machine run, which was entirely an artefact of the subtraction.
-fn age_of(host_ts_us: u64, offset_us: i64) -> Option<u32> {
+pub fn age_of(host_ts_us: u64, offset_us: i64) -> Option<u32> {
     let local_ts = if offset_us == OFFSET_UNKNOWN {
         i128::from(host_ts_us)
     } else {
