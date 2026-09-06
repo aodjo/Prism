@@ -65,7 +65,7 @@ crates/amf-shim/     AMD AMF C 심
 packages/protocol/   와이어 포맷 — Rust와 TS가 공유하는 단일 진실 소스
 packages/host/       Electron 트레이 UI
 packages/client/     Electron UI 셸 (스트림 창은 Rust/SDL3)
-packages/signaling/  Cloudflare Worker + Durable Object
+crates/prism-rendezvous/  자체 호스팅 서버: 페어링·시그널링·주소 발견·릴레이 폴백
 ```
 
 ## 와이어 포맷
@@ -75,7 +75,7 @@ TS(`vitest`) 양쪽이 같은 벡터로 테스트하며, 포맷을 바꾸면 벡
 
 ## 핫패스 금지 사항
 
-- 핫패스에 `tokio` 사용 금지 (제어 평면·시그널링에만 허용)
+- 핫패스에 `tokio` 사용 금지 (제어 평면·랑데부 서버에만 허용)
 - 프레임 경로에 힙 할당 금지 — 버퍼는 풀에서 재사용
 - 캡처된 GPU 텍스처를 CPU로 내리지 않는다 (제로카피 필수)
 

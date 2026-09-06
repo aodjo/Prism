@@ -69,12 +69,13 @@ prism/
 │  │  └─ stats.rs    단계별 타임스탬프 링버퍼 → p50/p99
 │  ├─ prism-napi/                napi-rs 얇은 표면 → .node (제어 + 통계만)
 │  ├─ prism-cli/                 헤드리스 host/client 실행 파일 (M1 검증·CI 회귀용)
+│  ├─ prism-rendezvous/          자체 호스팅 서버: 페어링·시그널링·주소 발견·릴레이 폴백
 │  └─ amf-shim/                  AMF C 심 (cc 크레이트)
 ├─ packages/
 │  ├─ protocol/      와이어 포맷 스펙 + 테스트 벡터 (Rust와 TS가 공유하는 단일 진실 소스)
 │  ├─ host/          Electron 트레이 UI (TS)
 │  ├─ client/        Electron UI 셸 (TS) — 스트림 창은 Rust/SDL3
-│  └─ signaling/     Cloudflare Worker + Durable Object
+│  └─ (없음 — 서버는 crates/prism-rendezvous)
 └─ pnpm-workspace.yaml
 ```
 
@@ -185,9 +186,43 @@ flags u8 (idr / last-of-frame / ltr) | capture_ts_us u64 | payload
 
 ### NAT 트래버설 / 시그널링
 
+**서버는 자체 호스팅한다.** `crates/prism-rendezvous` 바이너리 하나를 저렴한 VPS에 올리고, 그것이
+페어링·시그널링·주소 발견·릴레이 폴백을 모두 담당한다. Cloudflare 의존은 없다.
+
+> **별도 STUN 서버가 필요 없다.** 피어가 랑데부 서버로 UDP 패킷을 보내면 서버는 출발지 IP:포트를
+> 그대로 관측한다 — STUN이 하는 일이 정확히 그것이다. 시그널링 서버가 UDP를 받으면 STUN 기능은 공짜로 따라온다.
+> (Cloudflare Workers는 임의 UDP를 받을 수 없어서 이 통합이 불가능했고, 그것이 자체 호스팅을 택한 이유 중 하나다.)
+
 - **ICE:** `webrtc-ice`를 Rust 코어에 내장. 미디어+입력 플로우는 코어가 자체 ICE 세션으로 소유한다.
-- **시그널링:** Cloudflare Worker + Durable Object (호스트 ID당 DO 1개). 호스트가 WebSocket으로 상주, 클라이언트가 오퍼/앤서/후보를 DO 통해 교환. TS(Electron)가 WebSocket을 들고 후보를 napi 호출로 코어에 넘긴다 — 저빈도라 경계 통과 OK.
-- **릴레이 폴백:** Cloudflare Realtime TURN (`turn.cloudflare.com`, anycast). Worker에서 단기 자격증명 발급. **비용 주의: 1000GB 무료 후 $0.05/GB. 40Mbps 기준 1000GB ≈ 55시간.** 릴레이는 예외 경로이지 기본 경로가 아니며, 앱 UI에 릴레이 사용 중임을 표시할 것.
+- **랑데부 서버:** 호스트가 TLS로 상주 연결을 유지하고, 클라이언트가 호스트 ID로 접속을 요청하면
+  서버가 양쪽의 관측된 공인 주소와 ICE 후보를 교환시킨다. 서버는 암호화된 블롭만 보고 키는 절대 못 본다.
+- **릴레이 폴백:** 같은 바이너리 안의 UDP 릴레이. 세션 토큰으로 패킷을 양방향 전달만 한다.
+
+#### 릴레이를 쓰지 않는 것이 최우선이다
+
+릴레이는 예외 경로다. 직결 성공률을 올리는 수단을 먼저 갖춘다:
+
+- **UPnP / NAT-PMP / PCP 포트 매핑** — 호스트가 공유기에 포트를 열어달라고 요청한다. 집 게임 PC 시나리오에
+  가장 효과적이며 Moonlight이 쓰는 방식이다.
+- **IPv6** — 양쪽 다 v6면 NAT 자체가 없다. 후보 수집에서 v6를 우선한다.
+- **수동 포트포워딩** 안내를 설정 UI에 둔다.
+- 제대로 된 ICE 후보 수집과 홀펀칭.
+
+이것들을 갖추면 릴레이가 필요한 경우는 양쪽 다 대칭 NAT/CGNAT일 때(예: 휴대폰 테더링) 정도로 줄어든다.
+앱 UI에는 릴레이 사용 중임을 반드시 표시한다.
+
+#### 비용
+
+| 방식 | 월 비용 | 40Mbps 기준 중계 가능 시간 |
+|---|---|---|
+| 자체 VPS (예: Hetzner CX22급, 20TB 포함) | **~€4 정액** | ~1,100시간 |
+| Cloudflare TURN | 1TB 무료 후 $0.05/GB | 무료분 ~55시간, 이후 시간당 ~$0.90 |
+
+정액제라 사용량이 늘어도 비용이 폭발하지 않는다. 대가는 단일 리전(먼 지역은 릴레이 시 RTT 증가)과
+직접 운영이며, 릴레이가 예외 경로인 이상 감수할 만하다.
+
+**시그널링·STUN 트래픽 자체는 무시해도 되는 수준이다.** 주소 발견 교환은 세션당 수백 바이트라,
+비용이 발생하는 것은 릴레이된 미디어뿐이다.
 
 ---
 
@@ -247,7 +282,7 @@ M1~M4는 `prism-cli`(헤드리스)로 진행한다. Electron은 M5부터 붙인�
 | **M2** | 전 구간 계측, 클럭 동기화, 통계 HUD, 적응형 표시 페이싱, **클라이언트 측 커서 렌더링** | HUD로 단계별 p50/p99 확인, 커서 체감 즉각 | 1.5주 |
 | **M3** | 입력: SDL3 상대 마우스·키보드 캡처 → `SendInput` 주입 | 클릭→광자 측정, FPS 게임 조준 가능 | 1.5주 |
 | **M4** | **프로토콜 경화.** 슬라이스 스트리밍, FEC, intra-refresh, LTR + 참조 무효화, 송신 페이싱, 적응형 비트레이트 | 5% 패킷 손실에서 **IDR 히칭 0회**, 지연 유지 | 3주 |
-| **M5** | **인터넷 + Electron.** CF Worker+DO 시그널링, `webrtc-ice`, SPAKE2 페어링, Noise_IK 세션, TURN 폴백. Electron 호스트 트레이 + 클라이언트 셸이 napi로 코어 구동 | 서로 다른 NAT 뒤 두 지점 연결, 릴레이 폴백 동작, UI에서 페어링→접속 | 3.5주 |
+| **M5** | **인터넷 + Electron.** `prism-rendezvous` 서버(시그널링·주소 발견·릴레이), `webrtc-ice`, UPnP/NAT-PMP, SPAKE2 페어링, Noise_IK 세션. Electron 호스트 트레이 + 클라이언트 셸이 napi로 코어 구동 | 서로 다른 NAT 뒤 두 지점 직결, 대칭 NAT에서 릴레이 폴백, UI에서 페어링→접속 | 4주 |
 | **M6** | **1440p120 + HEVC/AV1.** 코덱 협상, 고주사율 캡처·표시 경로 | **1440p120 p99 < 25ms** (핵심 목표 달성) | 2주 |
 | **M7** | 오디오: WASAPI 루프백 → Opus(2.5–10ms 프레임) → SDL3 출력, 독립 지터 버퍼 | A/V 각각 저지연 유지, 드롭아웃 없음 | 1.5주 |
 | **M8** | 나머지 인코더(AMF 심 + oneVPL) + Linux 호스트(PipeWire+VAAPI) + Windows/Linux 클라이언트(D3D11VA/NVDEC/VAAPI) | 보유 장비 4대 전 조합 통과 | 3.5주 |
@@ -277,7 +312,7 @@ M1~M4는 `prism-cli`(헤드리스)로 진행한다. Electron은 M5부터 붙인�
 - **단계별 지연:** 클라이언트 통계 HUD의 p50/p99 (M2부터 상시 가동). 각 마일스톤 통과 판정의 기준.
 - **클릭→광자:** 호스트 화면에 색이 바뀌는 테스트 패턴을 띄우고, 클라이언트에서 클릭 → 240fps 카메라(스마트폰 슬로우모션으로 충분)로 클라이언트 화면 촬영 → 프레임 카운트. M3, M6에서 실측.
 - **손실 내성:** `dummynet`(macOS) / `clumsy`(Windows) / `tc netem`(Linux)으로 손실 1/3/5%, 지터 5/20ms를 주입해 M4 통과 판정.
-- **NAT 조합:** 서로 다른 회선(집 Wi-Fi + 휴대폰 테더링)으로 M5 검증. 대칭 NAT 강제 시 TURN 폴백 동작 확인.
+- **NAT 조합:** 서로 다른 회선(집 Wi-Fi + 휴대폰 테더링)으로 M5 검증. UPnP가 있는 공유기와 없는 공유기 양쪽에서 직결률을 재고, 대칭 NAT 강제 시 릴레이 폴백 동작 확인.
 - **프로토콜 회귀:** `packages/protocol`의 테스트 벡터를 `cargo test`와 `vitest` 양쪽에서 돌려 Rust·TS 구현이 동일 결과를 내는지 CI 검증.
 - **`prism-cli` 회귀:** 헤드리스 host↔client를 CI에서 루프백으로 띄워 패킷 손실 주입 시나리오를 자동화.
 - **장시간 안정성:** 실제 게임 2시간 연속 세션에서 메모리 누수·지연 드리프트·오디오 싱크 이탈 없음 확인.
@@ -288,7 +323,7 @@ M1~M4는 `prism-cli`(헤드리스)로 진행한다. Electron은 M5부터 붙인�
 
 1. `rustup` 설치 (stable), `git init`
 2. Cargo 워크스페이스: `crates/prism-core`, `crates/prism-napi`, `crates/prism-cli`, `crates/amf-shim`
-3. pnpm 워크스페이스: `packages/protocol`, `packages/host`, `packages/client`, `packages/signaling`
+3. pnpm 워크스페이스: `packages/protocol`, `packages/host`, `packages/client`
 4. `prism-napi`에 `version()` 하나만 노출 → Node 24와 Electron 양쪽에서 `require` 확인
 5. `@napi-rs/cli`로 GitHub Actions 3-매트릭스(macOS arm64 / Windows x64 / Linux x64) 빌드 + 플랫폼별 npm 패키지 산출
 6. `packages/protocol`에 와이어 포맷 타입과 테스트 벡터 스켈레톤, `cargo test` + `vitest` 양쪽 연결
@@ -300,5 +335,4 @@ Sources:
 - [objc2 — Apple framework bindings](https://github.com/madsmtm/objc2)
 - [objc2-screen-capture-kit](https://docs.rs/objc2-screen-capture-kit/latest/objc2_screen_capture_kit/)
 - [objc2-video-toolbox](https://docs.rs/objc2-video-toolbox/latest/objc2_video_toolbox/)
-- [Cloudflare Realtime TURN Service](https://developers.cloudflare.com/realtime/turn/)
 - [Native Node Modules — Electron](https://www.electronjs.org/docs/latest/tutorial/using-native-node-modules)
