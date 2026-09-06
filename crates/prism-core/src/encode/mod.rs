@@ -10,6 +10,8 @@
 //! consumes and what the decoder can be fed directly once the pieces are put back in
 //! order.
 
+#[cfg(target_os = "windows")]
+pub mod nv12;
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
 
