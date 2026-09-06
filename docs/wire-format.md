@@ -13,6 +13,7 @@ The first byte of every packet is the channel tag.
 | `Audio`    | 2 | host → client | Opus frames |
 | `Input`    | 3 | client → host | keyboard, mouse, gamepad |
 | `Feedback` | 4 | client → host | frame ACKs (LTR), clock sync, congestion signals |
+| `Fec`      | 5 | host → client | Reed-Solomon parity for video slices |
 
 ## Size limits
 
@@ -27,6 +28,8 @@ The first byte of every packet is the channel tag.
 | `VIDEO_HEADER_LEN` | 20 | Channel tag + video header |
 | `MAX_VIDEO_PAYLOAD` | 1180 | `MAX_PACKET_SIZE - VIDEO_HEADER_LEN` |
 | `FEEDBACK_PACKET_LEN` | 17 | Fixed size |
+| `FEC_HEADER_LEN` | 20 | Same as the video header, so a parity shard is exactly as long as the data shards it repairs |
+| `MAX_FEC_PAYLOAD` | 1180 | `MAX_PACKET_SIZE - FEC_HEADER_LEN` |
 
 ## Video packet (channel 1)
 
@@ -198,6 +201,44 @@ against its own clock and get the offset back as latency.
 
 Input is sent the instant it happens, with no pacing and no batching. It is the one path
 where a few milliseconds are felt directly rather than seen.
+
+## Parity packets (channel 5)
+
+One Reed-Solomon parity shard, computed over a single slice's own packets.
+
+```
+offset  size  field           type   notes
+0       1     channel         u8     always 5
+1       4     frame_id        u32    frame the repaired slice belongs to
+5       2     slice_id        u16    slice this parity repairs
+7       1     data_count      u8     data shards in the protected block
+8       1     parity_count    u8     parity shards generated for it
+9       1     shard_index     u8     which parity shard this is, from zero
+10      2     tail_len        u16    bytes in the slice's final data shard
+12      8     capture_ts_us   u64    copied from the frame
+20      ..    payload         bytes  one parity shard, exactly 1180 bytes
+```
+
+The header is exactly as long as the video header, and that is a constraint rather than a
+coincidence. Every shard in a Reed-Solomon block must be the same length, so a parity shard
+has to be a full `MAX_VIDEO_PAYLOAD`; a header one byte longer would push the packet past
+`MAX_PACKET_SIZE` and fragment it.
+
+`tail_len` is what makes recovery correct rather than merely possible. A receiver learns a
+slice's true length from its final packet, so a slice whose final packet was lost and then
+rebuilt from parity would have a length of zero — recovered bytes with no framing, handed to
+the decoder with nothing reporting it. Every data shard but the last is exactly
+`MAX_VIDEO_PAYLOAD`, so this one field recovers the length from any parity packet:
+
+```
+slice_len = (data_count - 1) * MAX_VIDEO_PAYLOAD + tail_len
+```
+
+A block holds at most 255 shards, data and parity together: GF(2^8) has 256 field elements
+and the format stops one short so a shard count fits a byte. A decoder rejects a block
+description that could not have been produced — a zero data or parity count, a shard index
+not below the parity count, a tail length outside one to `MAX_VIDEO_PAYLOAD` — because the
+recovery path is driven directly by these numbers.
 
 ## Reserved
 

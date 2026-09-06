@@ -11,7 +11,8 @@
 //!
 //! Buffers are recycled across frames, so a steady stream does not allocate.
 
-use crate::net::packet::{FLAG_IDR, FLAG_LAST_OF_FRAME, MAX_VIDEO_PAYLOAD, VideoPacket};
+use crate::net::fec::{FecCodec, ParityBlock};
+use crate::net::packet::{FLAG_IDR, FLAG_LAST_OF_FRAME, FecPacket, MAX_VIDEO_PAYLOAD, VideoPacket};
 
 /// Largest `slice_id` the reassembler will accept.
 ///
@@ -63,6 +64,11 @@ pub struct ReassemblyStats {
     pub completed: u64,
     /// Frames evicted before they ever completed.
     pub dropped_incomplete: u64,
+    /// Slices rebuilt from parity rather than lost.
+    ///
+    /// The number M4 is judged by. Every one of these is a frame that would otherwise have
+    /// been thrown away, and a keyframe the encoder did not have to send.
+    pub recovered: u64,
 }
 
 /// A frame that arrived whole, borrowed from the reassembler's storage.
@@ -90,6 +96,7 @@ struct SliceState {
     present: Vec<bool>,
     data: Vec<u8>,
     len: usize,
+    parity: ParityBlock,
 }
 
 impl SliceState {
@@ -106,6 +113,77 @@ impl SliceState {
         self.data.clear();
         self.data
             .resize(usize::from(pkt_count) * MAX_VIDEO_PAYLOAD, 0);
+
+        self.parity.reset(0, MAX_VIDEO_PAYLOAD);
+    }
+
+    /// Stores one parity shard and the block shape it describes.
+    ///
+    /// A parity packet may be the first thing seen of a slice, so this establishes the
+    /// slice's shape as readily as a data packet does. It also carries the slice's true
+    /// byte length, which is the only reason recovery of the final packet is correct: the
+    /// length otherwise arrives only on that packet, so recovering it would leave a slice
+    /// of length zero and hand the decoder an empty bitstream with nothing reporting it.
+    ///
+    /// Returns whether the packet was consistent with what is already known. A parity
+    /// packet describing a different block than the data packets did is refused rather than
+    /// mixed in, because reconstruction driven by the wrong counts produces wrong bytes.
+    fn accept_parity(&mut self, packet: &FecPacket<'_>) -> bool {
+        let data_count = u16::from(packet.data_count);
+
+        if !self.seen {
+            self.begin(data_count);
+        } else if self.pkt_count != data_count {
+            return false;
+        }
+
+        if packet.payload.len() != MAX_VIDEO_PAYLOAD {
+            return false;
+        }
+
+        if self.parity.shard_count() != usize::from(packet.parity_count) {
+            self.parity
+                .reset(usize::from(packet.parity_count), MAX_VIDEO_PAYLOAD);
+        }
+
+        let index = usize::from(packet.shard_index);
+        let Some(shard) = self.parity.shard_mut(index) else {
+            return false;
+        };
+        shard.copy_from_slice(packet.payload);
+        self.parity.set_present(index, true);
+
+        self.len = packet.slice_len();
+
+        true
+    }
+
+    /// Rebuilds the missing packets of this slice from parity, if there are enough shards.
+    ///
+    /// Returns whether the slice is whole afterwards. Cheap to call on a slice that is
+    /// already complete or still hopeless: the codec returns immediately in both cases.
+    fn try_recover(&mut self, codec: &mut FecCodec) -> bool {
+        if self.is_complete() || self.parity.present_count() == 0 {
+            return false;
+        }
+
+        let available = usize::from(self.received) + self.parity.present_count();
+        if available < usize::from(self.pkt_count) {
+            return false;
+        }
+
+        match codec.reconstruct(
+            &mut self.data,
+            &mut self.present,
+            &mut self.parity,
+            MAX_VIDEO_PAYLOAD,
+        ) {
+            Ok(rebuilt) if rebuilt > 0 => {
+                self.received = self.pkt_count;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Returns whether every packet of the slice has arrived.
@@ -124,6 +202,7 @@ impl SliceState {
         self.pkt_count = 0;
         self.received = 0;
         self.len = 0;
+        self.parity.reset(0, MAX_VIDEO_PAYLOAD);
     }
 }
 
@@ -200,6 +279,7 @@ impl FrameSlot {
 #[derive(Debug)]
 pub struct FrameReassembler {
     slots: Vec<FrameSlot>,
+    codec: FecCodec,
     completed: Option<usize>,
     last_delivered: Option<u32>,
     stats: ReassemblyStats,
@@ -235,6 +315,7 @@ impl FrameReassembler {
 
         Self {
             slots,
+            codec: FecCodec::new(),
             completed: None,
             last_delivered: None,
             stats: ReassemblyStats::default(),
@@ -278,6 +359,68 @@ impl FrameReassembler {
         }
 
         outcome
+    }
+
+    /// Stores a parity shard and rebuilds the slice it repairs, if it now can be.
+    ///
+    /// Parity may arrive before, between or after the packets it protects, so this both
+    /// records the shard and attempts recovery. Recovery attempts are cheap on a slice that
+    /// is already whole or still short of shards; both return immediately.
+    ///
+    /// Returns [`PushOutcome::FrameComplete`] when the repair finished the frame, which is
+    /// the whole point: a frame that would have been thrown away is delivered instead, with
+    /// no keyframe and no visible interruption.
+    pub fn push_fec(&mut self, packet: &FecPacket<'_>) -> PushOutcome {
+        let outcome = self.push_fec_inner(packet);
+
+        match outcome {
+            PushOutcome::Accepted | PushOutcome::FrameComplete => self.stats.accepted += 1,
+            PushOutcome::Duplicate => self.stats.duplicates += 1,
+            PushOutcome::Stale => self.stats.stale += 1,
+            PushOutcome::Invalid => self.stats.invalid += 1,
+        }
+
+        outcome
+    }
+
+    /// Stores a parity shard and attempts recovery, without touching the counters.
+    fn push_fec_inner(&mut self, packet: &FecPacket<'_>) -> PushOutcome {
+        if self
+            .last_delivered
+            .is_some_and(|last| !is_newer(packet.frame_id, last))
+        {
+            return PushOutcome::Stale;
+        }
+
+        self.discard_pending_if_not(packet.frame_id);
+
+        let Some(idx) = self.slot_for(packet.frame_id, packet.capture_ts_us) else {
+            return PushOutcome::Stale;
+        };
+
+        let slot = &mut self.slots[idx];
+        let slice_id = usize::from(packet.slice_id);
+
+        if slot.slices.len() <= slice_id {
+            slot.slices.resize_with(slice_id + 1, SliceState::default);
+        }
+
+        let slice = &mut slot.slices[slice_id];
+        if !slice.accept_parity(packet) {
+            return PushOutcome::Invalid;
+        }
+
+        if slice.try_recover(&mut self.codec) {
+            self.stats.recovered += 1;
+        }
+
+        if slot.is_complete() {
+            slot.assemble();
+            self.completed = Some(idx);
+            PushOutcome::FrameComplete
+        } else {
+            PushOutcome::Accepted
+        }
     }
 
     /// Takes the frame completed by the most recent [`Self::push`], if there is one.
@@ -366,6 +509,13 @@ impl FrameReassembler {
         }
         if packet.flags & FLAG_LAST_OF_FRAME != 0 {
             slot.last_slice_id = Some(packet.slice_id);
+        }
+
+        // Parity for this slice may already be waiting: it is sent after the slice's own
+        // packets but overtaking is ordinary, and this packet may have been the one that
+        // brought the shard count up to where recovery becomes possible.
+        if slice.try_recover(&mut self.codec) {
+            self.stats.recovered += 1;
         }
 
         if slot.is_complete() {

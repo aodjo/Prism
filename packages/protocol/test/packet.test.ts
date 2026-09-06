@@ -6,6 +6,8 @@ import {
   CLOCK_PONG_LEN,
   CONTROL_HEADER_LEN,
   CURSOR_POSITION_LEN,
+  FEC_HEADER_LEN,
+  MAX_FEC_PAYLOAD,
   Channel,
   ControlType,
   FEEDBACK_PACKET_LEN,
@@ -23,12 +25,15 @@ import {
   decodeClockPing,
   decodeClockPong,
   decodeCursorPosition,
+  decodeFecPacket,
   decodeFeedbackPacket,
   decodeInputPacket,
   decodeVideoPacket,
   encodeClockPing,
   encodeClockPong,
   encodeCursorPosition,
+  encodeFecPacket,
+  sliceLenOf,
   encodeFeedbackPacket,
   encodeInputPacket,
   encodeVideoPacket,
@@ -313,23 +318,138 @@ describe('feedback packet', () => {
   }
 });
 
+/**
+ * Routes a packet to the decoder its channel tag selects.
+ *
+ * Split out of the rejection test so that a vector on a channel with no branch here fails
+ * loudly rather than passing because nothing ran. That is not hypothetical: the parity
+ * vectors passed for a while because `channelOf` did not yet know channel five, so they
+ * were refused as an unknown channel and would have passed with no parity decoder at all.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {void} Nothing; it decodes for the side effect of throwing.
+ * @throws {PrismProtocolError} Whatever the selected decoder rejects the packet with.
+ *
+ * @example
+ * decodeByChannel(encodeVideoPacket(packet));
+ */
+function decodeByChannel(bytes: Uint8Array): void {
+  const channel = channelOf(bytes);
+
+  switch (channel) {
+    case Channel.Video:
+      decodeVideoPacket(bytes);
+      return;
+    case Channel.Feedback:
+      decodeFeedbackPacket(bytes);
+      return;
+    case Channel.Input:
+      decodeInputPacket(bytes);
+      return;
+    case Channel.Fec:
+      decodeFecPacket(bytes);
+      return;
+    case Channel.Control: {
+      const type = controlTypeOf(bytes);
+      if (type === ControlType.ClockPing) decodeClockPing(bytes);
+      else if (type === ControlType.CursorPosition) decodeCursorPosition(bytes);
+      else decodeClockPong(bytes);
+      return;
+    }
+    case Channel.Audio:
+      throw new PrismProtocolError('audio has no layout before M7');
+  }
+}
+
+describe('fec packet', () => {
+  for (const vector of vectors.fecPackets) {
+    it(`encodes and decodes the ${vector.name} vector`, () => {
+      const packet = {
+        frameId: vector.fields.frameId,
+        sliceId: vector.fields.sliceId,
+        dataCount: vector.fields.dataCount,
+        parityCount: vector.fields.parityCount,
+        shardIndex: vector.fields.shardIndex,
+        tailLen: vector.fields.tailLen,
+        captureTsUs: BigInt(vector.fields.captureTsUs),
+        payload: hexToBytes(vector.payloadHex),
+      };
+      const bytes = encodeFecPacket(packet);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(bytes.length).toBe(FEC_HEADER_LEN + packet.payload.length);
+      expect(decodeFecPacket(hexToBytes(vector.hex))).toEqual(packet);
+    });
+  }
+
+  it('agrees with vectors.json on the sizes and the channel', () => {
+    expect(FEC_HEADER_LEN).toBe(vectors.constants.fecHeaderLen);
+    expect(MAX_FEC_PAYLOAD).toBe(vectors.constants.maxFecPayload);
+    expect(Channel.Fec).toBe(vectors.channels.fec);
+  });
+
+  it('a parity shard is exactly as long as the data shards it repairs', () => {
+    // The reason the header is capped at 20 bytes. A longer header would leave room for
+    // less than a full shard and Reed-Solomon needs every shard the same length.
+    expect(MAX_FEC_PAYLOAD).toBe(MAX_VIDEO_PAYLOAD);
+    expect(FEC_HEADER_LEN + MAX_FEC_PAYLOAD).toBe(MAX_PACKET_SIZE);
+  });
+
+  it('recovers the slice length without the packet that would have carried it', () => {
+    // The whole reason tailLen exists: a receiver learns a slice's length from its final
+    // packet, so a slice whose final packet was lost and rebuilt from parity would yield
+    // an empty bitstream with no error to say so.
+    const packet = {
+      frameId: 1,
+      sliceId: 0,
+      dataCount: 4,
+      parityCount: 1,
+      shardIndex: 0,
+      tailLen: 37,
+      captureTsUs: 0n,
+      payload: new Uint8Array([1, 2, 3]),
+    };
+
+    expect(sliceLenOf(packet)).toBe(3 * MAX_VIDEO_PAYLOAD + 37);
+  });
+
+  it('refuses a shard index that is not below the parity count', () => {
+    expect(() =>
+      encodeFecPacket({
+        frameId: 0,
+        sliceId: 0,
+        dataCount: 4,
+        parityCount: 2,
+        shardIndex: 2,
+        tailLen: 1,
+        captureTsUs: 0n,
+        payload: new Uint8Array([0]),
+      }),
+    ).toThrow(PrismProtocolError);
+  });
+});
+
 describe('malformed packets are rejected', () => {
   for (const vector of vectors.rejects) {
     it(`rejects ${vector.name} (${vector.reason})`, () => {
       const bytes = hexToBytes(vector.hex);
 
-      expect(() => {
-        const channel = channelOf(bytes);
-        if (channel === Channel.Video) decodeVideoPacket(bytes);
-        else if (channel === Channel.Feedback) decodeFeedbackPacket(bytes);
-        else if (channel === Channel.Input) decodeInputPacket(bytes);
-        else if (channel === Channel.Control) {
-          const type = controlTypeOf(bytes);
-          if (type === ControlType.ClockPing) decodeClockPing(bytes);
-          else if (type === ControlType.CursorPosition) decodeCursorPosition(bytes);
-          else decodeClockPong(bytes);
-        }
-      }).toThrow(PrismProtocolError);
+      expect(() => decodeByChannel(bytes)).toThrow(PrismProtocolError);
     });
   }
+
+  it('rejects each vector through its own decoder, not through the channel tag', () => {
+    // The guard against the vacuous pass above: every reject vector whose channel tag is
+    // one this build knows must survive channelOf and be refused further down.
+    for (const vector of vectors.rejects) {
+      const bytes = hexToBytes(vector.hex);
+      const tag = bytes.at(0);
+
+      if (tag === undefined || tag > Channel.Fec) {
+        continue;
+      }
+
+      expect(() => channelOf(bytes), `${vector.name} names a known channel`).not.toThrow();
+    }
+  });
 });

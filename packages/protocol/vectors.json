@@ -9,14 +9,17 @@
     "clockPingLen": 10,
     "clockPongLen": 26,
     "inputPacketLen": 15,
-    "cursorPositionLen": 18
+    "cursorPositionLen": 18,
+    "fecHeaderLen": 20,
+    "maxFecPayload": 1180
   },
   "channels": {
     "control": 0,
     "video": 1,
     "audio": 2,
     "input": 3,
-    "feedback": 4
+    "feedback": 4,
+    "fec": 5
   },
   "videoFlags": {
     "idr": 1,
@@ -146,6 +149,46 @@
       "name": "cursor-position-zero-height",
       "hex": "000240420f00000000002003c201000a0000",
       "reason": "cursor position with a screen of no height"
+    },
+    {
+      "name": "fec-truncated-header",
+      "hex": "05070000000100080200f40140420f00000000",
+      "reason": "fec packet shorter than FEC_HEADER_LEN"
+    },
+    {
+      "name": "fec-empty-payload",
+      "hex": "05070000000100080200f40140420f0000000000",
+      "reason": "fec packet carries no parity shard"
+    },
+    {
+      "name": "fec-zero-data-count",
+      "hex": "05070000000100000200f40140420f0000000000aa",
+      "reason": "a block with no data shards repairs nothing"
+    },
+    {
+      "name": "fec-zero-parity-count",
+      "hex": "05070000000100080000f40140420f0000000000aa",
+      "reason": "a block with no parity shards cannot contain this packet"
+    },
+    {
+      "name": "fec-shard-index-past-parity-count",
+      "hex": "05070000000100080202f40140420f0000000000aa",
+      "reason": "parity shard index is not below the parity count"
+    },
+    {
+      "name": "fec-total-shards-over-field",
+      "hex": "05070000000100fe0200f40140420f0000000000aa",
+      "reason": "data and parity shards exceed the 255 the field allows"
+    },
+    {
+      "name": "fec-zero-tail-len",
+      "hex": "05070000000100080200000040420f0000000000aa",
+      "reason": "the final data shard cannot be empty"
+    },
+    {
+      "name": "fec-tail-len-over-shard",
+      "hex": "050700000001000802009d0440420f0000000000aa",
+      "reason": "the final data shard cannot exceed MAX_VIDEO_PAYLOAD"
     }
   ],
   "controlTypes": {
@@ -263,6 +306,50 @@
         "screenHeight": 65535
       },
       "hex": "0002ffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "fecPackets": [
+    {
+      "name": "canonical",
+      "fields": {
+        "frameId": 7,
+        "sliceId": 1,
+        "dataCount": 8,
+        "parityCount": 2,
+        "shardIndex": 0,
+        "tailLen": 500,
+        "captureTsUs": "1000000"
+      },
+      "payloadHex": "a1b2c3d4",
+      "hex": "05070000000100080200f40140420f0000000000a1b2c3d4"
+    },
+    {
+      "name": "last-parity-shard",
+      "fields": {
+        "frameId": 4294967295,
+        "sliceId": 65535,
+        "dataCount": 254,
+        "parityCount": 1,
+        "shardIndex": 0,
+        "tailLen": 1180,
+        "captureTsUs": "18446744073709551615"
+      },
+      "payloadHex": "ff",
+      "hex": "05fffffffffffffe01009c04ffffffffffffffffff"
+    },
+    {
+      "name": "single-shard-block",
+      "fields": {
+        "frameId": 0,
+        "sliceId": 0,
+        "dataCount": 1,
+        "parityCount": 2,
+        "shardIndex": 1,
+        "tailLen": 1,
+        "captureTsUs": "0"
+      },
+      "payloadHex": "00",
+      "hex": "050000000000000102010100000000000000000000"
     }
   ]
 }

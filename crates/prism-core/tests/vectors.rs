@@ -6,10 +6,10 @@
 
 use prism_core::net::packet::{
     CLOCK_PING_LEN, CLOCK_PONG_LEN, CONTROL_HEADER_LEN, CURSOR_POSITION_LEN, Channel, ClockPing,
-    ClockPong, ControlType, CursorPosition, FEEDBACK_PACKET_LEN, FORMAT_VERSION, FeedbackPacket,
-    INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD,
-    MouseButton, VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN, VideoPacket, channel_of,
-    control_type_of,
+    ClockPong, ControlType, CursorPosition, FEC_HEADER_LEN, FEEDBACK_PACKET_LEN, FORMAT_VERSION,
+    FecPacket, FeedbackPacket, INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket,
+    MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD, MouseButton, VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN,
+    VideoPacket, channel_of, control_type_of,
 };
 use serde_json::Value;
 
@@ -249,6 +249,37 @@ fn clock_pongs_round_trip_through_the_vectors() {
 }
 
 #[test]
+fn fec_packets_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["fecPackets"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+        let payload = hex_to_bytes(vector["payloadHex"].as_str().unwrap());
+
+        let packet = FecPacket {
+            frame_id: fields["frameId"].as_u64().unwrap() as u32,
+            slice_id: fields["sliceId"].as_u64().unwrap() as u16,
+            data_count: fields["dataCount"].as_u64().unwrap() as u8,
+            parity_count: fields["parityCount"].as_u64().unwrap() as u8,
+            shard_index: fields["shardIndex"].as_u64().unwrap() as u8,
+            tail_len: fields["tailLen"].as_u64().unwrap() as u16,
+            capture_ts_us: u64_field(fields, "captureTsUs"),
+            payload: &payload,
+        };
+
+        let mut buf = [0u8; MAX_PACKET_SIZE];
+        let written = packet.encode_into(&mut buf).unwrap();
+        assert_eq!(written, FEC_HEADER_LEN + payload.len());
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+
+        let bytes = hex_to_bytes(expected_hex);
+        assert_eq!(FecPacket::decode(&bytes).unwrap(), packet, "decode {name}");
+    }
+}
+
+#[test]
 fn cursor_positions_round_trip_through_the_vectors() {
     let v = vectors();
 
@@ -363,6 +394,7 @@ fn malformed_packets_are_rejected() {
                 Ok(ControlType::CursorPosition) => CursorPosition::decode(&bytes).is_err(),
             },
             Ok(Channel::Input) => InputPacket::decode(&bytes).is_err(),
+            Ok(Channel::Fec) => FecPacket::decode(&bytes).is_err(),
             Ok(_) => false,
         };
 

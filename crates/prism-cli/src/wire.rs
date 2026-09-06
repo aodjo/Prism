@@ -11,10 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use prism_core::clock::now_us;
 use prism_core::input::{Injector, PlatformInjector};
 use prism_core::net::ack::{is_newer, missing_in_history};
+use prism_core::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
 use prism_core::net::loss::LossInjector;
 use prism_core::net::packet::{
     CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR, FLAG_LAST_OF_FRAME,
-    FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE, channel_of,
+    FecPacket, FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD,
+    channel_of,
 };
 use prism_core::net::packetize::SlicePacketizer;
 use prism_core::net::transport::UdpTransport;
@@ -43,9 +45,17 @@ pub struct SliceSender {
     feedback: Arc<FeedbackHeard>,
     /// Drops a fraction of video packets on the way out, when a run is testing recovery.
     ///
-    /// Only video. Dropping control, feedback or input would be testing something else —
-    /// the point is to lose picture data and watch the stream survive it.
+    /// Applies to parity as well as picture data. Exempting parity would make recovery look
+    /// better than it is on a real path, where the repair is as losable as the thing it
+    /// repairs. Control, feedback and input are left alone: losing those tests something
+    /// else entirely.
     loss: Option<LossInjector>,
+    /// The loss estimate parity is sized against, or `None` when parity is switched off.
+    parity_loss: Option<f32>,
+    codec: FecCodec,
+    parity: ParityBlock,
+    parity_sent: u64,
+    oversized_slice_warned: bool,
 }
 
 impl SliceSender {
@@ -65,6 +75,11 @@ impl SliceSender {
             bytes: 0,
             feedback: Arc::new(FeedbackHeard::default()),
             loss: None,
+            parity_loss: None,
+            codec: FecCodec::new(),
+            parity: ParityBlock::new(),
+            parity_sent: 0,
+            oversized_slice_warned: false,
         })
     }
 
@@ -79,6 +94,26 @@ impl SliceSender {
             "host: dropping {:.2}% of outgoing video packets (seed {seed})",
             f64::from(per_million) / 10_000.0
         );
+    }
+
+    /// Turns on Reed-Solomon parity, sized for the given loss estimate.
+    ///
+    /// The estimate is a fraction, so five percent is 0.05. It sets how much of the
+    /// bitrate is spent on repair; the codec clamps it to the plan's ten to twenty percent
+    /// band, so a wild estimate cannot spend everything or nothing.
+    pub fn enable_parity(&mut self, loss: f32) {
+        self.parity_loss = Some(loss);
+        println!(
+            "host: parity sized for {:.1}% loss ({} data shards per block at most)",
+            f64::from(loss) * 100.0,
+            max_data_shards_for(loss)
+        );
+    }
+
+    /// Returns how many parity packets have been sent.
+    #[must_use]
+    pub fn parity_sent(&self) -> u64 {
+        self.parity_sent
     }
 
     /// Cuts one slice into packets and sends them.
@@ -130,6 +165,93 @@ impl SliceSender {
             self.transport.send(&self.buffer[..len])?;
             self.packets += 1;
             self.bytes += len as u64;
+        }
+
+        self.send_parity(frame_id, slice_id, data, capture_ts_us)?;
+
+        Ok(())
+    }
+
+    /// Generates parity for a slice and sends it, if parity is switched on.
+    ///
+    /// Sent after the slice's own packets rather than before. Parity is only useful once
+    /// something is missing, so putting it ahead of the data would delay every packet it
+    /// protects for no gain.
+    ///
+    /// A slice too large for one Reed-Solomon block is sent unprotected rather than
+    /// silently under-protected. The field holds 255 shards, and squeezing a 254-shard
+    /// block in leaves room for exactly one parity shard — protection of 0.4 percent, which
+    /// looks enabled and repairs nothing. Splitting into several blocks is the real answer
+    /// and it needs a block index on the wire, so for now this says so once and moves on.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if a parity packet cannot be sent.
+    fn send_parity(
+        &mut self,
+        frame_id: u32,
+        slice_id: u16,
+        data: &[u8],
+        capture_ts_us: u64,
+    ) -> io::Result<()> {
+        let Some(loss) = self.parity_loss else {
+            return Ok(());
+        };
+
+        let data_count = data.len().div_ceil(MAX_VIDEO_PAYLOAD);
+        if data_count > max_data_shards_for(loss) {
+            if !self.oversized_slice_warned {
+                self.oversized_slice_warned = true;
+                eprintln!(
+                    "host: slice of {data_count} packets is too large for one parity block \
+                     (limit {}), sending it unprotected",
+                    max_data_shards_for(loss)
+                );
+            }
+            return Ok(());
+        }
+
+        let parity_count = parity_shards_for(data_count, loss);
+        if self
+            .codec
+            .encode(data, MAX_VIDEO_PAYLOAD, parity_count, &mut self.parity)
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        let tail = data.len() - (data_count - 1) * MAX_VIDEO_PAYLOAD;
+
+        for index in 0..parity_count {
+            let Some(shard) = self.parity.shard(index) else {
+                continue;
+            };
+
+            let packet = FecPacket {
+                frame_id,
+                slice_id,
+                data_count: data_count as u8,
+                parity_count: parity_count as u8,
+                shard_index: index as u8,
+                tail_len: tail as u16,
+                capture_ts_us,
+                payload: shard,
+            };
+
+            let Ok(len) = packet.encode_into(&mut self.buffer) else {
+                continue;
+            };
+
+            if self.loss.as_mut().is_some_and(LossInjector::should_drop) {
+                self.packets += 1;
+                self.bytes += len as u64;
+                continue;
+            }
+
+            self.transport.send(&self.buffer[..len])?;
+            self.packets += 1;
+            self.bytes += len as u64;
+            self.parity_sent += 1;
         }
 
         Ok(())
