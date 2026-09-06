@@ -14,12 +14,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use objc2_metal::MTLPixelFormat;
 use objc2_quartz_core::CAMetalLayer;
 use prism_core::render::metal::MetalRenderer;
+use prism_core::render::overlay::TextOverlay;
 use prism_core::render::pacing::PresentPacer;
+use prism_core::stats::LatencyRecorder;
 use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use sdl3_sys::metal::{SDL_Metal_CreateView, SDL_Metal_DestroyView, SDL_Metal_GetLayer};
@@ -28,6 +30,63 @@ use crate::client::{self, ClientConfig};
 
 /// How many pictures may wait to be shown before the newest is dropped.
 const PICTURE_QUEUE_DEPTH: usize = 2;
+
+/// How often the statistics overlay is redrawn.
+///
+/// Ten times a second. Faster would be unreadable and would put CPU text rasterisation on
+/// a path that exists to avoid exactly that kind of work.
+const HUD_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Builds the lines the overlay shows.
+///
+/// Latency first, because it is what every milestone is judged on, and the pacing line
+/// directly beneath it because that delay is part of the number above and should not have
+/// to be remembered separately.
+fn hud_lines(
+    latency: &mut LatencyRecorder,
+    pacer: &mut PresentPacer,
+    fps: f64,
+    shown: u64,
+    missed: u64,
+    clock_offset_us: i64,
+) -> Vec<String> {
+    let mut lines = Vec::with_capacity(5);
+
+    match latency.summarize() {
+        Some(summary) => lines.push(format!(
+            "latency  p50 {:.1}  p95 {:.1}  p99 {:.1} ms",
+            f64::from(summary.p50_us) / 1000.0,
+            f64::from(summary.p95_us) / 1000.0,
+            f64::from(summary.p99_us) / 1000.0,
+        )),
+        None => lines.push("latency  waiting".to_owned()),
+    }
+
+    if pacer.enabled() {
+        lines.push(format!(
+            "pacing   +{:.1} ms target, {} late",
+            f64::from(pacer.delay_us()) / 1000.0,
+            pacer.shown_late(),
+        ));
+    } else {
+        lines.push("pacing   off".to_owned());
+    }
+
+    lines.push(format!(
+        "display  {fps:.1} fps, {shown} shown, {missed} missed"
+    ));
+
+    if clock_offset_us == client::OFFSET_UNKNOWN {
+        lines.push("clock    not synchronised".to_owned());
+    } else {
+        lines.push(format!(
+            "clock    host {:+.2} ms",
+            clock_offset_us as f64 / 1000.0
+        ));
+    }
+
+    lines
+}
 
 /// Prints what the pacer cost and what it bought.
 ///
@@ -109,8 +168,12 @@ pub fn run(
 
     let mut events = sdl.event_pump()?;
     let mut pacer = PresentPacer::new(pacing_us);
+    let mut overlay = TextOverlay::new(renderer.device(), 340, 118, 13.0)?;
+    let mut latency = LatencyRecorder::new(512);
     let mut shown = 0u64;
     let mut missed = 0u64;
+    let mut last_hud = Instant::now();
+    let mut hud_frames = 0u64;
 
     'main: loop {
         for event in events.poll_iter() {
@@ -126,15 +189,32 @@ pub fn run(
 
         match pictures_rx.recv_timeout(Duration::from_millis(16)) {
             Ok(picture) => {
-                if let Some(age) = client::age_of(picture.pts_us, offset.load(Ordering::Relaxed)) {
+                let clock_offset = offset.load(Ordering::Relaxed);
+                if let Some(age) = client::age_of(picture.pts_us, clock_offset) {
+                    latency.record(age);
                     let hold = pacer.hold_for(age);
                     if !hold.is_zero() {
                         thread::sleep(hold);
                     }
                 }
 
-                if renderer.present(picture.pixel_buffer(), layer)? {
+                if last_hud.elapsed() >= HUD_INTERVAL {
+                    let rate = hud_frames as f64 / last_hud.elapsed().as_secs_f64();
+                    overlay.update(&hud_lines(
+                        &mut latency,
+                        &mut pacer,
+                        rate,
+                        shown,
+                        missed,
+                        clock_offset,
+                    ));
+                    last_hud = Instant::now();
+                    hud_frames = 0;
+                }
+
+                if renderer.present(picture.pixel_buffer(), layer, Some(&overlay))? {
                     shown += 1;
+                    hud_frames += 1;
                 } else {
                     missed += 1;
                 }
