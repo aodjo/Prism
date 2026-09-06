@@ -7,6 +7,8 @@
 //! than on the CPU.
 
 #[cfg(target_os = "macos")]
+pub mod cursor;
+#[cfg(target_os = "macos")]
 pub mod metal;
 #[cfg(target_os = "macos")]
 pub mod overlay;

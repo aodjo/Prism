@@ -63,6 +63,9 @@ pub fn run(config: HostConfig) -> io::Result<()> {
 
     for frame_id in 0..config.frames {
         pace(start, interval, frame_id);
+        // Ahead of the frame's own packets, so eighteen bytes the cursor depends on are
+        // not queued behind a whole frame of video.
+        sender.send_cursor()?;
         let capture_ts_us = now_us();
 
         for (slice_id, slice) in slices.iter().enumerate() {
@@ -123,6 +126,7 @@ pub fn run_encoded(
 
     for frame_id in 0..config.frames {
         pace(start, interval, frame_id);
+        sender.send_cursor()?;
 
         crate::pattern::paint(&mut picture, frame_id as usize)?;
         let capture_ts_us = now_us();
@@ -218,6 +222,7 @@ pub fn run_captured(
             continue;
         };
         idle = 0;
+        sender.send_cursor()?;
 
         let capture_ts_us = captured.capture_ts_us;
         encoder.encode(captured.pixel_buffer(), capture_ts_us, sent_frames == 0)?;

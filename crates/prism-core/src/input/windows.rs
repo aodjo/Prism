@@ -22,9 +22,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+};
 
-use crate::input::{Injector, InputError};
+use crate::input::{Injector, InputError, PointerSample};
 use crate::net::packet::{InputEvent, MouseButton};
 
 /// One notch of a scroll wheel, the unit `mouseData` counts in.
@@ -204,6 +206,44 @@ pub fn system_pointer() -> Option<(i32, i32)> {
     unsafe { GetCursorPos(&mut point) }.ok()?;
 
     Some((point.x, point.y))
+}
+
+/// Reads the pointer position and the size of the primary display.
+///
+/// `SM_CXSCREEN` is the primary display alone, not the bounding box of every monitor, which
+/// is what the client is showing and therefore what the position has to be scaled against.
+/// A pointer dragged onto a second monitor reports off the edge of that display, so it is
+/// clamped back to the edge it left by.
+#[must_use]
+pub fn pointer() -> Option<PointerSample> {
+    let (x, y) = system_pointer()?;
+
+    // SAFETY: both metrics take only their index and return a plain count.
+    let (width, height) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+
+    let screen_width = clamp_dimension(width);
+    let screen_height = clamp_dimension(height);
+
+    Some(PointerSample {
+        x: clamp_to_u16(x, screen_width),
+        y: clamp_to_u16(y, screen_height),
+        screen_width,
+        screen_height,
+    })
+}
+
+/// Clamps a coordinate into the display and onto the `u16` the wire carries.
+fn clamp_to_u16(value: i32, extent: u16) -> u16 {
+    value.clamp(0, i32::from(extent.saturating_sub(1))) as u16
+}
+
+/// Clamps a display extent into the `u16` the wire carries, never reaching zero.
+///
+/// A screen of no pixels is not a thing that exists, and the wire refuses to carry one, so
+/// a degenerate reading becomes the smallest screen rather than an error the caller would
+/// have to handle every frame.
+fn clamp_dimension(extent: i32) -> u16 {
+    extent.clamp(1, i32::from(u16::MAX)) as u16
 }
 
 /// Translates a USB HID usage code into a set 1 scan code and whether it is extended.

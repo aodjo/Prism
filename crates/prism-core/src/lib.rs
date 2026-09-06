@@ -10,6 +10,7 @@
 
 pub mod capture;
 pub mod clock;
+pub mod cursor;
 pub mod decode;
 pub mod encode;
 pub mod input;

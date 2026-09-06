@@ -14,15 +14,15 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use prism_core::clock::now_us;
 use prism_core::net::clocksync::ClockSync;
 use prism_core::net::packet::{
-    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, INPUT_PACKET_LEN, InputEvent, InputPacket,
-    MAX_PACKET_SIZE, VideoPacket, channel_of,
+    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition, INPUT_PACKET_LEN,
+    InputEvent, InputPacket, MAX_PACKET_SIZE, VideoPacket, channel_of, control_type_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::transport::UdpTransport;
@@ -85,10 +85,14 @@ impl InputSender {
     /// is the one that knows the offset. Sending a raw local time would leave the host
     /// measuring the clock difference and calling it input latency.
     ///
+    /// Returns the host-clock timestamp it stamped on the event, which is what lets the
+    /// caller tell later whether a cursor reading from the host already accounts for this
+    /// movement or predates it.
+    ///
     /// # Errors
     ///
     /// Returns the underlying [`io::Error`] if the packet cannot be sent.
-    pub fn send(&self, event: InputEvent) -> io::Result<()> {
+    pub fn send(&self, event: InputEvent) -> io::Result<u64> {
         let offset = self.offset.load(Ordering::Relaxed);
         let now = now_us();
         let origin_ts_us = if offset == OFFSET_UNKNOWN {
@@ -107,9 +111,17 @@ impl InputSender {
             self.transport.send_to(&buf, self.host)?;
         }
 
-        Ok(())
+        Ok(origin_ts_us)
     }
 }
+
+/// The host's most recent pointer reading, for whoever is drawing the cursor.
+///
+/// A lock rather than an atomic because the reading is four fields and a timestamp that
+/// have to be read together — a position paired with the wrong timestamp would replay the
+/// wrong movements on top of it. It is taken once per drawn frame and held for a struct
+/// copy, which is not the kind of work the no-locks rule exists to keep off this path.
+pub type CursorSink = Arc<Mutex<Option<CursorPosition>>>;
 
 /// What the caller wants from a client session beyond the counters it prints.
 #[derive(Debug, Default)]
@@ -120,6 +132,8 @@ pub struct ClientHooks {
     pub offset: Option<Arc<AtomicI64>>,
     /// Filled in once the host's address is known, so input can be sent to it.
     pub input: Option<Arc<OnceLock<InputSender>>>,
+    /// Updated as the host reports where its pointer is.
+    pub cursor: Option<CursorSink>,
 }
 
 /// How the receiving client should behave.
@@ -175,6 +189,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         pictures,
         offset,
         input,
+        cursor,
     } = hooks;
     let offset = offset.unwrap_or_else(|| Arc::new(AtomicI64::new(OFFSET_UNKNOWN)));
     let transport = UdpTransport::bind(config.bind)?;
@@ -241,15 +256,31 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
 
         if channel_of(bytes) == Ok(Channel::Control) {
             let t4_us = now_us();
-            pongs_seen += 1;
-            if let Ok(pong) = ClockPong::decode(bytes) {
-                if sync.observe(&pong, t4_us).is_some() {
-                    offset.store(
-                        sync.offset_us().unwrap_or(OFFSET_UNKNOWN),
-                        Ordering::Relaxed,
-                    );
+
+            match control_type_of(bytes) {
+                Ok(ControlType::ClockPong) => {
+                    pongs_seen += 1;
+                    if let Ok(pong) = ClockPong::decode(bytes) {
+                        if sync.observe(&pong, t4_us).is_some() {
+                            offset.store(
+                                sync.offset_us().unwrap_or(OFFSET_UNKNOWN),
+                                Ordering::Relaxed,
+                            );
+                        }
+                    }
                 }
+                Ok(ControlType::CursorPosition) => {
+                    if let (Some(sink), Ok(reading)) =
+                        (cursor.as_ref(), CursorPosition::decode(bytes))
+                    {
+                        if let Ok(mut slot) = sink.lock() {
+                            *slot = Some(reading);
+                        }
+                    }
+                }
+                _ => {}
             }
+
             continue;
         }
 

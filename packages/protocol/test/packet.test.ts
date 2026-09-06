@@ -5,6 +5,7 @@ import {
   CLOCK_PING_LEN,
   CLOCK_PONG_LEN,
   CONTROL_HEADER_LEN,
+  CURSOR_POSITION_LEN,
   Channel,
   ControlType,
   FEEDBACK_PACKET_LEN,
@@ -21,11 +22,13 @@ import {
   controlTypeOf,
   decodeClockPing,
   decodeClockPong,
+  decodeCursorPosition,
   decodeFeedbackPacket,
   decodeInputPacket,
   decodeVideoPacket,
   encodeClockPing,
   encodeClockPong,
+  encodeCursorPosition,
   encodeFeedbackPacket,
   encodeInputPacket,
   encodeVideoPacket,
@@ -84,6 +87,8 @@ describe('constants match the shared vectors', () => {
     expect(CLOCK_PONG_LEN).toBe(vectors.constants.clockPongLen);
     expect(ControlType.ClockPing).toBe(vectors.controlTypes.clockPing);
     expect(ControlType.ClockPong).toBe(vectors.controlTypes.clockPong);
+    expect(CURSOR_POSITION_LEN).toBe(vectors.constants.cursorPositionLen);
+    expect(ControlType.CursorPosition).toBe(vectors.controlTypes.cursorPosition);
   });
 });
 
@@ -160,6 +165,42 @@ describe('clock synchronisation packets', () => {
   it('refuses to decode one control message as another', () => {
     const ping = encodeClockPing({ t1Us: 1n });
     expect(() => decodeClockPong(ping)).toThrow(PrismProtocolError);
+  });
+});
+
+describe('cursor position', () => {
+  for (const vector of vectors.cursorPositions) {
+    it(`encodes and decodes the ${vector.name} vector`, () => {
+      const packet = {
+        sampleTsUs: BigInt(vector.fields.sampleTsUs),
+        x: vector.fields.x,
+        y: vector.fields.y,
+        screenWidth: vector.fields.screenWidth,
+        screenHeight: vector.fields.screenHeight,
+      };
+      const bytes = encodeCursorPosition(packet);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(bytes.length).toBe(CURSOR_POSITION_LEN);
+      expect(decodeCursorPosition(hexToBytes(vector.hex))).toEqual(packet);
+    });
+  }
+
+  it('refuses to encode a screen with no area', () => {
+    expect(() =>
+      encodeCursorPosition({
+        sampleTsUs: 0n,
+        x: 0,
+        y: 0,
+        screenWidth: 0,
+        screenHeight: 1080,
+      }),
+    ).toThrow(PrismProtocolError);
+  });
+
+  it('refuses to decode one control message as another', () => {
+    const ping = encodeClockPing({ t1Us: 1n });
+    expect(() => decodeCursorPosition(ping)).toThrow(PrismProtocolError);
   });
 });
 
@@ -285,6 +326,7 @@ describe('malformed packets are rejected', () => {
         else if (channel === Channel.Control) {
           const type = controlTypeOf(bytes);
           if (type === ControlType.ClockPing) decodeClockPing(bytes);
+          else if (type === ControlType.CursorPosition) decodeCursorPosition(bytes);
           else decodeClockPong(bytes);
         }
       }).toThrow(PrismProtocolError);

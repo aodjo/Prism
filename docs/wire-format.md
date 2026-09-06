@@ -23,6 +23,7 @@ The first byte of every packet is the channel tag.
 | `CLOCK_PING_LEN` | 10 | Fixed size |
 | `CLOCK_PONG_LEN` | 26 | Fixed size |
 | `INPUT_PACKET_LEN` | 15 | Fixed size, every kind |
+| `CURSOR_POSITION_LEN` | 18 | Fixed size |
 | `VIDEO_HEADER_LEN` | 20 | Channel tag + video header |
 | `MAX_VIDEO_PAYLOAD` | 1180 | `MAX_PACKET_SIZE - VIDEO_HEADER_LEN` |
 | `FEEDBACK_PACKET_LEN` | 17 | Fixed size |
@@ -85,8 +86,9 @@ offset  size  field           type   notes
 |---|---|---|---|
 | `ClockPing` | 0 | client → host | start a clock synchronisation exchange |
 | `ClockPong` | 1 | host → client | answer with the host's send and receive times |
+| `CursorPosition` | 2 | host → client | where the host's pointer is |
 
-Types 2 and above are reserved. A decoder that sees one rejects the packet.
+Types 3 and above are reserved. A decoder that sees one rejects the packet.
 
 ### Clock synchronisation
 
@@ -123,6 +125,40 @@ offset  size  field    type   notes
 10      8     t2       u64    host clock when the ping arrived
 18      8     t3       u64    host clock when the pong was sent
 ```
+
+### Cursor position
+
+The host keeps its cursor out of the captured video, so the client draws one. A cursor
+baked into the frames inherits the whole video latency; one drawn by the client answers the
+hand holding the mouse immediately.
+
+That makes these messages **correction, not the source**. The client applies each movement
+it sends the instant it happens and draws there. A reading carries everything the client
+could not have known — the host's own user, a window warping the pointer, an edge it
+clamped against.
+
+**CursorPosition** (control type 2), 18 bytes:
+```
+offset  size  field           type   notes
+2       8     sample_ts_us    u64    host clock when the pointer was read
+10      2     x               u16    pixels from the left of the primary display
+12      2     y               u16    pixels from the top
+14      2     screen_width    u16    never zero
+16      2     screen_height   u16    never zero
+```
+
+`sample_ts_us` is what makes a reading usable as correction rather than only as display.
+The client stamps the input it sends in the same clock, so a reading already accounts for
+every movement older than it: those are dropped and the newer ones replayed on top. Without
+the replay the cursor would jump backwards by one round trip every time a reading arrived.
+
+The screen size travels with every message rather than being negotiated once. It is four
+bytes on a packet already this small, and it means a client that joins late, or misses the
+message where the host changed resolution, is never left scaling against a screen that no
+longer exists.
+
+A screen of no pixels is refused at both ends. The client divides by these to place the
+cursor, so a zero would either crash it or put the cursor nowhere.
 
 ## Input packets (channel 3)
 

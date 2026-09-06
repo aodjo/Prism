@@ -33,6 +33,9 @@ export const CLOCK_PONG_LEN = 26;
 /** Exact byte length of an input event packet. */
 export const INPUT_PACKET_LEN = 15;
 
+/** Exact byte length of a cursor position message. */
+export const CURSOR_POSITION_LEN = 18;
+
 /**
  * What an input packet describes.
  *
@@ -94,4 +97,5 @@ export const VIDEO_FLAGS_RESERVED_MASK = 0xf8;
 export enum ControlType {
   ClockPing = 0,
   ClockPong = 1,
+  CursorPosition = 2,
 }

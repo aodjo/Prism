@@ -27,6 +27,7 @@ use objc2_metal::{
 };
 
 use crate::render::RenderError;
+use crate::render::metal::{Quad, place};
 
 /// Bitmap flags for premultiplied RGBA, which is what the blend expects.
 ///
@@ -41,6 +42,9 @@ const BYTES_PER_PIXEL: usize = 4;
 /// Dark and mostly opaque, because the picture underneath is arbitrary and the numbers
 /// have to stay readable over all of it.
 const BACKDROP: [f64; 4] = [0.0, 0.0, 0.0, 0.55];
+
+/// How far the overlay sits from the top left of the target, in pixels.
+const MARGIN: usize = 16;
 
 // SAFETY: `CGBitmapContextCreate` is a stable CoreGraphics entry point. The crate binds
 // only the newer block-based variant, so it is declared here directly.
@@ -65,6 +69,7 @@ pub struct TextOverlay {
     /// The font and colour are not held separately: the attribute dictionary is built
     /// with the CoreFoundation type callbacks, so it retains both for as long as it lives.
     attributes: CFRetained<CFDictionary>,
+    backdrop: CFRetained<CGColor>,
     texture: Retained<ProtocolObject<dyn MTLTexture>>,
     line_height: f64,
 }
@@ -139,6 +144,7 @@ impl TextOverlay {
             pixels,
             context,
             attributes,
+            backdrop: CGColor::new_srgb(BACKDROP[0], BACKDROP[1], BACKDROP[2], BACKDROP[3]),
             texture,
             line_height: font_size * 1.35,
         })
@@ -148,6 +154,23 @@ impl TextOverlay {
     #[must_use]
     pub fn texture(&self) -> &ProtocolObject<dyn MTLTexture> {
         &self.texture
+    }
+
+    /// Returns the quad that draws the overlay pinned to the top left of the target.
+    ///
+    /// Placed at its natural pixel size rather than as a fraction, so the text stays
+    /// legible whatever the window is scaled to instead of stretching with it.
+    #[must_use]
+    pub fn quad(&self, target_width: usize, target_height: usize) -> Quad<'_> {
+        let at = (
+            MARGIN as f32 / target_width.max(1) as f32,
+            MARGIN as f32 / target_height.max(1) as f32,
+        );
+
+        Quad {
+            texture: &self.texture,
+            rect: place(at, self.width, self.height, target_width, target_height),
+        }
     }
 
     /// Returns the overlay's width in pixels.
@@ -176,16 +199,17 @@ impl TextOverlay {
             },
         };
 
-        // SAFETY: the context is alive, the rectangle covers exactly the bitmap, and the
-        // four components match its device RGB colour space.
-        //
         // The backdrop is not decoration: white text over a bright, moving picture is
         // unreadable exactly when the numbers matter most.
-        unsafe {
-            CGContext::clear_rect(Some(&self.context), full);
-            CGContext::set_fill_color(Some(&self.context), BACKDROP.as_ptr());
-            CGContext::fill_rect(Some(&self.context), full);
-        }
+        //
+        // The colour is a `CGColor`, which carries its own colour space, rather than a
+        // loose component array. An array is read against whatever space the context
+        // currently has, and a fresh bitmap context does not necessarily have the one the
+        // caller has in mind — these four components read as grey plus alpha give a fully
+        // transparent black, which is a backdrop that never appears.
+        CGContext::clear_rect(Some(&self.context), full);
+        CGContext::set_fill_color_with_color(Some(&self.context), Some(&self.backdrop));
+        CGContext::fill_rect(Some(&self.context), full);
 
         for (index, line) in lines.iter().enumerate() {
             let baseline = self.height as f64 - self.line_height * (index as f64 + 1.0);

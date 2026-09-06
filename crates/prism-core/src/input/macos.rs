@@ -16,7 +16,7 @@ use objc2_core_graphics::{
     CGEventTapLocation, CGEventType, CGMainDisplayID, CGMouseButton,
 };
 
-use crate::input::{Injector, InputError};
+use crate::input::{Injector, InputError, PointerSample};
 use crate::net::packet::{InputEvent, MouseButton};
 
 /// Where injected events enter the system.
@@ -251,9 +251,51 @@ impl Injector for MacInjector {
     }
 }
 
+/// Reads where the system thinks the pointer is.
+///
+/// There is no direct call for this — the location rides on an event — so a null event is
+/// created purely to be asked where it happened.
 fn system_pointer() -> Option<CGPoint> {
     let event = CGEvent::new(None)?;
     Some(CGEvent::location(Some(&event)))
+}
+
+/// Reads the pointer position and the size of the display it sits on.
+///
+/// Coordinates are relative to the main display's own origin, so a pointer on a secondary
+/// display to the left of it reports a negative position before clamping. Clamping is the
+/// honest answer rather than a failure: the client is showing the main display, and a
+/// pointer that has left it belongs at the edge it left by.
+#[must_use]
+pub fn pointer() -> Option<PointerSample> {
+    let point = system_pointer()?;
+    let bounds = CGDisplayBounds(CGMainDisplayID());
+
+    Some(PointerSample {
+        x: clamp_to_u16(point.x - bounds.origin.x, bounds.size.width),
+        y: clamp_to_u16(point.y - bounds.origin.y, bounds.size.height),
+        screen_width: clamp_dimension(bounds.size.width),
+        screen_height: clamp_dimension(bounds.size.height),
+    })
+}
+
+/// Clamps a coordinate into the display and onto the `u16` the wire carries.
+fn clamp_to_u16(value: f64, extent: f64) -> u16 {
+    let limit = f64::from(clamp_dimension(extent).saturating_sub(1));
+    value.clamp(0.0, limit) as u16
+}
+
+/// Clamps a display extent into the `u16` the wire carries, never reaching zero.
+///
+/// A screen of no pixels is not a thing that exists, and the wire refuses to carry one, so
+/// a degenerate reading becomes the smallest screen rather than an error the caller would
+/// have to handle every frame.
+fn clamp_dimension(extent: f64) -> u16 {
+    if extent >= f64::from(u16::MAX) {
+        return u16::MAX;
+    }
+
+    (extent as u16).max(1)
 }
 
 /// Returns the modifier flag a HID usage corresponds to, if it is a modifier at all.

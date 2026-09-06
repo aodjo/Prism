@@ -5,6 +5,7 @@ import {
   MouseButton,
   CLOCK_PONG_LEN,
   CONTROL_HEADER_LEN,
+  CURSOR_POSITION_LEN,
   Channel,
   ControlType,
   FEEDBACK_PACKET_LEN,
@@ -379,7 +380,11 @@ export function controlTypeOf(bytes: Uint8Array): ControlType {
   }
 
   const type = bytes.at(1);
-  if (type !== ControlType.ClockPing && type !== ControlType.ClockPong) {
+  if (
+    type !== ControlType.ClockPing &&
+    type !== ControlType.ClockPong &&
+    type !== ControlType.CursorPosition
+  ) {
     throw new PrismProtocolError(`unknown control type ${type}`);
   }
 
@@ -472,6 +477,113 @@ export function decodeClockPong(bytes: Uint8Array): ClockPong {
     t2Us: view.getBigUint64(10, true),
     t3Us: view.getBigUint64(18, true),
   };
+}
+
+/**
+ * Where the host's pointer is, so the client can draw the cursor itself.
+ *
+ * The host keeps the cursor out of the captured video, so the client has to draw it. That
+ * is the point: a cursor baked into the frames inherits the whole video latency, while one
+ * drawn by the client answers the hand holding the mouse immediately and is corrected by
+ * these messages as they arrive.
+ */
+export interface CursorPosition {
+  /** Host clock when the pointer was read, in microseconds. */
+  sampleTsUs: bigint;
+  /** Pixels from the left of the host's primary display. */
+  x: number;
+  /** Pixels from the top of the host's primary display. */
+  y: number;
+  /** Width of the host's primary display in pixels; never zero. */
+  screenWidth: number;
+  /** Height of the host's primary display in pixels; never zero. */
+  screenHeight: number;
+}
+
+/**
+ * Serialises a cursor position into its fixed 18-byte layout.
+ *
+ * The screen size travels with every message rather than being negotiated once. It is four
+ * bytes against a packet already this small, and it means a client that joins late, or
+ * misses the message where the host changed resolution, is never left scaling against a
+ * screen that no longer exists.
+ *
+ * @param {CursorPosition} packet - Packet fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer of exactly `CURSOR_POSITION_LEN` bytes.
+ * @throws {PrismProtocolError} If a field does not fit its width, or either screen dimension is zero.
+ *
+ * @example
+ * encodeCursorPosition({ sampleTsUs: 1n, x: 8, y: 4, screenWidth: 2560, screenHeight: 1440 }).length; // 18
+ */
+export function encodeCursorPosition(packet: CursorPosition): Uint8Array {
+  assertU64('sampleTsUs', packet.sampleTsUs);
+  assertU16('x', packet.x);
+  assertU16('y', packet.y);
+  assertU16('screenWidth', packet.screenWidth);
+  assertU16('screenHeight', packet.screenHeight);
+  assertScreenHasArea(packet.screenWidth, packet.screenHeight);
+
+  const bytes = new Uint8Array(CURSOR_POSITION_LEN);
+  const view = new DataView(bytes.buffer);
+
+  view.setUint8(0, Channel.Control);
+  view.setUint8(1, ControlType.CursorPosition);
+  view.setBigUint64(2, packet.sampleTsUs, true);
+  view.setUint16(10, packet.x, true);
+  view.setUint16(12, packet.y, true);
+  view.setUint16(14, packet.screenWidth, true);
+  view.setUint16(16, packet.screenHeight, true);
+
+  return bytes;
+}
+
+/**
+ * Parses a cursor position, requiring an exact length match and a screen with area.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {CursorPosition} The decoded reading.
+ * @throws {PrismProtocolError} If the packet is not a cursor position, is not exactly `CURSOR_POSITION_LEN` bytes, or claims a screen with no area.
+ *
+ * @example
+ * decodeCursorPosition(encodeCursorPosition({ sampleTsUs: 1n, x: 8, y: 4, screenWidth: 16, screenHeight: 9 })).x; // 8
+ */
+export function decodeCursorPosition(bytes: Uint8Array): CursorPosition {
+  expectControl(bytes, ControlType.CursorPosition, CURSOR_POSITION_LEN);
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const screenWidth = view.getUint16(14, true);
+  const screenHeight = view.getUint16(16, true);
+  assertScreenHasArea(screenWidth, screenHeight);
+
+  return {
+    sampleTsUs: view.getBigUint64(2, true),
+    x: view.getUint16(10, true),
+    y: view.getUint16(12, true),
+    screenWidth,
+    screenHeight,
+  };
+}
+
+/**
+ * Throws unless a claimed screen has both dimensions.
+ *
+ * The client divides by these to place the cursor, so a zero would either crash it or
+ * silently put the cursor nowhere. A screen of no pixels is not a thing that exists.
+ *
+ * @param {number} width - Claimed screen width in pixels.
+ * @param {number} height - Claimed screen height in pixels.
+ * @returns {void} Nothing; the check either passes or throws.
+ * @throws {PrismProtocolError} If either dimension is zero.
+ *
+ * @example
+ * assertScreenHasArea(2560, 1440); // passes
+ */
+function assertScreenHasArea(width: number, height: number): void {
+  if (width === 0 || height === 0) {
+    throw new PrismProtocolError(
+      `cursor position claims a ${width}x${height} screen`,
+    );
+  }
 }
 
 /**
