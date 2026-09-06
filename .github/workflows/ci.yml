@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-latest
+          - name: windows-x64
+            os: windows-latest
+          - name: linux-x64
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: TypeScript tests
+        run: pnpm test:ts
+
+      - name: Build native addon
+        run: pnpm build:native
+
+      - name: Addon loads in Node
+        run: pnpm smoke:node
+
+      - name: Addon loads in Electron
+        run: pnpm smoke:electron
+        if: runner.os != 'Linux'
+
+      - name: Addon loads in Electron
+        run: xvfb-run --auto-servernum pnpm smoke:electron
+        if: runner.os == 'Linux'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-native-${{ matrix.name }}
+          path: packages/native/*.node
+          if-no-files-found: error
