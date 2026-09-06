@@ -64,6 +64,16 @@ pub const FEC_HEADER_LEN: usize = 20;
 /// Largest parity shard that fits in one packet.
 pub const MAX_FEC_PAYLOAD: usize = MAX_PLAINTEXT_SIZE - FEC_HEADER_LEN;
 
+/// Byte length of an audio packet header, including the leading channel tag.
+pub const AUDIO_HEADER_LEN: usize = 13;
+
+/// Largest Opus packet that fits in one datagram.
+///
+/// Far more than one is ever needed — five milliseconds of stereo at a hundred and twenty
+/// kilobits is about eighty bytes — which is the point: audio never fragments and never has to
+/// be reassembled, so a lost audio packet costs exactly one frame and nothing else.
+pub const MAX_AUDIO_PAYLOAD: usize = MAX_PLAINTEXT_SIZE - AUDIO_HEADER_LEN;
+
 /// Most shards a Reed-Solomon block may hold, data and parity together.
 ///
 /// GF(2^8) has 256 elements, and Prism stops one short so a block's shard count fits a
@@ -1302,6 +1312,96 @@ impl InputPacket {
         Ok(Self {
             origin_ts_us: read_u64(bytes, 2),
             event,
+        })
+    }
+}
+
+/// One encoded audio frame on its way to the client.
+///
+/// Audio is not sliced and not reassembled. A frame is small enough that one always fits in
+/// one datagram, so a lost packet costs exactly one frame — which the decoder conceals — rather
+/// than stalling a reassembly that would then have to be abandoned.
+///
+/// It also carries no forward error correction of its own. Opus has in-band redundancy that
+/// costs a fraction of what Reed-Solomon would and is designed for exactly this, so repair
+/// belongs inside the payload rather than around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioPacket<'a> {
+    /// Position of this frame in the stream, counted from zero and wrapping.
+    ///
+    /// What the jitter buffer orders by, and what tells it a frame is missing rather than
+    /// merely late.
+    pub sequence: u32,
+    /// Host clock when the audio was captured, in microseconds.
+    ///
+    /// The same clock the video packets carry, which is what lets the client hold picture and
+    /// sound to a common age rather than to two independent ones.
+    pub capture_ts_us: u64,
+    /// One Opus packet.
+    pub payload: &'a [u8],
+}
+
+impl<'a> AudioPacket<'a> {
+    /// Serialises this frame into `buf` and returns how many bytes were written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::PayloadTooLarge`] if the Opus packet exceeds
+    /// [`MAX_AUDIO_PAYLOAD`], and [`ProtocolError::BufferTooSmall`] if `buf` cannot hold the
+    /// result.
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if self.payload.len() > MAX_AUDIO_PAYLOAD {
+            return Err(ProtocolError::PayloadTooLarge {
+                actual: self.payload.len(),
+            });
+        }
+
+        let total = AUDIO_HEADER_LEN + self.payload.len();
+        if buf.len() < total {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: total,
+            });
+        }
+
+        buf[0] = Channel::Audio as u8;
+        buf[1..5].copy_from_slice(&self.sequence.to_le_bytes());
+        buf[5..13].copy_from_slice(&self.capture_ts_us.to_le_bytes());
+        buf[AUDIO_HEADER_LEN..total].copy_from_slice(self.payload);
+
+        Ok(total)
+    }
+
+    /// Parses an audio packet, borrowing its payload from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`] for another channel's packet and
+    /// [`ProtocolError::TooShort`] if the header is incomplete.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, ProtocolError> {
+        match channel_of(bytes)? {
+            Channel::Audio => {}
+            _ => {
+                return Err(ProtocolError::WrongChannel {
+                    expected: Channel::Audio,
+                    got: bytes[0],
+                });
+            }
+        }
+
+        if bytes.len() < AUDIO_HEADER_LEN {
+            return Err(ProtocolError::TooShort {
+                actual: bytes.len(),
+                needed: AUDIO_HEADER_LEN,
+            });
+        }
+
+        Ok(Self {
+            sequence: u32::from_le_bytes(bytes[1..5].try_into().expect("four bytes are in range")),
+            capture_ts_us: u64::from_le_bytes(
+                bytes[5..13].try_into().expect("eight bytes are in range"),
+            ),
+            payload: &bytes[AUDIO_HEADER_LEN..],
         })
     }
 }

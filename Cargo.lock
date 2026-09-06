@@ -859,6 +859,7 @@ dependencies = [
  "objc2-screen-capture-kit",
  "objc2-video-toolbox",
  "reed-solomon-erasure",
+ "rusty-opus",
  "serde_json",
  "sha2",
  "snow",
@@ -961,6 +962,12 @@ checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
 ]
+
+[[package]]
+name = "rusty-opus"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa2cbb720cf9bed36712efbae9ffc89d8977bf51b05687b792c1f98a33add8e2"
 
 [[package]]
 name = "scopeguard"
