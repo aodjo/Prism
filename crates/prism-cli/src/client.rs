@@ -19,10 +19,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use prism_core::clock::now_us;
+use prism_core::net::ack::AckTracker;
 use prism_core::net::clocksync::ClockSync;
 use prism_core::net::packet::{
-    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition, INPUT_PACKET_LEN,
-    InputEvent, InputPacket, MAX_PACKET_SIZE, VideoPacket, channel_of, control_type_of,
+    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
+    FEEDBACK_PACKET_LEN, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE, VideoPacket,
+    channel_of, control_type_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::transport::UdpTransport;
@@ -221,6 +223,9 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut pings_sent = 0u32;
     let mut pongs_seen = 0u32;
     let mut ping_buf = [0u8; CLOCK_PING_LEN];
+    let mut acks = AckTracker::new();
+    let mut reports_sent = 0u64;
+    let mut reports_failed = 0u64;
 
     loop {
         if let Some(host) = host {
@@ -296,6 +301,23 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         let Some(frame) = reassembler.take_completed() else {
             continue;
         };
+
+        // Acknowledged before anything else is done with the frame. The report is what lets
+        // the host reference this frame instead of sending a keyframe when the next one is
+        // lost, and every microsecond it waits is a microsecond the encoder spends choosing
+        // a reference it did not have to.
+        acks.received(frame.frame_id);
+        if let Some(host) = host {
+            if let Some(report) = acks.report(now_us()) {
+                let mut buf = [0u8; FEEDBACK_PACKET_LEN];
+                if report.encode_into(&mut buf).is_ok() {
+                    match transport.send_to(&buf, host) {
+                        Ok(_) => reports_sent += 1,
+                        Err(_) => reports_failed += 1,
+                    }
+                }
+            }
+        }
 
         match age_of(frame.capture_ts_us, offset.load(Ordering::Relaxed)) {
             Some(age) => arrival.record(age),
@@ -373,6 +395,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         "frames   completed {}  dropped incomplete {}",
         stats.completed, stats.dropped_incomplete
     );
+    println!("feedback sent {reports_sent}  failed to send {reports_failed}");
 
     Ok(())
 }

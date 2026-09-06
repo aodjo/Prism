@@ -107,6 +107,17 @@ enum Command {
         /// Target bitrate in bits per second when encoding.
         #[arg(long, default_value_t = 24_000_000)]
         bitrate: u32,
+
+        /// Drop this fraction of outgoing video packets, as a percentage.
+        ///
+        /// The M4 gate is judged at 5. Deterministic and seeded rather than an operating
+        /// system traffic shaper, so a failure reproduces and CI can run it.
+        #[arg(long, default_value_t = 0.0)]
+        loss: f64,
+
+        /// Seed for the loss injector, so a failing run repeats exactly.
+        #[arg(long, default_value_t = 1)]
+        loss_seed: u64,
     },
 
     /// Receive frames and report latency.
@@ -227,6 +238,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             width,
             height,
             bitrate,
+            loss,
+            loss_seed,
         } => {
             let config = host::HostConfig {
                 peer,
@@ -234,6 +247,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 frame_bytes,
                 slices,
                 frames,
+                loss_ppm: percent_to_ppm(loss),
+                loss_seed,
             };
 
             if !encode && !capture {
@@ -377,4 +392,17 @@ fn windowless_input() -> std::sync::Arc<std::sync::OnceLock<client::InputSender>
     let slot = std::sync::Arc::new(std::sync::OnceLock::new());
     client::spawn_synthetic_input(std::sync::Arc::clone(&slot));
     slot
+}
+
+/// Converts a loss percentage from the command line into parts per million.
+///
+/// Parts per million on the inside because the decision is an integer comparison on the
+/// send path; a percentage on the outside because that is how the requirement is written
+/// and how anyone reading the output will think about it.
+///
+/// Values outside zero to a hundred are clamped rather than refused: a run that quietly did
+/// something other than what was asked is worse than one that says what it did, and the
+/// injector reports the rate it actually achieved.
+fn percent_to_ppm(percent: f64) -> u32 {
+    (percent.clamp(0.0, 100.0) * 10_000.0).round() as u32
 }

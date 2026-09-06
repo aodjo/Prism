@@ -26,6 +26,13 @@ pub struct HostConfig {
     pub slices: usize,
     /// Frames to send before stopping.
     pub frames: u32,
+    /// Video packets to drop on the way out, in parts per million.
+    ///
+    /// Zero sends everything. This is how a run is made lossy without an operating system
+    /// traffic shaper, so the recovery machinery can be judged reproducibly and in CI.
+    pub loss_ppm: u32,
+    /// Seed for the loss injector, so a failing run repeats exactly.
+    pub loss_seed: u64,
 }
 
 /// Sends `config.frames` synthetic frames and reports what was transmitted.
@@ -51,6 +58,9 @@ pub fn run(config: HostConfig) -> io::Result<()> {
 
     let mut sender = SliceSender::connect(config.peer)?;
     sender.serve_return_path(true)?;
+    if config.loss_ppm > 0 {
+        sender.inject_loss(config.loss_ppm, config.loss_seed);
+    }
     let slices = build_slices(config.frame_bytes, config.slices);
     let interval = frame_interval(config.fps);
 
@@ -102,6 +112,9 @@ pub fn run_encoded(
 
     let mut sender = SliceSender::connect(config.peer)?;
     sender.serve_return_path(true)?;
+    if config.loss_ppm > 0 {
+        sender.inject_loss(config.loss_ppm, config.loss_seed);
+    }
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     let mut picture = Nv12Frame::new(encoder_config.width, encoder_config.height)?;
     let interval = frame_interval(config.fps);
@@ -201,6 +214,9 @@ pub fn run_captured(
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     let mut sender = SliceSender::connect(config.peer)?;
     sender.serve_return_path(true)?;
+    if config.loss_ppm > 0 {
+        sender.inject_loss(config.loss_ppm, config.loss_seed);
+    }
 
     println!(
         "host: capturing the screen at {width}x{height} {} fps, {} kbps, to {}",
@@ -277,6 +293,8 @@ fn report(sender: &SliceSender, elapsed: Duration) {
         elapsed.as_secs_f64(),
         sender.bytes() as f64 * 8.0 / elapsed.as_secs_f64() / 1e6
     );
+    sender.report_loss();
+    sender.report_feedback();
 }
 
 /// Splits a frame budget into slice bitstreams with a distinguishable byte pattern.
