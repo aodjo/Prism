@@ -5,11 +5,12 @@
 //! same file, so a layout change that is applied to only one implementation fails here.
 
 use prism_core::net::packet::{
-    CLOCK_PING_LEN, CLOCK_PONG_LEN, CONTROL_HEADER_LEN, CURSOR_POSITION_LEN, Channel, ClockPing,
-    ClockPong, ControlType, CursorPosition, FEC_HEADER_LEN, FEEDBACK_PACKET_LEN, FORMAT_VERSION,
-    FecPacket, FeedbackPacket, INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket,
-    MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD, MouseButton, SEAL_OVERHEAD,
-    VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN, VideoPacket, channel_of, control_type_of,
+    AUDIO_HEADER_LEN, AudioPacket, CLOCK_PING_LEN, CLOCK_PONG_LEN, CONTROL_HEADER_LEN,
+    CURSOR_POSITION_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
+    FEC_HEADER_LEN, FEEDBACK_PACKET_LEN, FORMAT_VERSION, FecPacket, FeedbackPacket,
+    INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket, MAX_AUDIO_PAYLOAD, MAX_PACKET_SIZE,
+    MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD, MouseButton, SEAL_OVERHEAD, VIDEO_FLAGS_RESERVED_MASK,
+    VIDEO_HEADER_LEN, VideoPacket, channel_of, control_type_of,
 };
 use serde_json::Value;
 
@@ -78,6 +79,14 @@ fn constants_match_the_shared_vectors() {
     assert_eq!(
         FEEDBACK_PACKET_LEN as u64,
         v["constants"]["feedbackPacketLen"].as_u64().unwrap()
+    );
+    assert_eq!(
+        AUDIO_HEADER_LEN as u64,
+        v["constants"]["audioHeaderLen"].as_u64().unwrap()
+    );
+    assert_eq!(
+        MAX_AUDIO_PAYLOAD as u64,
+        v["constants"]["maxAudioPayload"].as_u64().unwrap()
     );
     assert_eq!(
         u64::from(VIDEO_FLAGS_RESERVED_MASK),
@@ -280,6 +289,36 @@ fn fec_packets_round_trip_through_the_vectors() {
 }
 
 #[test]
+fn audio_packets_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["audioPackets"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+        let payload = hex_to_bytes(vector["payloadHex"].as_str().unwrap());
+
+        let packet = AudioPacket {
+            sequence: fields["sequence"].as_u64().unwrap() as u32,
+            capture_ts_us: u64_field(fields, "captureTsUs"),
+            payload: &payload,
+        };
+
+        let mut buf = [0u8; MAX_PACKET_SIZE];
+        let written = packet.encode_into(&mut buf).unwrap();
+        assert_eq!(written, AUDIO_HEADER_LEN + payload.len());
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+
+        let bytes = hex_to_bytes(expected_hex);
+        assert_eq!(
+            AudioPacket::decode(&bytes).unwrap(),
+            packet,
+            "decode {name}"
+        );
+    }
+}
+
+#[test]
 fn cursor_positions_round_trip_through_the_vectors() {
     let v = vectors();
 
@@ -395,7 +434,7 @@ fn malformed_packets_are_rejected() {
             },
             Ok(Channel::Input) => InputPacket::decode(&bytes).is_err(),
             Ok(Channel::Fec) => FecPacket::decode(&bytes).is_err(),
-            Ok(_) => false,
+            Ok(Channel::Audio) => AudioPacket::decode(&bytes).is_err(),
         };
 
         assert!(rejected, "{name} should have been rejected: {reason}");

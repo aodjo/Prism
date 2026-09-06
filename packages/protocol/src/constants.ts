@@ -64,6 +64,18 @@ export const FEC_HEADER_LEN = 20;
 /** Largest parity shard that fits in one packet. */
 export const MAX_FEC_PAYLOAD = MAX_PLAINTEXT_SIZE - FEC_HEADER_LEN;
 
+/** Byte length of an audio packet header, including the leading channel tag. */
+export const AUDIO_HEADER_LEN = 13;
+
+/**
+ * Largest Opus packet that fits in one datagram.
+ *
+ * Far more than one is ever needed — five milliseconds of stereo at a hundred and twenty
+ * kilobits is about eighty bytes — which is the point: audio never fragments and never has to
+ * be reassembled, so a lost audio packet costs exactly one frame and nothing else.
+ */
+export const MAX_AUDIO_PAYLOAD = MAX_PLAINTEXT_SIZE - AUDIO_HEADER_LEN;
+
 /**
  * Most shards a Reed-Solomon block may hold, data and parity together.
  *

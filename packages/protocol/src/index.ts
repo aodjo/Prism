@@ -11,7 +11,9 @@ export {
   CLOCK_PONG_LEN,
   CONTROL_HEADER_LEN,
   CURSOR_POSITION_LEN,
+  AUDIO_HEADER_LEN,
   FEC_HEADER_LEN,
+  MAX_AUDIO_PAYLOAD,
   MAX_FEC_PAYLOAD,
   MAX_PLAINTEXT_SIZE,
   SEAL_OVERHEAD,
@@ -33,6 +35,7 @@ export { PrismProtocolError } from './errors.js';
 export {
   channelOf,
   controlTypeOf,
+  decodeAudioPacket,
   decodeClockPing,
   decodeClockPong,
   decodeCursorPosition,
@@ -40,6 +43,7 @@ export {
   decodeFeedbackPacket,
   decodeInputPacket,
   decodeVideoPacket,
+  encodeAudioPacket,
   encodeClockPing,
   encodeClockPong,
   encodeCursorPosition,
@@ -50,6 +54,7 @@ export {
   encodeVideoPacket,
 } from './packet.js';
 export type {
+  AudioPacket,
   ClockPing,
   ClockPong,
   CursorPosition,

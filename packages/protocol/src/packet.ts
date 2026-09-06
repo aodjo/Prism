@@ -6,7 +6,9 @@ import {
   CLOCK_PONG_LEN,
   CONTROL_HEADER_LEN,
   CURSOR_POSITION_LEN,
+  AUDIO_HEADER_LEN,
   FEC_HEADER_LEN,
+  MAX_AUDIO_PAYLOAD,
   MAX_FEC_PAYLOAD,
   MAX_FIELD_SHARDS,
   Channel,
@@ -925,4 +927,84 @@ function assertI16(field: string, value: number): void {
   if (!Number.isInteger(value) || value < -0x8000 || value > 0x7fff) {
     throw new PrismProtocolError(`${field} must be an integer in [-32768, 32767], got ${value}`);
   }
+}
+
+/**
+ * One encoded audio frame on its way to the client.
+ *
+ * Audio is not sliced and not reassembled. A frame is small enough that one always fits in one
+ * datagram, so a lost packet costs exactly one frame — which the decoder conceals — rather than
+ * stalling a reassembly that would then have to be abandoned.
+ */
+export interface AudioPacket {
+  /** Position of this frame in the stream, counted from zero and wrapping. */
+  sequence: number;
+  /** Host clock when the audio was captured, in microseconds. */
+  captureTsUs: bigint;
+  /** One Opus packet. */
+  payload: Uint8Array;
+}
+
+/**
+ * Serialises an audio frame.
+ *
+ * @param {AudioPacket} packet - The frame to encode.
+ * @returns {Uint8Array} The packet, ready to be sealed.
+ * @throws {PrismProtocolError} If a field is out of range or the Opus packet exceeds `MAX_AUDIO_PAYLOAD`.
+ *
+ * @example
+ * encodeAudioPacket({ sequence: 0, captureTsUs: 0n, payload: new Uint8Array(80) }).length; // 93
+ */
+export function encodeAudioPacket(packet: AudioPacket): Uint8Array {
+  assertU32('sequence', packet.sequence);
+  assertU64('captureTsUs', packet.captureTsUs);
+
+  if (packet.payload.length > MAX_AUDIO_PAYLOAD) {
+    throw new PrismProtocolError(
+      `audio frame is ${packet.payload.length} bytes, exceeds MAX_AUDIO_PAYLOAD of ${MAX_AUDIO_PAYLOAD}`,
+    );
+  }
+
+  const bytes = new Uint8Array(AUDIO_HEADER_LEN + packet.payload.length);
+  const view = new DataView(bytes.buffer);
+
+  view.setUint8(0, Channel.Audio);
+  view.setUint32(1, packet.sequence, true);
+  view.setBigUint64(5, packet.captureTsUs, true);
+  bytes.set(packet.payload, AUDIO_HEADER_LEN);
+
+  return bytes;
+}
+
+/**
+ * Parses an audio packet, copying its payload out of the input.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {AudioPacket} The decoded frame.
+ * @throws {PrismProtocolError} If the packet is not on the audio channel or is shorter than its header.
+ *
+ * @example
+ * decodeAudioPacket(encodeAudioPacket(packet)).sequence; // 0
+ */
+export function decodeAudioPacket(bytes: Uint8Array): AudioPacket {
+  const channel = channelOf(bytes);
+  if (channel !== Channel.Audio) {
+    throw new PrismProtocolError(
+      `expected channel ${Channel.Audio}, got tag ${bytes[0]}`,
+    );
+  }
+
+  if (bytes.length < AUDIO_HEADER_LEN) {
+    throw new PrismProtocolError(
+      `audio packet is ${bytes.length} bytes, needs at least ${AUDIO_HEADER_LEN}`,
+    );
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  return {
+    sequence: view.getUint32(1, true),
+    captureTsUs: view.getBigUint64(5, true),
+    payload: bytes.slice(AUDIO_HEADER_LEN),
+  };
 }

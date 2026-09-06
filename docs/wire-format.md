@@ -33,6 +33,8 @@ The first byte of every packet is the channel tag.
 | `FEEDBACK_PACKET_LEN` | 17 | Fixed size |
 | `FEC_HEADER_LEN` | 20 | Same as the video header, so a parity shard is exactly as long as the data shards it repairs |
 | `MAX_FEC_PAYLOAD` | 1156 | `MAX_PLAINTEXT_SIZE - FEC_HEADER_LEN` |
+| `AUDIO_HEADER_LEN` | 13 | Channel tag + sequence + capture timestamp |
+| `MAX_AUDIO_PAYLOAD` | 1163 | `MAX_PLAINTEXT_SIZE - AUDIO_HEADER_LEN`. Far more than needed, which is the point |
 
 ## Sealing
 
@@ -257,6 +259,33 @@ against its own clock and get the offset back as latency.
 
 Input is sent the instant it happens, with no pacing and no batching. It is the one path
 where a few milliseconds are felt directly rather than seen.
+
+## Audio packets (channel 2)
+
+```
+offset  size  field           type   notes
+0       1     channel         u8     = 2
+1       4     sequence        u32    monotonic, wraps
+5       8     capture_ts_us   u64    host clock, the same one video carries
+13      ..    payload         bytes  one Opus packet
+```
+
+**One frame, one packet, always.** A frame is 5 ms of 48 kHz stereo Opus, which at 128 kbps is
+about 80 bytes and at 256 kbps peaked at **182** in measurement — against a 1163 byte budget.
+Audio therefore never fragments, never needs reassembly, and a lost packet costs exactly one
+frame rather than stalling a reassembly that would then be abandoned.
+
+**No parity.** Opus carries its own in-band redundancy and its decoder conceals a missing
+frame by continuing the pitch and spectrum of what came before. For a single frame that is
+inaudible, where Reed-Solomon would spend bandwidth on every frame to repair the occasional
+one. Repair belongs inside the payload, not around it.
+
+**No pacing.** Audio is a fraction of a percent of the link and its frames are already 5 ms
+apart. Spreading them would delay sound to smooth a burst that does not exist.
+
+**The same clock as video.** `capture_ts_us` comes from the host clock the video packets carry,
+which is what lets the client hold picture and sound to a common age — rather than locking them
+together everywhere, which would give both the worse behaviour of the two.
 
 ## Parity packets (channel 5)
 
