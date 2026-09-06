@@ -1,0 +1,47 @@
+# Run with, from the repository root:
+#
+#   docker compose -f deploy/rendezvous/compose.yaml up -d --build
+#
+# See docs/rendezvous.md for what to open on the firewall and how to check it is working.
+
+services:
+  rendezvous:
+    build:
+      context: ../..
+      dockerfile: deploy/rendezvous/Dockerfile
+    image: prism-rendezvous
+    container_name: prism-rendezvous
+    restart: unless-stopped
+
+    # Host networking, and this is not a preference.
+    #
+    # The server's whole job is to observe the address a datagram came from and tell the other
+    # peer to send there. Docker's bridge networking rewrites that address whenever the
+    # userland proxy handles the packet, and the failure is silent: the server reports an
+    # address inside the container network, both peers punch at something that does not exist,
+    # and it looks exactly like a NAT that will not traverse. Host networking is the only
+    # arrangement where what the server observes is what the peer actually is.
+    network_mode: host
+
+    command: ["--bind", "0.0.0.0:47300"]
+
+    # It holds two hash maps and a socket. This is a ceiling to make a runaway visible, not a
+    # figure it will approach.
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # The binary drops every capability it is given: it binds one unprivileged port and does
+    # nothing else a kernel would ask permission for.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true

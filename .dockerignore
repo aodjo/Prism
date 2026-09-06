@@ -1,0 +1,13 @@
+# Everything the image does not need. `target` alone is several gigabytes, and sending it as
+# build context would dominate the build time of an image that is five megabytes.
+target/
+node_modules/
+dist/
+.git/
+.claude/
+packages/native/*.node
+packages/native/index.js
+packages/native/index.d.ts
+**/.DS_Store
+*.iso
+*.aria2
