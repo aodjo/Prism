@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'"
+    />
+    <title>Prism</title>
+    <style>
+      /* The panel follows the system appearance rather than choosing one. A menu bar window
+         that stays light while everything around it is dark reads as broken. */
+      :root {
+        color-scheme: light dark;
+        --ink: #17181c;
+        --muted: #6b7078;
+        --line: #d9dce1;
+        --ground: #f7f8fa;
+        --raised: #ffffff;
+        --accent: #2f6df6;
+        --good: #1e9e5a;
+        --bad: #d2453c;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --ink: #eceef2;
+          --muted: #9aa1ac;
+          --line: #33363d;
+          --ground: #1b1d22;
+          --raised: #24262c;
+          --accent: #5b8dff;
+          --good: #3fbf7a;
+          --bad: #f0655c;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 14px;
+        font:
+          13px/1.45 -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          system-ui,
+          sans-serif;
+        color: var(--ink);
+        background: var(--ground);
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      h1 {
+        margin: 0 0 2px;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .sub {
+        color: var(--muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      section {
+        margin-top: 12px;
+        padding: 11px 12px;
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+      }
+
+      h2 {
+        margin: 0 0 8px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 24px;
+      }
+
+      .row + .row {
+        margin-top: 6px;
+      }
+
+      .row .value {
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-weight: 500;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+        flex: none;
+      }
+
+      .dot.live {
+        background: var(--good);
+      }
+
+      .dot.waiting {
+        background: var(--accent);
+      }
+
+      .dot.bad {
+        background: var(--bad);
+      }
+
+      button {
+        font: inherit;
+        font-weight: 500;
+        color: var(--ink);
+        background: var(--ground);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 5px 11px;
+        cursor: pointer;
+      }
+
+      button:hover:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+
+      button.primary:hover:not(:disabled) {
+        color: #fff;
+        filter: brightness(1.08);
+      }
+
+      input[type='text'],
+      input[type='number'] {
+        font: inherit;
+        color: var(--ink);
+        background: var(--ground);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 4px 7px;
+        width: 150px;
+        text-align: right;
+      }
+
+      input:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: -1px;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        user-select: text;
+        -webkit-user-select: text;
+      }
+
+      .code {
+        margin: 6px 0 2px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 30px;
+        font-weight: 600;
+        letter-spacing: 0.16em;
+        text-align: center;
+        color: var(--ink);
+        user-select: text;
+        -webkit-user-select: text;
+      }
+
+      .hint {
+        text-align: center;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .error {
+        color: var(--bad);
+        font-size: 11px;
+        margin-top: 6px;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Prism</h1>
+    <div class="sub"><code id="me">…</code></div>
+
+    <section>
+      <h2>Session</h2>
+      <div class="row">
+        <span class="status"><span class="dot" id="dot"></span><span id="phase">Not hosting</span></span>
+        <button id="toggle" class="primary">Start hosting</button>
+      </div>
+      <div class="row" id="peer-row" hidden>
+        <span>Client</span><span class="value"><code id="peer"></code></span>
+      </div>
+      <div class="row" id="observed-row" hidden>
+        <span>Reachable at</span><span class="value"><code id="observed"></code></span>
+      </div>
+      <div class="row" id="rate-row" hidden>
+        <span>Sending</span><span class="value" id="rate"></span>
+      </div>
+      <div class="row" id="frames-row" hidden>
+        <span>Frames</span><span class="value" id="frames"></span>
+      </div>
+      <div class="error" id="session-error" hidden></div>
+    </section>
+
+    <section>
+      <h2>Paired devices</h2>
+      <div class="row">
+        <span id="peers">None yet</span>
+        <button id="pair-button">Pair a device</button>
+      </div>
+      <div id="pairing" hidden>
+        <div class="code" id="pairing-code"></div>
+        <div class="hint" id="pairing-hint">Type this on the other machine</div>
+      </div>
+      <div class="error" id="pair-error" hidden></div>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <div class="row">
+        <span>Rendezvous</span>
+        <input type="text" id="rendezvous" placeholder="host:47300" spellcheck="false" />
+      </div>
+      <div class="row">
+        <span>Frame rate</span>
+        <input type="number" id="fps" min="1" max="480" step="1" />
+      </div>
+      <div class="row">
+        <span>Bitrate (Mbps)</span>
+        <input type="number" id="bitrate" min="1" max="200" step="1" />
+      </div>
+      <div class="row">
+        <span>Allow control</span>
+        <input type="checkbox" id="inject" />
+      </div>
+      <div class="row">
+        <span>Host on launch</span>
+        <input type="checkbox" id="autostart" />
+      </div>
+    </section>
+
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>
