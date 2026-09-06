@@ -7,7 +7,11 @@
  */
 
 export {
+  CLOCK_PING_LEN,
+  CLOCK_PONG_LEN,
+  CONTROL_HEADER_LEN,
   Channel,
+  ControlType,
   FEEDBACK_PACKET_LEN,
   FORMAT_VERSION,
   MAX_PACKET_SIZE,
@@ -19,9 +23,14 @@ export {
 export { PrismProtocolError } from './errors.js';
 export {
   channelOf,
+  controlTypeOf,
+  decodeClockPing,
+  decodeClockPong,
   decodeFeedbackPacket,
   decodeVideoPacket,
+  encodeClockPing,
+  encodeClockPong,
   encodeFeedbackPacket,
   encodeVideoPacket,
 } from './packet.js';
-export type { FeedbackPacket, VideoPacket } from './packet.js';
+export type { ClockPing, ClockPong, FeedbackPacket, VideoPacket } from './packet.js';

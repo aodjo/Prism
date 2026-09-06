@@ -12,12 +12,17 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use prism_core::clock::now_us;
-use prism_core::net::packet::{MAX_PACKET_SIZE, VideoPacket};
+use prism_core::net::clocksync::ClockSync;
+use prism_core::net::packet::{
+    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, MAX_PACKET_SIZE, VideoPacket, channel_of,
+};
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::transport::UdpTransport;
 use prism_core::stats::{LatencyRecorder, LatencySummary};
@@ -37,6 +42,16 @@ pub type PictureSink = SyncSender<()>;
 ///
 /// Two, because a frame that has queued behind another has already missed its moment.
 const DECODE_QUEUE_DEPTH: usize = 2;
+
+/// How often to ask the host for a clock synchronisation exchange.
+///
+/// Frequent at first would be better, but the estimate only improves when a round trip
+/// happens to be faster than every one before it, and a quarter second is often enough to
+/// find a good one early without adding meaningful traffic.
+const PING_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Sentinel for "no clock offset has been established yet".
+const OFFSET_UNKNOWN: i64 = i64::MIN;
 
 /// How the receiving client should behave.
 #[derive(Debug, Clone, Copy)]
@@ -99,9 +114,10 @@ pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
     let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
+    let offset = Arc::new(AtomicI64::new(OFFSET_UNKNOWN));
     let decoder = config
         .decode
-        .then(|| spawn_decoder(frames_rx, recycle_tx, pictures));
+        .then(|| spawn_decoder(frames_rx, recycle_tx, pictures, Arc::clone(&offset)));
 
     let mut reassembler = FrameReassembler::new(config.in_flight);
     let mut arrival = LatencyRecorder::new(4096);
@@ -110,13 +126,47 @@ pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()
     let mut frames = 0u32;
     let mut behind = 0u32;
     let mut unsynced = 0u32;
+    let mut sync = ClockSync::new();
+    let mut host: Option<SocketAddr> = None;
+    let mut last_ping = Instant::now() - PING_INTERVAL;
+    let mut pings_sent = 0u32;
+    let mut pongs_seen = 0u32;
+    let mut ping_buf = [0u8; CLOCK_PING_LEN];
 
     loop {
-        let bytes = match transport.recv_into(&mut recv_buf) {
-            Ok(bytes) => bytes,
+        if let Some(host) = host {
+            if last_ping.elapsed() >= PING_INTERVAL {
+                last_ping = Instant::now();
+                let ping = ClockPing { t1_us: now_us() };
+                if ping.encode_into(&mut ping_buf).is_ok() {
+                    match transport.send_to(&ping_buf, host) {
+                        Ok(_) => pings_sent += 1,
+                        Err(err) => eprintln!("client: ping to {host} failed: {err}"),
+                    }
+                }
+            }
+        }
+
+        let (bytes, from) = match transport.recv_from_into(&mut recv_buf) {
+            Ok(received) => received,
             Err(err) if is_timeout(&err) => break,
             Err(err) => return Err(err),
         };
+        host.get_or_insert(from);
+
+        if channel_of(bytes) == Ok(Channel::Control) {
+            let t4_us = now_us();
+            pongs_seen += 1;
+            if let Ok(pong) = ClockPong::decode(bytes) {
+                if sync.observe(&pong, t4_us).is_some() {
+                    offset.store(
+                        sync.offset_us().unwrap_or(OFFSET_UNKNOWN),
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            continue;
+        }
 
         let Ok(packet) = VideoPacket::decode(bytes) else {
             malformed += 1;
@@ -131,7 +181,7 @@ pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()
             continue;
         };
 
-        match elapsed_us(frame.capture_ts_us) {
+        match age_of(frame.capture_ts_us, offset.load(Ordering::Relaxed)) {
             Some(age) => arrival.record(age),
             None => unsynced += 1,
         }
@@ -160,10 +210,23 @@ pub fn run(config: ClientConfig, pictures: Option<PictureSink>) -> io::Result<()
     let decode_report = decoder.map(|handle| handle.join().unwrap_or_default());
 
     println!("\nclient: {frames} frames reassembled, {malformed} packets unparseable");
+    match (sync.offset_us(), sync.round_trip_us()) {
+        (Some(offset_us), Some(round_trip_us)) => println!(
+            "clock: host is {:+.2} ms from this machine, best round trip {:.2} ms ({} samples, {} refused)",
+            offset_us as f64 / 1000.0,
+            round_trip_us as f64 / 1000.0,
+            sync.accepted(),
+            sync.rejected()
+        ),
+        _ => println!(
+            "clock: never synchronised ({pings_sent} pings sent, {pongs_seen} answers seen), \
+             so cross-machine latency is unmeasurable"
+        ),
+    }
     if unsynced > 0 {
         println!(
-            "client: {unsynced} frames could not be timed — the host clock is ahead of this one, \
-             so latency across machines is unmeasurable until clock sync lands in M2"
+            "client: {unsynced} frames could not be timed — the host stamp was in the future \
+             even after correcting for the clock offset"
         );
     }
     report("arrival ", &mut arrival);
@@ -207,6 +270,7 @@ fn spawn_decoder(
     frames: Receiver<FrameBuf>,
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
+    offset: Arc<AtomicI64>,
 ) -> thread::JoinHandle<DecodeReport> {
     use prism_core::decode::DecodeError;
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
@@ -241,7 +305,7 @@ fn spawn_decoder(
                         .saturating_sub(picture.pts_us)
                         .min(u64::from(u32::MAX)) as u32,
                 );
-                if let Some(age) = elapsed_us(picture.pts_us) {
+                if let Some(age) = age_of(picture.pts_us, offset.load(Ordering::Relaxed)) {
                     latency.record(age);
                 }
                 stage.record(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
@@ -278,8 +342,9 @@ fn spawn_decoder(
     frames: Receiver<FrameBuf>,
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
+    offset: Arc<AtomicI64>,
 ) -> thread::JoinHandle<DecodeReport> {
-    let _ = pictures;
+    let _ = (pictures, offset);
     thread::spawn(move || {
         while let Ok(buf) = frames.recv() {
             let _ = recycle.send(buf);
@@ -288,19 +353,25 @@ fn spawn_decoder(
     })
 }
 
-/// Returns how long ago a host timestamp was, or `None` if the two clocks disagree.
+/// Returns how long ago a host timestamp was, correcting for the clock offset.
 ///
-/// Both sides stamp against the Unix epoch, which only makes them comparable when they
-/// run on the same machine. Across machines the offset is unknown, and a host clock ahead
-/// of the client's produces a negative age.
+/// Both sides stamp against the Unix epoch, which only makes them directly comparable on
+/// one machine. `offset_us` is how far the host's clock runs ahead, as measured by the
+/// synchronisation exchange; [`OFFSET_UNKNOWN`] means no exchange has succeeded yet and
+/// the stamps are compared as they are, which is correct when both ends share a clock.
 ///
-/// Reporting that as zero would be worse than reporting nothing: a cross-machine run
-/// would show a flawless sub-millisecond latency that is entirely an artefact. So an
-/// impossible sample is refused and the caller counts it. Clock synchronisation, which
-/// makes these figures real, is M2.
-fn elapsed_us(timestamp_us: u64) -> Option<u32> {
-    let now = now_us();
-    (now >= timestamp_us).then(|| (now - timestamp_us).min(u64::from(u32::MAX)) as u32)
+/// Returns `None` when the corrected stamp is still in the future. Reporting that as zero
+/// would be worse than reporting nothing: it showed a flawless sub-millisecond pipeline on
+/// the first cross-machine run, which was entirely an artefact of the subtraction.
+fn age_of(host_ts_us: u64, offset_us: i64) -> Option<u32> {
+    let local_ts = if offset_us == OFFSET_UNKNOWN {
+        i128::from(host_ts_us)
+    } else {
+        i128::from(host_ts_us) - i128::from(offset_us)
+    };
+
+    let now = i128::from(now_us());
+    (now >= local_ts).then(|| (now - local_ts).min(i128::from(u32::MAX)) as u32)
 }
 
 /// Prints a latency summary under the given label.

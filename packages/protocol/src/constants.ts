@@ -21,6 +21,15 @@ export const MAX_VIDEO_PAYLOAD = MAX_PACKET_SIZE - VIDEO_HEADER_LEN;
 /** Exact byte length of a feedback packet; it carries no variable-length payload. */
 export const FEEDBACK_PACKET_LEN = 17;
 
+/** Byte length of a control packet header: the channel tag and the message type. */
+export const CONTROL_HEADER_LEN = 2;
+
+/** Exact byte length of a clock synchronisation ping. */
+export const CLOCK_PING_LEN = 10;
+
+/** Exact byte length of a clock synchronisation pong. */
+export const CLOCK_PONG_LEN = 26;
+
 /**
  * Channel tag carried in the first byte of every packet.
  *
@@ -50,3 +59,14 @@ export enum VideoFlags {
 
 /** Reserved video flag bits; any packet setting one of these is rejected. */
 export const VIDEO_FLAGS_RESERVED_MASK = 0xf8;
+
+/**
+ * Message type carried in the second byte of a control packet.
+ *
+ * Values from two upward are reserved; a decoder that sees one rejects the packet rather
+ * than guessing at a future revision.
+ */
+export enum ControlType {
+  ClockPing = 0,
+  ClockPong = 1,
+}

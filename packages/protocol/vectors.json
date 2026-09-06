@@ -4,7 +4,10 @@
     "maxPacketSize": 1200,
     "videoHeaderLen": 20,
     "maxVideoPayload": 1180,
-    "feedbackPacketLen": 17
+    "feedbackPacketLen": 17,
+    "controlHeaderLen": 2,
+    "clockPingLen": 10,
+    "clockPongLen": 26
   },
   "channels": {
     "control": 0,
@@ -72,10 +75,74 @@
     }
   ],
   "rejects": [
-    { "name": "empty", "hex": "", "reason": "no channel tag" },
-    { "name": "unknown-channel", "hex": "09", "reason": "channel 9 is not defined" },
-    { "name": "video-truncated-header", "hex": "010403020102010300080003060504", "reason": "video packet shorter than VIDEO_HEADER_LEN" },
-    { "name": "video-reserved-flag", "hex": "0104030201020103000800080605040302010000", "reason": "reserved flag bit 3 is set" },
-    { "name": "feedback-wrong-length", "hex": "0400010000f0ffffff40420f00000000", "reason": "feedback packet is not exactly FEEDBACK_PACKET_LEN" }
+    {
+      "name": "empty",
+      "hex": "",
+      "reason": "no channel tag"
+    },
+    {
+      "name": "unknown-channel",
+      "hex": "09",
+      "reason": "channel 9 is not defined"
+    },
+    {
+      "name": "video-truncated-header",
+      "hex": "010403020102010300080003060504",
+      "reason": "video packet shorter than VIDEO_HEADER_LEN"
+    },
+    {
+      "name": "video-reserved-flag",
+      "hex": "0104030201020103000800080605040302010000",
+      "reason": "reserved flag bit 3 is set"
+    },
+    {
+      "name": "feedback-wrong-length",
+      "hex": "0400010000f0ffffff40420f00000000",
+      "reason": "feedback packet is not exactly FEEDBACK_PACKET_LEN"
+    },
+    {
+      "name": "control-empty-body",
+      "hex": "00",
+      "reason": "control packet with no message type"
+    },
+    {
+      "name": "clock-ping-short",
+      "hex": "000040420f00000000",
+      "reason": "clock ping shorter than CLOCK_PING_LEN"
+    },
+    {
+      "name": "clock-pong-short",
+      "hex": "000140420f000000000034440f0000000000",
+      "reason": "clock pong shorter than CLOCK_PONG_LEN"
+    },
+    {
+      "name": "unknown-control-type",
+      "hex": "0009",
+      "reason": "control type 9 is not defined"
+    }
+  ],
+  "controlTypes": {
+    "clockPing": 0,
+    "clockPong": 1
+  },
+  "clockPings": [
+    {
+      "name": "canonical",
+      "fields": {
+        "t1Us": "1000000"
+      },
+      "hex": "000040420f0000000000"
+    }
+  ],
+  "clockPongs": [
+    {
+      "name": "canonical",
+      "fields": {
+        "t1Us": "1000000",
+        "t2Us": "1000500",
+        "t3Us": "1000600"
+      },
+      "hex": "000140420f000000000034440f000000000098440f0000000000"
+    }
   ]
 }

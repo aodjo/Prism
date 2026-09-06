@@ -19,6 +19,9 @@ The first byte of every packet is the channel tag.
 | Constant | Value | Reason |
 |---|---|---|
 | `MAX_PACKET_SIZE` | 1200 | Stays under the safe PMTU floor so packets never fragment |
+| `CONTROL_HEADER_LEN` | 2 | Channel tag + control message type |
+| `CLOCK_PING_LEN` | 10 | Fixed size |
+| `CLOCK_PONG_LEN` | 26 | Fixed size |
 | `VIDEO_HEADER_LEN` | 20 | Channel tag + video header |
 | `MAX_VIDEO_PAYLOAD` | 1180 | `MAX_PACKET_SIZE - VIDEO_HEADER_LEN` |
 | `FEEDBACK_PACKET_LEN` | 17 | Fixed size |
@@ -66,10 +69,64 @@ frame the client has confirmed, so packet loss never forces an IDR.
 
 `client_ts_us` doubles as the clock-sync sample.
 
+## Control packets (channel 0)
+
+A control packet carries a message type after the channel tag.
+
+```
+offset  size  field           type   notes
+0       1     channel         u8     always 0
+1       1     control         u8     message type
+2       ..    payload         bytes  depends on the type
+```
+
+| Type | Value | Direction | Purpose |
+|---|---|---|---|
+| `ClockPing` | 0 | client → host | start a clock synchronisation exchange |
+| `ClockPong` | 1 | host → client | answer with the host's send and receive times |
+
+Types 2 and above are reserved. A decoder that sees one rejects the packet.
+
+### Clock synchronisation
+
+Both sides stamp frames against the Unix epoch, which only makes the numbers comparable
+on one machine. Across machines the offset between the two clocks is unknown, and without
+correcting for it a latency figure is meaningless — a client whose clock trails the host's
+measures negative latency.
+
+The exchange is Cristian's algorithm. The client sends a ping at `t1`; the host records
+`t2` when it arrives and `t3` when it answers; the client records `t4` on receipt.
+
+```
+round trip = (t4 - t1) - (t3 - t2)
+offset     = ((t2 - t1) + (t3 - t4)) / 2
+```
+
+`offset` is how far the host's clock is ahead of the client's. Subtracting it from a host
+timestamp converts it to client time.
+
+The estimate is only as good as the exchange was symmetric, so the sample with the
+**smallest round trip** is kept and the others discarded: a fast exchange has had the least
+opportunity to be delayed unevenly in one direction.
+
+**ClockPing** (control type 0), 10 bytes:
+```
+offset  size  field    type   notes
+2       8     t1       u64    client clock when the ping was sent
+```
+
+**ClockPong** (control type 1), 26 bytes:
+```
+offset  size  field    type   notes
+2       8     t1       u64    echoed from the ping, so the client can pair the reply
+10      8     t2       u64    host clock when the ping arrived
+18      8     t3       u64    host clock when the pong was sent
+```
+
 ## Reserved
 
-`Control`, `Audio` and `Input` payload layouts are defined in M5, M7 and M3
-respectively. Until then only their channel tags are fixed.
+`Audio` and `Input` payload layouts are defined in M7 and M3 respectively. Until then only
+their channel tags are fixed.
 
 ## Test vectors
 

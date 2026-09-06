@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import vectors from '../vectors.json' with { type: 'json' };
 import {
+  CLOCK_PING_LEN,
+  CLOCK_PONG_LEN,
+  CONTROL_HEADER_LEN,
   Channel,
+  ControlType,
   FEEDBACK_PACKET_LEN,
   FORMAT_VERSION,
   MAX_PACKET_SIZE,
@@ -11,8 +15,13 @@ import {
   VIDEO_FLAGS_RESERVED_MASK,
   VIDEO_HEADER_LEN,
   channelOf,
+  controlTypeOf,
+  decodeClockPing,
+  decodeClockPong,
   decodeFeedbackPacket,
   decodeVideoPacket,
+  encodeClockPing,
+  encodeClockPong,
   encodeFeedbackPacket,
   encodeVideoPacket,
 } from '../src/index.js';
@@ -64,6 +73,49 @@ describe('constants match the shared vectors', () => {
     expect(Channel.Audio).toBe(vectors.channels.audio);
     expect(Channel.Input).toBe(vectors.channels.input);
     expect(Channel.Feedback).toBe(vectors.channels.feedback);
+
+    expect(CONTROL_HEADER_LEN).toBe(vectors.constants.controlHeaderLen);
+    expect(CLOCK_PING_LEN).toBe(vectors.constants.clockPingLen);
+    expect(CLOCK_PONG_LEN).toBe(vectors.constants.clockPongLen);
+    expect(ControlType.ClockPing).toBe(vectors.controlTypes.clockPing);
+    expect(ControlType.ClockPong).toBe(vectors.controlTypes.clockPong);
+  });
+});
+
+describe('clock synchronisation packets', () => {
+  for (const vector of vectors.clockPings) {
+    it(`encodes and decodes the ${vector.name} ping`, () => {
+      const bytes = encodeClockPing({ t1Us: BigInt(vector.fields.t1Us) });
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(bytes.length).toBe(CLOCK_PING_LEN);
+      expect(decodeClockPing(hexToBytes(vector.hex)).t1Us).toBe(BigInt(vector.fields.t1Us));
+    });
+  }
+
+  for (const vector of vectors.clockPongs) {
+    it(`encodes and decodes the ${vector.name} pong`, () => {
+      const packet = {
+        t1Us: BigInt(vector.fields.t1Us),
+        t2Us: BigInt(vector.fields.t2Us),
+        t3Us: BigInt(vector.fields.t3Us),
+      };
+      const bytes = encodeClockPong(packet);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(bytes.length).toBe(CLOCK_PONG_LEN);
+      expect(decodeClockPong(hexToBytes(vector.hex))).toEqual(packet);
+    });
+  }
+
+  it('reads the control type before validating the rest', () => {
+    expect(controlTypeOf(new Uint8Array([0, 0]))).toBe(ControlType.ClockPing);
+    expect(controlTypeOf(new Uint8Array([0, 1]))).toBe(ControlType.ClockPong);
+  });
+
+  it('refuses to decode one control message as another', () => {
+    const ping = encodeClockPing({ t1Us: 1n });
+    expect(() => decodeClockPong(ping)).toThrow(PrismProtocolError);
   });
 });
 
@@ -185,6 +237,11 @@ describe('malformed packets are rejected', () => {
         const channel = channelOf(bytes);
         if (channel === Channel.Video) decodeVideoPacket(bytes);
         else if (channel === Channel.Feedback) decodeFeedbackPacket(bytes);
+        else if (channel === Channel.Control) {
+          const type = controlTypeOf(bytes);
+          if (type === ControlType.ClockPing) decodeClockPing(bytes);
+          else decodeClockPong(bytes);
+        }
       }).toThrow(PrismProtocolError);
     });
   }

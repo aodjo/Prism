@@ -6,7 +6,11 @@
 
 use std::io;
 
-use prism_core::net::packet::{FLAG_IDR, FLAG_LAST_OF_FRAME, MAX_PACKET_SIZE};
+use prism_core::clock::now_us;
+use prism_core::net::packet::{
+    CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, FLAG_IDR, FLAG_LAST_OF_FRAME, MAX_PACKET_SIZE,
+    channel_of,
+};
 use prism_core::net::packetize::SlicePacketizer;
 use prism_core::net::transport::UdpTransport;
 
@@ -92,5 +96,52 @@ impl SliceSender {
     #[must_use]
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Starts a thread that answers clock synchronisation pings on this session's socket.
+    ///
+    /// The reply has to come from the socket the video is already flowing out of, so the
+    /// client can pair it with the session; a second socket would answer from a different
+    /// port. The thread runs until the process exits, which is fine for a tool whose
+    /// sessions last exactly as long as the process.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the socket cannot be duplicated.
+    pub fn answer_clock_pings(&self) -> io::Result<()> {
+        let transport = self.transport.try_clone()?;
+
+        std::thread::spawn(move || {
+            let mut recv_buf = [0u8; MAX_PACKET_SIZE];
+            let mut send_buf = [0u8; CLOCK_PONG_LEN];
+
+            loop {
+                let Ok(bytes) = transport.recv_into(&mut recv_buf) else {
+                    return;
+                };
+
+                let t2_us = now_us();
+                if channel_of(bytes) != Ok(Channel::Control) {
+                    continue;
+                }
+                let Ok(ping) = ClockPing::decode(bytes) else {
+                    continue;
+                };
+
+                // The socket is connected to the client, so the answer goes back with
+                // `send`. `send_to` fails outright here — a connected UDP socket rejects
+                // it with EISCONN on macOS and the BSDs.
+                let pong = ClockPong {
+                    t1_us: ping.t1_us,
+                    t2_us,
+                    t3_us: now_us(),
+                };
+                if pong.encode_into(&mut send_buf).is_ok() {
+                    let _ = transport.send(&send_buf);
+                }
+            }
+        });
+
+        Ok(())
     }
 }

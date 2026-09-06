@@ -5,8 +5,9 @@
 //! same file, so a layout change that is applied to only one implementation fails here.
 
 use prism_core::net::packet::{
-    Channel, FEEDBACK_PACKET_LEN, FORMAT_VERSION, FeedbackPacket, MAX_PACKET_SIZE,
-    MAX_VIDEO_PAYLOAD, VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN, VideoPacket, channel_of,
+    CLOCK_PING_LEN, CLOCK_PONG_LEN, CONTROL_HEADER_LEN, Channel, ClockPing, ClockPong, ControlType,
+    FEEDBACK_PACKET_LEN, FORMAT_VERSION, FeedbackPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD,
+    VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN, VideoPacket, channel_of, control_type_of,
 };
 use serde_json::Value;
 
@@ -101,6 +102,76 @@ fn constants_match_the_shared_vectors() {
         Channel::Feedback as u64,
         v["channels"]["feedback"].as_u64().unwrap()
     );
+
+    assert_eq!(
+        CONTROL_HEADER_LEN as u64,
+        v["constants"]["controlHeaderLen"].as_u64().unwrap()
+    );
+    assert_eq!(
+        CLOCK_PING_LEN as u64,
+        v["constants"]["clockPingLen"].as_u64().unwrap()
+    );
+    assert_eq!(
+        CLOCK_PONG_LEN as u64,
+        v["constants"]["clockPongLen"].as_u64().unwrap()
+    );
+    assert_eq!(
+        ControlType::ClockPing as u64,
+        v["controlTypes"]["clockPing"].as_u64().unwrap()
+    );
+    assert_eq!(
+        ControlType::ClockPong as u64,
+        v["controlTypes"]["clockPong"].as_u64().unwrap()
+    );
+}
+
+#[test]
+fn clock_pings_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["clockPings"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let ping = ClockPing {
+            t1_us: u64_field(&vector["fields"], "t1Us"),
+        };
+
+        let mut buf = [0u8; CLOCK_PING_LEN];
+        let written = ping.encode_into(&mut buf).unwrap();
+        assert_eq!(written, CLOCK_PING_LEN);
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            ClockPing::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            ping,
+            "decode {name}"
+        );
+    }
+}
+
+#[test]
+fn clock_pongs_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["clockPongs"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+        let pong = ClockPong {
+            t1_us: u64_field(fields, "t1Us"),
+            t2_us: u64_field(fields, "t2Us"),
+            t3_us: u64_field(fields, "t3Us"),
+        };
+
+        let mut buf = [0u8; CLOCK_PONG_LEN];
+        let written = pong.encode_into(&mut buf).unwrap();
+        assert_eq!(written, CLOCK_PONG_LEN);
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            ClockPong::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            pong,
+            "decode {name}"
+        );
+    }
 }
 
 #[test]
@@ -183,6 +254,11 @@ fn malformed_packets_are_rejected() {
             Err(_) => true,
             Ok(Channel::Video) => VideoPacket::decode(&bytes).is_err(),
             Ok(Channel::Feedback) => FeedbackPacket::decode(&bytes).is_err(),
+            Ok(Channel::Control) => match control_type_of(&bytes) {
+                Err(_) => true,
+                Ok(ControlType::ClockPing) => ClockPing::decode(&bytes).is_err(),
+                Ok(ControlType::ClockPong) => ClockPong::decode(&bytes).is_err(),
+            },
             Ok(_) => false,
         };
 

@@ -1,5 +1,9 @@
 import {
+  CLOCK_PING_LEN,
+  CLOCK_PONG_LEN,
+  CONTROL_HEADER_LEN,
   Channel,
+  ControlType,
   FEEDBACK_PACKET_LEN,
   MAX_VIDEO_PAYLOAD,
   VIDEO_FLAGS_RESERVED_MASK,
@@ -62,11 +66,11 @@ export interface FeedbackPacket {
  * if (channel === Channel.Video) handleVideo(decodeVideoPacket(datagram));
  */
 export function channelOf(bytes: Uint8Array): Channel {
-  if (bytes.length === 0) {
+  const tag = bytes.at(0);
+  if (tag === undefined) {
     throw new PrismProtocolError('packet is empty, no channel tag');
   }
 
-  const tag = bytes[0];
   if (tag > Channel.Feedback) {
     throw new PrismProtocolError(`unknown channel tag ${tag}`);
   }
@@ -143,7 +147,7 @@ export function encodeVideoPacket(packet: VideoPacket): Uint8Array {
  */
 export function decodeVideoPacket(bytes: Uint8Array): VideoPacket {
   if (channelOf(bytes) !== Channel.Video) {
-    throw new PrismProtocolError(`expected channel ${Channel.Video}, got ${bytes[0]}`);
+    throw new PrismProtocolError(`expected channel ${Channel.Video}, got ${bytes.at(0)}`);
   }
 
   if (bytes.length < VIDEO_HEADER_LEN) {
@@ -220,7 +224,7 @@ export function encodeFeedbackPacket(packet: FeedbackPacket): Uint8Array {
  */
 export function decodeFeedbackPacket(bytes: Uint8Array): FeedbackPacket {
   if (channelOf(bytes) !== Channel.Feedback) {
-    throw new PrismProtocolError(`expected channel ${Channel.Feedback}, got ${bytes[0]}`);
+    throw new PrismProtocolError(`expected channel ${Channel.Feedback}, got ${bytes.at(0)}`);
   }
 
   if (bytes.length !== FEEDBACK_PACKET_LEN) {
@@ -322,5 +326,171 @@ function assertU32(field: string, value: number): void {
 function assertU64(field: string, value: bigint): void {
   if (typeof value !== 'bigint' || value < 0n || value > U64_MAX) {
     throw new PrismProtocolError(`${field} must be a bigint in [0, ${U64_MAX}], got ${value}`);
+  }
+}
+
+/**
+ * The client's half of a clock synchronisation exchange.
+ *
+ * The host answers with a {@link ClockPong} carrying both of its own timestamps, from
+ * which the client derives the offset between the two clocks.
+ */
+export interface ClockPing {
+  t1Us: bigint;
+}
+
+/**
+ * The host's answer to a {@link ClockPing}.
+ *
+ * Carries the ping's own timestamp back so the client can pair the reply, plus the two
+ * host timestamps that bracket the host's handling of it.
+ */
+export interface ClockPong {
+  t1Us: bigint;
+  t2Us: bigint;
+  t3Us: bigint;
+}
+
+/**
+ * Reads the control message type from a control packet.
+ *
+ * Like the channel tag, this is read before the rest of the packet is validated, because
+ * it decides which decoder handles the remaining bytes.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {ControlType} The message type this packet carries.
+ * @throws {PrismProtocolError} If the packet is not a control packet, is too short to hold a type, or names a type this build does not know.
+ *
+ * @example
+ * controlTypeOf(new Uint8Array([0, 1])); // ControlType.ClockPong
+ */
+export function controlTypeOf(bytes: Uint8Array): ControlType {
+  if (channelOf(bytes) !== Channel.Control) {
+    throw new PrismProtocolError(`expected channel ${Channel.Control}, got ${bytes.at(0)}`);
+  }
+
+  if (bytes.length < CONTROL_HEADER_LEN) {
+    throw new PrismProtocolError(
+      `control packet is ${bytes.length} bytes, shorter than CONTROL_HEADER_LEN of ${CONTROL_HEADER_LEN}`,
+    );
+  }
+
+  const type = bytes.at(1);
+  if (type !== ControlType.ClockPing && type !== ControlType.ClockPong) {
+    throw new PrismProtocolError(`unknown control type ${type}`);
+  }
+
+  return type;
+}
+
+/**
+ * Serialises a clock ping into its fixed 10-byte layout.
+ *
+ * @param {ClockPing} packet - Packet fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer of exactly `CLOCK_PING_LEN` bytes.
+ * @throws {PrismProtocolError} If the timestamp does not fit an unsigned 64-bit field.
+ *
+ * @example
+ * encodeClockPing({ t1Us: 1_000_000n }).length; // 10
+ */
+export function encodeClockPing(packet: ClockPing): Uint8Array {
+  assertU64('t1Us', packet.t1Us);
+
+  const bytes = new Uint8Array(CLOCK_PING_LEN);
+  const view = new DataView(bytes.buffer);
+
+  view.setUint8(0, Channel.Control);
+  view.setUint8(1, ControlType.ClockPing);
+  view.setBigUint64(2, packet.t1Us, true);
+
+  return bytes;
+}
+
+/**
+ * Parses a clock ping, requiring an exact length match.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {ClockPing} The decoded ping.
+ * @throws {PrismProtocolError} If the packet is not a clock ping or is not exactly `CLOCK_PING_LEN` bytes.
+ *
+ * @example
+ * decodeClockPing(encodeClockPing({ t1Us: 5n })).t1Us; // 5n
+ */
+export function decodeClockPing(bytes: Uint8Array): ClockPing {
+  expectControl(bytes, ControlType.ClockPing, CLOCK_PING_LEN);
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { t1Us: view.getBigUint64(2, true) };
+}
+
+/**
+ * Serialises a clock pong into its fixed 26-byte layout.
+ *
+ * @param {ClockPong} packet - Packet fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer of exactly `CLOCK_PONG_LEN` bytes.
+ * @throws {PrismProtocolError} If any timestamp does not fit an unsigned 64-bit field.
+ *
+ * @example
+ * encodeClockPong({ t1Us: 1n, t2Us: 2n, t3Us: 3n }).length; // 26
+ */
+export function encodeClockPong(packet: ClockPong): Uint8Array {
+  assertU64('t1Us', packet.t1Us);
+  assertU64('t2Us', packet.t2Us);
+  assertU64('t3Us', packet.t3Us);
+
+  const bytes = new Uint8Array(CLOCK_PONG_LEN);
+  const view = new DataView(bytes.buffer);
+
+  view.setUint8(0, Channel.Control);
+  view.setUint8(1, ControlType.ClockPong);
+  view.setBigUint64(2, packet.t1Us, true);
+  view.setBigUint64(10, packet.t2Us, true);
+  view.setBigUint64(18, packet.t3Us, true);
+
+  return bytes;
+}
+
+/**
+ * Parses a clock pong, requiring an exact length match.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {ClockPong} The decoded answer.
+ * @throws {PrismProtocolError} If the packet is not a clock pong or is not exactly `CLOCK_PONG_LEN` bytes.
+ *
+ * @example
+ * decodeClockPong(encodeClockPong({ t1Us: 1n, t2Us: 2n, t3Us: 3n })).t2Us; // 2n
+ */
+export function decodeClockPong(bytes: Uint8Array): ClockPong {
+  expectControl(bytes, ControlType.ClockPong, CLOCK_PONG_LEN);
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return {
+    t1Us: view.getBigUint64(2, true),
+    t2Us: view.getBigUint64(10, true),
+    t3Us: view.getBigUint64(18, true),
+  };
+}
+
+/**
+ * Throws unless a control packet has the expected type and exact length.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @param {ControlType} expected - Message type the caller decodes.
+ * @param {number} length - Exact byte length that type requires.
+ * @returns {void} Nothing; the function is used purely for its throwing behaviour.
+ * @throws {PrismProtocolError} If the type or the length does not match.
+ *
+ * @example
+ * expectControl(bytes, ControlType.ClockPing, CLOCK_PING_LEN);
+ */
+function expectControl(bytes: Uint8Array, expected: ControlType, length: number): void {
+  if (controlTypeOf(bytes) !== expected) {
+    throw new PrismProtocolError(`expected control type ${expected}, got ${bytes.at(1)}`);
+  }
+
+  if (bytes.length !== length) {
+    throw new PrismProtocolError(
+      `control packet is ${bytes.length} bytes, expected exactly ${length}`,
+    );
   }
 }
