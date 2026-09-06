@@ -4,6 +4,13 @@
 //! travels: the host connects to the client, so the host speaks first. Both sides still check
 //! the key they end up facing, so being the one who dialled buys no authority.
 //!
+//! # Who dials
+//!
+//! The client. The host listens, because over the internet it has no way to learn a client's
+//! address until that client speaks — and the two roles line up with the handshake's own: the
+//! side that dials is the side that already knows the other's static key, which is exactly
+//! what pairing gave the client.
+//!
 //! # Losing a handshake message
 //!
 //! Either message can be lost, and each loss has a different remedy. A lost first message is
@@ -161,4 +168,48 @@ fn is_timeout(err: &io::Error) -> bool {
         err.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
     )
+}
+
+/// Waits on a bound socket for a paired peer to complete a handshake.
+///
+/// Answers rather than dials, which is what a host has to do: over the internet it cannot
+/// know the client's address until the client speaks, so a listening host is not a
+/// convenience but the only arrangement that works at all.
+///
+/// The socket is connected to whoever completed the handshake before returning, so from that
+/// point the kernel drops datagrams from anywhere else.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::TimedOut`] if nobody completes a handshake before `patience`
+/// elapses, and the underlying [`io::Error`] for a socket failure.
+pub fn serve(
+    transport: &UdpTransport,
+    identity: Identity,
+    policy: PeerPolicy,
+    patience: Duration,
+) -> io::Result<(Established, SocketAddr, Listener)> {
+    let mut listener = Listener::new(identity, policy);
+    let mut buf = [0u8; MAX_PACKET_SIZE];
+
+    transport.set_read_timeout(Some(RETRY_INTERVAL))?;
+    let give_up = Instant::now() + patience;
+
+    while Instant::now() < give_up {
+        let (len, from) = match transport.recv_from_into(&mut buf) {
+            Ok((bytes, from)) => (bytes.len(), from),
+            Err(err) if is_timeout(&err) => continue,
+            Err(err) => return Err(err),
+        };
+
+        if let Some(established) = listener.offer(transport, &buf[..len], from)? {
+            transport.connect(from)?;
+            return Ok((established, from, listener));
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "no paired client connected",
+    ))
 }

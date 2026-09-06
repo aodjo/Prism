@@ -13,7 +13,7 @@ use prism_core::input::{Injector, PlatformInjector};
 use prism_core::net::ack::{is_newer, missing_in_history};
 use prism_core::net::cc::{CongestionConfig, CongestionController, DelaySample};
 use prism_core::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
-use prism_core::net::handshake::{Identity, KEY_LEN};
+use prism_core::net::handshake::{Identity, KEY_LEN, PeerPolicy};
 use prism_core::net::loss::LossInjector;
 use prism_core::net::packet::{
     CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR, FLAG_LAST_OF_FRAME,
@@ -162,26 +162,35 @@ pub struct SliceSender {
 }
 
 impl SliceSender {
-    /// Binds an ephemeral local port, connects it to `peer`, and handshakes with it.
+    /// Binds `bind` and waits for a paired client to open a session on it.
     ///
     /// Returns only once the session is sealed. There is no path through this that produces a
     /// sender able to put a packet on the wire in the clear.
     ///
     /// # Errors
     ///
-    /// Returns the underlying [`io::Error`] if the socket cannot be bound or connected,
-    /// [`io::ErrorKind::TimedOut`] if the peer never answers, and
-    /// [`io::ErrorKind::PermissionDenied`] if it answers with an unexpected key.
-    pub fn connect(
-        peer: std::net::SocketAddr,
+    /// Returns the underlying [`io::Error`] if the socket cannot be bound,
+    /// [`io::ErrorKind::TimedOut`] if no paired client connects within `patience`.
+    pub fn serve(
+        bind: std::net::SocketAddr,
         identity: &Identity,
-        peer_key: &[u8; KEY_LEN],
+        allowed: Vec<[u8; KEY_LEN]>,
+        patience: std::time::Duration,
     ) -> io::Result<Self> {
-        let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
-        transport.connect(peer)?;
+        let transport = UdpTransport::bind(bind)?;
 
-        let established = crate::session::dial(&transport, identity, peer_key)?;
+        let (established, peer, _) = crate::session::serve(
+            &transport,
+            identity.clone(),
+            PeerPolicy::Paired(allowed),
+            patience,
+        )?;
         transport.set_read_timeout(None)?;
+
+        println!(
+            "host: session opened by {peer} ({})",
+            hex(&established.session.peer_static)
+        );
 
         Ok(Self {
             sender: SecureSender::new(transport, established.session.sealer),
@@ -790,4 +799,9 @@ impl HostInput {
             );
         }
     }
+}
+
+/// Renders a key as hex, for the line that names who connected.
+fn hex(key: &[u8; KEY_LEN]) -> String {
+    key.iter().map(|byte| format!("{byte:02x}")).collect()
 }

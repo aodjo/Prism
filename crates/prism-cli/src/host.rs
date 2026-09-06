@@ -23,15 +23,21 @@ use crate::wire::SliceSender;
 pub struct HostKeys {
     /// This machine's long-term key.
     pub identity: Identity,
-    /// The client's public key, as pairing recorded it.
-    pub peer: [u8; KEY_LEN],
+    /// Every client key pairing has recorded.
+    ///
+    /// A list rather than one key because a host serves whichever of its paired machines
+    /// connects. It cannot pick in advance: over the internet it does not learn who is
+    /// calling until they call.
+    pub allowed: Vec<[u8; KEY_LEN]>,
 }
 
 /// How the host should shape its traffic.
 #[derive(Debug, Clone, Copy)]
 pub struct HostConfig {
-    /// Address of the receiving client.
-    pub peer: SocketAddr,
+    /// Address to listen on.
+    pub bind: SocketAddr,
+    /// How long to wait for a paired client before giving up.
+    pub patience: Duration,
     /// Frames to send per second.
     pub fps: u32,
     /// Encoded bytes per frame, for the synthetic source only.
@@ -76,7 +82,12 @@ pub fn run(config: HostConfig, keys: &HostKeys) -> io::Result<()> {
         "every slice needs at least one byte"
     );
 
-    let mut sender = SliceSender::connect(config.peer, &keys.identity, &keys.peer)?;
+    let mut sender = SliceSender::serve(
+        config.bind,
+        &keys.identity,
+        keys.allowed.clone(),
+        config.patience,
+    )?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -91,8 +102,8 @@ pub fn run(config: HostConfig, keys: &HostKeys) -> io::Result<()> {
     let interval = frame_interval(config.fps);
 
     println!(
-        "host: sending {} synthetic frames of {} bytes in {} slices at {} fps to {}",
-        config.frames, config.frame_bytes, config.slices, config.fps, config.peer
+        "host: sending {} synthetic frames of {} bytes in {} slices at {} fps",
+        config.frames, config.frame_bytes, config.slices, config.fps
     );
 
     let start = Instant::now();
@@ -144,7 +155,12 @@ pub fn run_encoded(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
 
-    let mut sender = SliceSender::connect(config.peer, &keys.identity, &keys.peer)?;
+    let mut sender = SliceSender::serve(
+        config.bind,
+        &keys.identity,
+        keys.allowed.clone(),
+        config.patience,
+    )?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -160,13 +176,12 @@ pub fn run_encoded(
     let interval = frame_interval(config.fps);
 
     println!(
-        "host: encoding {} frames at {}x{} {} fps, {} kbps, to {}",
+        "host: encoding {} frames at {}x{} {} fps, {} kbps",
         config.frames,
         encoder_config.width,
         encoder_config.height,
         config.fps,
-        encoder_config.bitrate_bps / 1000,
-        config.peer
+        encoder_config.bitrate_bps / 1000
     );
     if !encoder.slicing_supported() {
         println!(
@@ -256,7 +271,12 @@ pub fn run_captured(
     };
 
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
-    let mut sender = SliceSender::connect(config.peer, &keys.identity, &keys.peer)?;
+    let mut sender = SliceSender::serve(
+        config.bind,
+        &keys.identity,
+        keys.allowed.clone(),
+        config.patience,
+    )?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -269,10 +289,9 @@ pub fn run_captured(
     }
 
     println!(
-        "host: capturing the screen at {width}x{height} {} fps, {} kbps, to {}",
+        "host: capturing the screen at {width}x{height} {} fps, {} kbps",
         config.fps,
-        bitrate_bps / 1000,
-        config.peer
+        bitrate_bps / 1000
     );
 
     let start = Instant::now();
@@ -474,7 +493,12 @@ pub fn run_windows(
     let mut encoder =
         unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), encoder_config) }?;
 
-    let mut sender = SliceSender::connect(config.peer, &keys.identity, &keys.peer)?;
+    let mut sender = SliceSender::serve(
+        config.bind,
+        &keys.identity,
+        keys.allowed.clone(),
+        config.patience,
+    )?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -487,10 +511,9 @@ pub fn run_windows(
     }
 
     println!(
-        "host: {} at {width}x{height}, NVENC at {} kbps, to {}",
+        "host: {} at {width}x{height}, NVENC at {} kbps",
         if capture { "capturing" } else { "painting" },
-        encoder_config.bitrate_bps / 1000,
-        config.peer
+        encoder_config.bitrate_bps / 1000
     );
 
     let start = Instant::now();

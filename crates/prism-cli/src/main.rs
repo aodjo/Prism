@@ -64,17 +64,19 @@ struct Cli {
 /// The sides of a session, plus the encoder probe.
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Produce frames and send them to a client.
+    /// Wait for a paired client to connect, then produce frames and send them.
     Host {
-        /// Address of the receiving client.
+        /// Address to listen on.
         ///
-        /// The socket is connected to it, so anything the client sends back has to come
-        /// from this exact address or the kernel discards it without a word. On a client
-        /// with two interfaces on one subnet that is not the address it is reachable at,
-        /// it is the one it routes out of — `route get <this host>` on the client says
-        /// which.
-        #[arg(long)]
-        peer: SocketAddr,
+        /// The host cannot dial: over the internet it has no way to learn a client's address
+        /// until that client speaks. Once one does, the socket is connected to it and the
+        /// kernel discards datagrams from anywhere else.
+        #[arg(long, default_value = "0.0.0.0:47200")]
+        bind: SocketAddr,
+
+        /// Give up after this long with no client, in seconds.
+        #[arg(long, default_value_t = 300)]
+        wait_secs: u64,
 
         /// Frames per second.
         #[arg(long, default_value_t = 60)]
@@ -147,21 +149,21 @@ enum Command {
         #[arg(long)]
         identity: Option<PathBuf>,
 
-        /// The client's public key in hex.
+        /// Restrict the session to this one client key in hex.
         ///
-        /// Defaults to the one `prism-cli pair` recorded, and is only needed when several
-        /// machines have been paired. There is no way to run without a peer either way: a
-        /// session that skipped this would be one where anyone who can reach the port can
-        /// watch the screen and type on it.
+        /// Every paired client is admitted by default, because a host serves whichever of its
+        /// machines connects. A host that had paired with nothing refuses everyone: there is
+        /// no way to run open, and a session that skipped this would be one where anyone who
+        /// can reach the port can watch the screen and type on it.
         #[arg(long)]
         peer_key: Option<String>,
     },
 
-    /// Receive frames and report latency.
+    /// Connect to a paired host, receive frames, and report latency.
     Client {
-        /// Address to listen on.
+        /// Address the host is listening on.
         #[arg(long)]
-        bind: SocketAddr,
+        host: SocketAddr,
 
         /// Stop after this many frames; runs until idle when omitted.
         #[arg(long)]
@@ -322,6 +324,34 @@ fn main() -> ExitCode {
     }
 }
 
+/// Works out which client keys a host session will admit.
+///
+/// Named on the command line, or every machine pairing has recorded. Never everyone: a host
+/// that has paired with nothing admits nobody, which is the right answer rather than an
+/// inconvenience.
+///
+/// # Errors
+///
+/// Returns [`std::io::ErrorKind::NotFound`] with an instruction to pair when nothing has
+/// been, and [`std::io::ErrorKind::InvalidInput`] for a key that is not one.
+fn admitted_clients(named: Option<&str>) -> Result<Vec<[u8; 32]>, Box<dyn Error>> {
+    let peers = identity::default_peers_path()?;
+
+    if let Some(text) = named {
+        return Ok(vec![identity::parse_peer_key(text)?]);
+    }
+
+    let known = identity::known_peers(&peers)?;
+    if known.is_empty() {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no client has been paired; run `prism-cli pair host` and pair one first",
+        )));
+    }
+
+    Ok(known)
+}
+
 /// Loads the identity at `path`, or at the default location when none was given.
 ///
 /// Generated on first use rather than demanded up front: a machine that has never run has
@@ -349,7 +379,8 @@ fn open_identity(path: Option<&std::path::Path>) -> Result<Identity, Box<dyn Err
 fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Host {
-            peer,
+            bind,
+            wait_secs,
             fps,
             frame_bytes,
             slices,
@@ -369,13 +400,11 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
         } => {
             let keys = host::HostKeys {
                 identity: open_identity(identity.as_deref())?,
-                peer: identity::resolve_peer(
-                    peer_key.as_deref(),
-                    &identity::default_peers_path()?,
-                )?,
+                allowed: admitted_clients(peer_key.as_deref())?,
             };
             let config = host::HostConfig {
-                peer,
+                bind,
+                patience: Duration::from_secs(wait_secs),
                 fps,
                 frame_bytes,
                 slices,
@@ -436,7 +465,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
         }
 
         Command::Client {
-            bind,
+            host,
             frames,
             idle_timeout_ms,
             report_every,
@@ -454,7 +483,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
         } => {
             let pacing_us = pacing_ms.map_or_else(|| mode.ceiling_us(), |ms| ms * 1_000);
             let config = client::ClientConfig {
-                bind,
+                host,
                 frames,
                 idle_timeout: Duration::from_millis(idle_timeout_ms),
                 report_every,
