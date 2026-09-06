@@ -8,9 +8,11 @@ mod client;
 #[cfg(target_os = "macos")]
 mod encode;
 mod host;
+mod pattern;
+mod wire;
 
+use std::error::Error;
 use std::net::SocketAddr;
-#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -26,10 +28,10 @@ struct Cli {
     command: Command,
 }
 
-/// The two sides of a session.
+/// The sides of a session, plus the encoder probe.
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Generate synthetic frames and send them to a client.
+    /// Produce frames and send them to a client.
     Host {
         /// Address of the receiving client.
         #[arg(long)]
@@ -39,20 +41,36 @@ enum Command {
         #[arg(long, default_value_t = 60)]
         fps: u32,
 
-        /// Encoded bytes per frame.
+        /// Encoded bytes per frame, for the synthetic source.
         #[arg(long, default_value_t = 40_000)]
         frame_bytes: usize,
 
-        /// Slices per frame.
+        /// Slices per frame, for the synthetic source.
         #[arg(long, default_value_t = 4)]
         slices: usize,
 
         /// Frames to send before stopping.
         #[arg(long, default_value_t = 300)]
         frames: u32,
+
+        /// Encode real H.264 instead of sending synthetic bytes.
+        #[arg(long)]
+        encode: bool,
+
+        /// Frame width when encoding.
+        #[arg(long, default_value_t = 1920)]
+        width: u32,
+
+        /// Frame height when encoding.
+        #[arg(long, default_value_t = 1080)]
+        height: u32,
+
+        /// Target bitrate in bits per second when encoding.
+        #[arg(long, default_value_t = 24_000_000)]
+        bitrate: u32,
     },
 
-    /// Receive frames and report reassembly latency.
+    /// Receive frames and report latency.
     Client {
         /// Address to listen on.
         #[arg(long)]
@@ -73,10 +91,13 @@ enum Command {
         /// Frames allowed in flight before the oldest is abandoned.
         #[arg(long, default_value_t = 4)]
         in_flight: usize,
+
+        /// Decode the reassembled frames and report end-to-end latency.
+        #[arg(long)]
+        decode: bool,
     },
 
     /// Encode synthetic frames to an Annex B file to verify the encoder.
-    #[cfg(target_os = "macos")]
     Encode {
         /// Where to write the elementary stream.
         #[arg(long, default_value = "prism-probe.h264")]
@@ -110,75 +131,119 @@ enum Command {
 
 /// Parses the command line and runs the requested side.
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-
-    #[cfg(target_os = "macos")]
-    if let Command::Encode {
-        out,
-        frames,
-        width,
-        height,
-        fps,
-        bitrate,
-        slice_bytes,
-    } = &cli.command
-    {
-        let config = encode::EncodeConfig {
-            out: out.clone(),
-            frames: *frames,
-            encoder: prism_core::encode::EncoderConfig {
-                width: *width,
-                height: *height,
-                fps: *fps,
-                bitrate_bps: *bitrate,
-                max_slice_bytes: *slice_bytes,
-            },
-        };
-        return match encode::run(config) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("prism-cli: {err}");
-                ExitCode::FAILURE
-            }
-        };
+    match dispatch(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("prism-cli: {err}");
+            ExitCode::FAILURE
+        }
     }
+}
 
-    let result = match cli.command {
+/// Runs the selected subcommand.
+///
+/// # Errors
+///
+/// Returns whatever the selected side failed with, including the platform errors raised
+/// when a codec-backed mode is requested where no codec backend exists yet.
+fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
+    match cli.command {
         Command::Host {
             peer,
             fps,
             frame_bytes,
             slices,
             frames,
-        } => host::run(host::HostConfig {
-            peer,
-            fps,
-            frame_bytes,
-            slices,
-            frames,
-        }),
+            encode,
+            width,
+            height,
+            bitrate,
+        } => {
+            let config = host::HostConfig {
+                peer,
+                fps,
+                frame_bytes,
+                slices,
+                frames,
+            };
+
+            if !encode {
+                return Ok(host::run(config)?);
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                host::run_encoded(
+                    config,
+                    prism_core::encode::EncoderConfig {
+                        width,
+                        height,
+                        fps,
+                        bitrate_bps: bitrate,
+                        max_slice_bytes: bitrate / 8 / fps.max(1) / 4,
+                    },
+                )
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (width, height, bitrate);
+                Err("encoding is not implemented on this platform yet".into())
+            }
+        }
+
         Command::Client {
             bind,
             frames,
             idle_timeout_ms,
             report_every,
             in_flight,
-        } => client::run(client::ClientConfig {
-            bind,
-            frames,
-            idle_timeout: Duration::from_millis(idle_timeout_ms),
-            report_every,
-            in_flight,
-        }),
-        #[cfg(target_os = "macos")]
-        Command::Encode { .. } => unreachable!("handled before the match"),
-    };
+            decode,
+        } => {
+            #[cfg(not(target_os = "macos"))]
+            if decode {
+                return Err("decoding is not implemented on this platform yet".into());
+            }
 
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("prism-cli: {err}");
-            ExitCode::FAILURE
+            Ok(client::run(client::ClientConfig {
+                bind,
+                frames,
+                idle_timeout: Duration::from_millis(idle_timeout_ms),
+                report_every,
+                in_flight,
+                decode,
+            })?)
+        }
+
+        Command::Encode {
+            out,
+            frames,
+            width,
+            height,
+            fps,
+            bitrate,
+            slice_bytes,
+        } => {
+            #[cfg(target_os = "macos")]
+            {
+                encode::run(encode::EncodeConfig {
+                    out,
+                    frames,
+                    encoder: prism_core::encode::EncoderConfig {
+                        width,
+                        height,
+                        fps,
+                        bitrate_bps: bitrate,
+                        max_slice_bytes: slice_bytes,
+                    },
+                })
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (out, frames, width, height, fps, bitrate, slice_bytes);
+                Err("encoding is not implemented on this platform yet".into())
+            }
         }
     }
 }

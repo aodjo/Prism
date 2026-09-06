@@ -1,18 +1,39 @@
-//! Receiving client: reassembles frames from UDP and reports latency.
+//! Client side: reassembles frames and, when asked, decodes them.
 //!
-//! There is no decoder or display here yet. The client measures how long a frame takes
-//! to arrive whole, which is the part of the budget the transport is responsible for,
-//! and reports the packet-level counters that explain any frame that never arrived.
+//! Receiving and decoding run on separate threads, and that separation is not an
+//! optimisation. A single-threaded client stops reading the socket while it decodes, so
+//! packets queue in the kernel buffer and every frame behind the one being decoded is
+//! measured as late. Collapsing the two inflated p99 from 5.9 ms to 51.8 ms in an early
+//! version of this file while the pipeline itself was unchanged.
+//!
+//! The receive thread therefore does nothing but read, reassemble, and hand off. When the
+//! decoder falls behind, frames are dropped rather than queued: a frame that has waited
+//! behind another is already too late to be worth showing.
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::mpsc::{Receiver, Sender, channel, sync_channel};
+use std::thread;
 use std::time::Duration;
 
 use prism_core::clock::now_us;
 use prism_core::net::packet::{MAX_PACKET_SIZE, VideoPacket};
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::transport::UdpTransport;
-use prism_core::stats::LatencyRecorder;
+use prism_core::stats::{LatencyRecorder, LatencySummary};
+
+/// How many frames may wait for the decoder before the newest is dropped.
+///
+/// Two, because a frame that has queued behind another has already missed its moment.
+const DECODE_QUEUE_DEPTH: usize = 2;
+
+/// How long the decode thread waits for a picture before moving on.
+///
+/// Short on purpose. Blocking here stalls the whole decode thread, so every frame behind
+/// the one being waited for is measured as late and may be dropped. Roughly two frame
+/// intervals is long enough to absorb the decoder's own pipelining and short enough that
+/// a stall cannot cascade.
+const POLL_TIMEOUT: Duration = Duration::from_millis(8);
 
 /// How the receiving client should behave.
 #[derive(Debug, Clone, Copy)]
@@ -27,12 +48,36 @@ pub struct ClientConfig {
     pub report_every: u32,
     /// How many frames may be in flight before the oldest is abandoned.
     pub in_flight: usize,
+    /// Decode the reassembled frames rather than only counting them.
+    pub decode: bool,
+}
+
+/// A reassembled frame on its way from the receive thread to the decode thread.
+///
+/// The buffer is recycled back to the receive thread after decoding, so a running
+/// session does not allocate.
+#[derive(Debug, Default)]
+struct FrameBuf {
+    capture_ts_us: u64,
+    data: Vec<u8>,
+}
+
+/// What the decode thread reports when it finishes.
+#[derive(Debug, Default)]
+struct DecodeReport {
+    decoded: u32,
+    /// Submissions that produced no picture before the poll timeout expired.
+    starved: u32,
+    /// End to end, from just before the encoder to just after the decoder.
+    summary: Option<LatencySummary>,
+    /// The decode stage alone, from submitting a frame to holding its picture.
+    stage: Option<LatencySummary>,
+    /// How far the picture that came out lags the frame that went in.
+    lag: Option<LatencySummary>,
+    errors: Vec<i32>,
 }
 
 /// Receives packets until the frame budget or the idle timeout is reached.
-///
-/// Returns once no packet has arrived for `config.idle_timeout`, which is how a run ends
-/// when the sender simply stops.
 ///
 /// # Errors
 ///
@@ -43,17 +88,22 @@ pub fn run(config: ClientConfig) -> io::Result<()> {
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
     println!(
-        "client: listening on {} ({} frames in flight, {:?} idle timeout)",
+        "client: listening on {} ({} frames in flight, decode {})",
         transport.local_addr()?,
         config.in_flight,
-        config.idle_timeout
+        if config.decode { "on" } else { "off" }
     );
 
+    let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
+    let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
+    let decoder = config.decode.then(|| spawn_decoder(frames_rx, recycle_tx));
+
     let mut reassembler = FrameReassembler::new(config.in_flight);
-    let mut recorder = LatencyRecorder::new(4096);
+    let mut arrival = LatencyRecorder::new(4096);
     let mut recv_buf = [0u8; MAX_PACKET_SIZE];
     let mut malformed = 0u64;
     let mut frames = 0u32;
+    let mut behind = 0u32;
 
     loop {
         let bytes = match transport.recv_into(&mut recv_buf) {
@@ -74,20 +124,51 @@ pub fn run(config: ClientConfig) -> io::Result<()> {
         let Some(frame) = reassembler.take_completed() else {
             continue;
         };
-        let latency_us = now_us().saturating_sub(frame.capture_ts_us);
-        recorder.record(latency_us.min(u64::from(u32::MAX)) as u32);
 
+        arrival.record(elapsed_us(frame.capture_ts_us));
         frames += 1;
+
+        if config.decode {
+            let mut buf = recycle_rx.try_recv().unwrap_or_default();
+            buf.capture_ts_us = frame.capture_ts_us;
+            buf.data.clear();
+            buf.data.extend_from_slice(frame.data);
+
+            if frames_tx.try_send(buf).is_err() {
+                behind += 1;
+            }
+        }
+
         if config.report_every > 0 && frames % config.report_every == 0 {
-            report("client", &mut recorder);
+            report("arrival ", &mut arrival);
         }
         if config.frames.is_some_and(|target| frames >= target) {
             break;
         }
     }
 
+    drop(frames_tx);
+    let decode_report = decoder.map(|handle| handle.join().unwrap_or_default());
+
     println!("\nclient: {frames} frames reassembled, {malformed} packets unparseable");
-    report("final", &mut recorder);
+    report("arrival ", &mut arrival);
+
+    if let Some(decode_report) = decode_report {
+        println!(
+            "client: {} frames decoded, {behind} dropped at the decoder, {} produced no picture in time",
+            decode_report.decoded, decode_report.starved
+        );
+        print_summary("decode  ", decode_report.stage);
+        print_summary("outlag  ", decode_report.lag);
+        print_summary("pipeline", decode_report.summary);
+        if !decode_report.errors.is_empty() {
+            println!(
+                "client: decoder reported {} failures: {:?}",
+                decode_report.errors.len(),
+                decode_report.errors
+            );
+        }
+    }
 
     let stats = reassembler.stats();
     println!(
@@ -102,12 +183,95 @@ pub fn run(config: ClientConfig) -> io::Result<()> {
     Ok(())
 }
 
-/// Prints a latency summary under the given label.
+/// Starts the decode thread.
 ///
-/// p99 is the figure every milestone is judged against, so it is reported alongside the
-/// median rather than buried.
+/// The decoder is created inside the thread and never leaves it, which keeps every
+/// platform session object on the one thread that owns it.
+#[cfg(target_os = "macos")]
+fn spawn_decoder(
+    frames: Receiver<FrameBuf>,
+    recycle: Sender<FrameBuf>,
+) -> thread::JoinHandle<DecodeReport> {
+    use prism_core::decode::DecodeError;
+    use prism_core::decode::videotoolbox::VideoToolboxDecoder;
+
+    thread::spawn(move || {
+        let mut decoder = VideoToolboxDecoder::new();
+        let mut latency = LatencyRecorder::new(4096);
+        let mut stage = LatencyRecorder::new(4096);
+        let mut decoded = 0u32;
+        let mut starved = 0u32;
+        let mut lag = LatencyRecorder::new(4096);
+
+        while let Ok(buf) = frames.recv() {
+            let started = std::time::Instant::now();
+
+            match decoder.decode(&buf.data, buf.capture_ts_us) {
+                Ok(()) | Err(DecodeError::NoParameterSets) => {}
+                Err(err) => eprintln!("client: {err}"),
+            }
+
+            if let Some(picture) = decoder.poll(POLL_TIMEOUT) {
+                lag.record(
+                    buf.capture_ts_us
+                        .saturating_sub(picture.pts_us)
+                        .min(u64::from(u32::MAX)) as u32,
+                );
+                latency.record(elapsed_us(picture.pts_us));
+                stage.record(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
+                decoded += 1;
+            } else {
+                starved += 1;
+            }
+
+            let _ = recycle.send(buf);
+        }
+
+        DecodeReport {
+            decoded,
+            starved,
+            summary: latency.summarize(),
+            stage: stage.summarize(),
+            lag: lag.summarize(),
+            errors: decoder.take_errors(),
+        }
+    })
+}
+
+/// Starts a decode thread on a platform with no decoder yet.
+///
+/// Drains the channel so the receive thread never blocks handing frames over.
+#[cfg(not(target_os = "macos"))]
+fn spawn_decoder(
+    frames: Receiver<FrameBuf>,
+    recycle: Sender<FrameBuf>,
+) -> thread::JoinHandle<DecodeReport> {
+    thread::spawn(move || {
+        while let Ok(buf) = frames.recv() {
+            let _ = recycle.send(buf);
+        }
+        DecodeReport::default()
+    })
+}
+
+/// Returns how long ago a host timestamp was, clamped to what a sample can hold.
+///
+/// Host and client share a clock here because both run on one machine. Comparing across
+/// machines needs the clock synchronisation that arrives in M2.
+fn elapsed_us(timestamp_us: u64) -> u32 {
+    now_us()
+        .saturating_sub(timestamp_us)
+        .min(u64::from(u32::MAX)) as u32
+}
+
+/// Prints a latency summary under the given label.
 fn report(label: &str, recorder: &mut LatencyRecorder) {
-    let Some(summary) = recorder.summarize() else {
+    print_summary(label, recorder.summarize());
+}
+
+/// Prints an already computed summary, or a placeholder when there is none.
+fn print_summary(label: &str, summary: Option<LatencySummary>) {
+    let Some(summary) = summary else {
         println!("{label}: no frames measured");
         return;
     };
