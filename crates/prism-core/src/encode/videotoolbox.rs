@@ -13,6 +13,7 @@
 use core::ffi::c_void;
 use core::ptr::{NonNull, null_mut};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
@@ -26,8 +27,8 @@ use objc2_core_video::{
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSession, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxH264SliceBytes,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_EnableLTR, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxH264SliceBytes, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
@@ -40,10 +41,31 @@ const NV12: u32 = u32::from_be_bytes(*b"420v");
 
 /// Keyframe interval, in frames, requested from the encoder.
 ///
-/// Deliberately enormous. Periodic IDR frames are a bitrate spike and a latency spike,
-/// and this pipeline recovers from loss through long-term reference invalidation instead
-/// (M4). Until that lands, the host asks for an IDR explicitly when it needs one.
+/// Deliberately enormous. Periodic IDR frames are a bitrate spike and a latency spike, and
+/// this pipeline recovers from loss with forward error correction instead, which repairs
+/// the packets rather than resending the picture.
+///
+/// The plan's alternative was long-term reference invalidation, and on this platform that
+/// is not available: Apple Silicon's hardware H.264 encoder refuses `EnableLTR`, the same
+/// way it refuses the slice size limit. See [`VideoToolboxEncoder::ltr_supported`]. A host
+/// that needs reference-based recovery needs a different encoder.
+///
+/// A decoder still has to be able to start, which the repeated parameter sets take care of
+/// — see [`PARAMETER_SET_INTERVAL`]. The host can also ask for an IDR explicitly.
 const KEYFRAME_INTERVAL: i32 = 100_000;
+
+/// How often the parameter sets are repeated, in frames.
+///
+/// A decoder cannot start without SPS and PPS, and VideoToolbox emits them only alongside
+/// an IDR. With the keyframe interval set as high as it is, that means once at the start of
+/// the session and never again — so a client that joins late, or loses the first frame,
+/// waits forever on a black window with nothing reporting an error.
+///
+/// Sixty frames is once a second at the rates this pipeline runs, and the two parameter
+/// sets together are a few dozen bytes. Against a stream measured in megabits it is free,
+/// and it is the difference between a recoverable stream and one that has exactly one
+/// chance to be understood.
+const PARAMETER_SET_INTERVAL: u64 = 60;
 
 /// Status VideoToolbox returns when an encoder does not implement a property.
 ///
@@ -195,6 +217,11 @@ impl Nv12Frame {
 struct CallbackContext {
     output: SyncSender<EncodedFrame>,
     spare: Mutex<Vec<EncodedFrame>>,
+    /// Frames handed back so far, which is what decides when parameter sets are repeated.
+    ///
+    /// Counted here rather than on the encoder because the decision is made on
+    /// VideoToolbox's own callback thread, where the encoder is not reachable.
+    frames: AtomicU64,
 }
 
 /// A configured VideoToolbox H.264 compression session.
@@ -206,6 +233,7 @@ pub struct VideoToolboxEncoder {
     current: Option<EncodedFrame>,
     config: EncoderConfig,
     slicing: bool,
+    ltr: bool,
 }
 
 impl VideoToolboxEncoder {
@@ -221,6 +249,7 @@ impl VideoToolboxEncoder {
         let context = Box::new(CallbackContext {
             output: tx,
             spare: Mutex::new(Vec::new()),
+            frames: AtomicU64::new(0),
         });
         let refcon = (&raw const *context).cast::<c_void>().cast_mut();
 
@@ -261,8 +290,10 @@ impl VideoToolboxEncoder {
             current: None,
             config,
             slicing: false,
+            ltr: false,
         };
         encoder.slicing = encoder.configure()?;
+        encoder.ltr = encoder.configure_ltr()?;
 
         Ok(encoder)
     }
@@ -415,6 +446,74 @@ impl VideoToolboxEncoder {
                 Err(err) => Err(err),
             }
         }
+    }
+
+    /// Returns whether this encoder accepted long-term references.
+    ///
+    /// A capability, not a guarantee: see [`VideoToolboxEncoder::configure_ltr`].
+    #[must_use]
+    pub fn ltr_supported(&self) -> bool {
+        self.ltr
+    }
+
+    /// Asks the encoder for long-term references and reports whether it agreed.
+    ///
+    /// Probed rather than required. The constant existing in a header says nothing about
+    /// whether the silicon implements it, and this project has the precedent already: the
+    /// same encoder refuses `MaxH264SliceBytes` on Apple Silicon with the same status. A
+    /// host whose encoder declines simply has no reference-based recovery and must fall
+    /// back to keyframes.
+    ///
+    /// Note what VideoToolbox offers is weaker than the NVENC model the plan describes.
+    /// There is no equivalent of invalidating a specific reference: the encoder hands out an
+    /// opaque token per reference frame, the host hands back the tokens the client has
+    /// acknowledged, and on loss the host asks for a refresh — the encoder then picks which
+    /// acknowledged reference to use. That still removes the keyframe hitch, with less
+    /// control over which frame is chosen.
+    fn configure_ltr(&self) -> Result<bool, EncodeError> {
+        // SAFETY: `EnableLTR` is a compression property that takes a boolean.
+        match unsafe { self.set_bool("EnableLTR", kVTCompressionPropertyKey_EnableLTR, true) } {
+            Ok(()) => Ok(true),
+            Err(EncodeError::Property {
+                status: PROPERTY_NOT_SUPPORTED,
+                ..
+            }) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Changes the target bitrate on a running session.
+    ///
+    /// This is the actuator congestion control needs. Pacing alone only slows the wire while
+    /// the encoder keeps producing the same bytes, which moves the queue into the host
+    /// instead of removing it; the rate the encoder is told is what actually changes how
+    /// much there is to send.
+    ///
+    /// Takes effect from the next frame submitted. A rate the encoder refuses leaves the
+    /// session at whatever it had, which is a worse picture than the caller asked for rather
+    /// than a broken session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::Property`] if VideoToolbox refuses the new rate.
+    pub fn set_bitrate_bps(&mut self, bitrate_bps: u32) -> Result<(), EncodeError> {
+        if bitrate_bps == self.config.bitrate_bps {
+            return Ok(());
+        }
+
+        // SAFETY: `AverageBitRate` is a compression property that takes a number, and it is
+        // documented as settable on a live session.
+        unsafe {
+            self.set_number(
+                "AverageBitRate",
+                kVTCompressionPropertyKey_AverageBitRate,
+                i64::from(bitrate_bps),
+            )?;
+        }
+
+        self.config.bitrate_bps = bitrate_bps;
+
+        Ok(())
     }
 
     /// Sets a boolean session property.
@@ -588,8 +687,15 @@ unsafe extern "C-unwind" fn output_callback(
         .unwrap_or_default();
     frame.reset();
 
+    // Parameter sets ride along with every frame the encoder produces and are stripped
+    // again unless this frame is one a decoder could start from. Repeating them on a cadence
+    // is what lets a client join late or recover, rather than having exactly one chance at
+    // the start of the session to understand the stream.
+    let nth = context.frames.fetch_add(1, Ordering::Relaxed);
+    let keep_parameter_sets = nth % PARAMETER_SET_INTERVAL == 0;
+
     // SAFETY: reading the buffer's contents is valid for the lifetime of this call.
-    if unsafe { fill_from_sample(&mut frame, sample) }.is_none() {
+    if unsafe { fill_from_sample(&mut frame, sample, keep_parameter_sets) }.is_none() {
         return;
     }
 
@@ -601,10 +707,18 @@ unsafe extern "C-unwind" fn output_callback(
 /// Returns `None` if the sample carries no data, which happens for the dropped frames
 /// VideoToolbox reports when it falls behind.
 ///
+/// `keep_parameter_sets` leaves the SPS and PPS in front of a frame that is not an IDR.
+/// They cost a few dozen bytes and are what a client joining mid-session needs before it
+/// can decode anything at all.
+///
 /// # Safety
 ///
 /// `sample` must be a live sample buffer for the duration of the call.
-unsafe fn fill_from_sample(frame: &mut EncodedFrame, sample: &CMSampleBuffer) -> Option<()> {
+unsafe fn fill_from_sample(
+    frame: &mut EncodedFrame,
+    sample: &CMSampleBuffer,
+    keep_parameter_sets: bool,
+) -> Option<()> {
     // SAFETY: the sample is live, so its timestamp and buffers are readable.
     let pts = unsafe { sample.presentation_time_stamp() };
     frame.pts_us = if pts.timescale > 0 {
@@ -644,7 +758,7 @@ unsafe fn fill_from_sample(frame: &mut EncodedFrame, sample: &CMSampleBuffer) ->
             .is_some_and(|&b| b & 0x1f == 5)
     });
 
-    if !frame.is_idr {
+    if !frame.is_idr && !keep_parameter_sets {
         strip_parameter_sets(frame);
     }
 
