@@ -7,6 +7,8 @@
 
 #[cfg(target_os = "macos")]
 pub mod screencapturekit;
+#[cfg(target_os = "windows")]
+pub mod wgc;
 
 /// How a capture session should be configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
