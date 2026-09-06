@@ -288,6 +288,58 @@ macOS ARM64 호스트 → Windows 11 ARM64 클라이언트(UTM VM), 실제 네�
 두 시계가 어긋나 뺄셈이 음수가 되고 `saturating_sub`가 0으로 뭉갠 결과였다. 완벽한 지연처럼 보이는 거짓 숫자였다.
 이제 측정 불가를 명시적으로 보고한다. **M2의 클럭 동기화는 선택이 아니라 두 머신 측정의 전제 조건이다.**
 
+### NVENC 능력 실측: macOS가 거부한 것 전부를 지원한다 (2026-09-06)
+
+빌린 Windows PC(GTX 1660, Turing, 드라이버 591.86, NVENC API 13.0)에서 실측.
+
+| 능력 | H.264 | HEVC | 계획서 항목 |
+|---|---|---|---|
+| REF_PIC_INVALIDATION | ✅ | ✅ | 5번 LTR + 참조 무효화 |
+| NUM_MAX_LTR_FRAMES | 8 | 7 | 〃 |
+| INTRA_REFRESH | ✅ | ✅ | 4번 intra-refresh |
+| DYNAMIC_SLICE_MODE | ✅ | ✅ | 2번 슬라이스 스트리밍 |
+| ASYNC_ENCODE | ✅ | ✅ | 3번 async 인코드 |
+| DYN_BITRATE_CHANGE | ✅ | ✅ | 11번 적응형 비트레이트 |
+| 최대 해상도 | 4096 | 8192 | |
+
+**macOS에서 불가능하다고 결론 낸 두 항목(LTR, intra-refresh)이 여기서는 전부 가능하다.**
+슬라이스 제어도 마찬가지다 — Apple Silicon이 `-12900`으로 거부하던 바로 그것이다.
+
+**그러나 계획서의 핵심 목표에 하드웨어 한계가 걸린다.** `MB_PER_SEC_MAX = 983,040`이고
+매크로블록은 16×16이므로, 실측된 프레임레이트 천장은:
+
+| 해상도 | H.264 천장 |
+|---|---|
+| 720p | 273 fps |
+| 1080p | **120 fps** |
+| 1440p | **68 fps** |
+
+**이 GTX 1660으로는 M6의 1440p120이 불가능하다.** 1080p120은 정확히 딱 맞는다.
+`NUM_ENCODER_ENGINES = 1`이고 상위 카드는 2~3개를 갖는다. 1440p120은 더 빠른 NVENC가 필요하다.
+목표를 유지하려면 하드웨어 요구사항으로 명시해야 하고, 아니면 M6 목표를 1080p120으로 조정해야 한다.
+
+**바인딩은 손으로 쓰고 DLL은 런타임에 로드한다.** 생성하려면 빌드 시점에 NVIDIA Video Codec SDK가
+있어야 해서 macOS 크로스빌드와 모든 CI 러너가 깨진다. 링크하면 NVIDIA 없는 기계에서 실행 자체가 안 된다.
+런타임 로드면 같은 바이너리가 어디서든 돌고, 인코더가 없으면 없다고 보고할 뿐이다.
+
+**버전은 협상해야 한다.** 헤더는 13.1을 선언하는데 이 드라이버는 13.0을 구현하고,
+13.1을 요구하자 `NV_ENC_ERR_INVALID_VERSION`으로 거부당했다. 드라이버에 먼저 묻고 그 값으로
+모든 구조체를 찍는다.
+
+### 실측: 실제 GPU에서의 캡처와 변환 (2026-09-06)
+
+GTX 1660, 2560×1440 @ 60Hz 실제 디스플레이. VM(1 Hz)에서 못 재던 숫자다.
+
+| 항목 | 결과 |
+|---|---|
+| 캡처 | 300프레임 / 5.78초 = **51.9 fps** |
+| 프레임 간격 | p50 **16.67 ms** (60Hz 주기와 정확히 일치), p99 33.34 ms |
+| BGRA→NV12 제출 | p50 **0.04 ms**, p99 0.13 ms |
+
+p99가 정확히 두 주기라는 것은 가끔 한 프레임을 건너뛴다는 뜻이고, 화면이 그만큼 안 바뀐 것이다.
+**변환 0.04 ms는 CPU가 작업을 제출하는 시간이지 GPU가 끝내는 시간이 아니다** — D3D11은 지연 제출이다.
+병목이 CPU가 아니라는 것만 확인됐고, GPU 시간은 아직 안 쟀다.
+
 ### BGRA → NV12 색 변환 (D3D11) (2026-09-06)
 
 WGC는 BGRA를 주고 모든 하드웨어 H.264 인코더는 NV12를 원한다. CPU에서 변환하면 GPU 메모리에서
@@ -530,12 +582,12 @@ M1~M4는 `prism-cli`(헤드리스)로 진행한다. Electron은 M5부터 붙인�
 | **M0** | `rustup` 설치, Cargo 워크스페이스 + pnpm 워크스페이스, napi-rs 최소 애드온(`version()`), `@napi-rs/cli` 3-OS CI, `protocol/` 테스트 벡터 스켈레톤 | 3개 OS에서 `.node` 빌드 + Node/Electron 양쪽 로드 | 1주 |
 | **M1** | **수직 슬라이스 (CLI).** WGC 캡처 → NVENC(H.264) → 평문 UDP(LAN) → VideoToolbox 디코드 → SDL3 Metal 표시. 암호화·ICE 없음<br>**macOS 절반 완료** (ScreenCaptureKit → VideoToolbox → UDP → VideoToolbox → Metal/SDL3, 루프백 p99 9.77ms @720p60). Windows/NVENC 절반은 NVIDIA PC 필요 | 1080p60, 추가 지연 **p99 < 40ms** | 3주 |
 | **M2** | 전 구간 계측, 클럭 동기화, 통계 HUD, 적응형 표시 페이싱, **클라이언트 측 커서 렌더링** | HUD로 단계별 p50/p99 확인, 커서 체감 즉각 | 1.5주 |
-| **M3** | 입력: SDL3 상대 마우스·키보드 캡처 → `SendInput` 주입 | 클릭→광자 측정, FPS 게임 조준 가능 | 1.5주 |
-| **M4** | **프로토콜 경화.** 슬라이스 스트리밍, FEC, intra-refresh, LTR + 참조 무효화, 송신 페이싱, 적응형 비트레이트 | 5% 패킷 손실에서 **IDR 히칭 0회**, 지연 유지 | 3주 |
+| **M3** | 입력: SDL3 상대 마우스·키보드 캡처 → `SendInput` 주입<br>**완료.** macOS(CGEventPost)·Windows(SendInput) 양쪽 주입, 와이어 지연 p99 0.79ms | 클릭→광자 측정, FPS 게임 조준 가능 | 1.5주 |
+| **M4** | **프로토콜 경화.** 슬라이스 스트리밍 ✅, FEC ✅, 송신 페이싱 ✅, 적응형 비트레이트 ✅, ~~intra-refresh~~ ✕, ~~LTR~~ ✕<br>**~~intra-refresh~~와 ~~LTR~~은 macOS에서 불가능** — 아래 인코더 항목 참조. 실측으로 확인했고 추측이 아니다. 대신 파라미터 세트 주기 반복으로 교체.<br>**남은 것: 실제 인터넷 경로에서의 페이싱·CC 튜닝** (루프백에서 튜닝하면 잘못 튜닝한다는 것을 측정으로 확인함) | 5% 패킷 손실에서 **IDR 히칭 0회**, 지연 유지<br>**달성.** 프레임 손실 84% → 0.25% (399/400) | 3주 |
 | **M5** | **인터넷 + Electron.** `prism-rendezvous` 서버(시그널링·주소 발견·릴레이), `webrtc-ice`, UPnP/NAT-PMP, SPAKE2 페어링, Noise_IK 세션. Electron 호스트 트레이 + 클라이언트 셸이 napi로 코어 구동 | 서로 다른 NAT 뒤 두 지점 직결, 대칭 NAT에서 릴레이 폴백, UI에서 페어링→접속 | 4주 |
 | **M6** | **1440p120 + HEVC/AV1.** 코덱 협상, 고주사율 캡처·표시 경로 | **1440p120 p99 < 25ms** (핵심 목표 달성) | 2주 |
 | **M7** | 오디오: WASAPI 루프백 → Opus(2.5–10ms 프레임) → SDL3 출력, 독립 지터 버퍼 | A/V 각각 저지연 유지, 드롭아웃 없음 | 1.5주 |
-| **M8** | 나머지 인코더(AMF 심 + oneVPL) + Linux 호스트(PipeWire+VAAPI) + Windows/Linux 클라이언트(D3D11VA/NVDEC/VAAPI) | 보유 장비 4대 전 조합 통과 | 3.5주 |
+| **M8** | 나머지 인코더(AMF 심 + oneVPL) + Linux 호스트(PipeWire+VAAPI) + Windows/Linux 클라이언트(D3D11VA/NVDEC/VAAPI)<br>**Windows 캡처 경로 선행 완료** — WGC 캡처와 BGRA→NV12 GPU 변환은 M1의 Windows 절반이 필요로 하므로 먼저 만들었다. 소비할 인코더(NVENC)가 없어 거기서 멈춰 있다 | 보유 장비 4대 전 조합 통과 | 3.5주 |
 | **M9** | macOS 호스트: ScreenCaptureKit + VideoToolbox + CGEventPost, TCC 권한 온보딩 | Mac 호스트 동작, 권한 안내 흐름 완성 | 2주 |
 | **M10** | 게임패드(SDL3 읽기 → ViGEmBus/uinput 주입), 패키징·코드서명·노타리제이션, 자동 업데이트 | 3개 OS 원클릭 설치, 경고창 없음 | 2주 |
 
@@ -549,6 +601,7 @@ M1~M4는 `prism-cli`(헤드리스)로 진행한다. Electron은 M5부터 붙인�
 - **Electron 설치 파일은 150~250MB.** 원클릭이긴 하지만 가볍지는 않다. 나중에 Tauri로 셸만 교체하면 10~15MB가 되고 코어는 그대로다 — 셸이 얇게 유지되도록 napi 표면을 작게 잡는 게 그 선택지를 열어둔다.
 - **macOS 호스트는 TCC 권한 3종**(화면 기록 / 손쉬운 사용 / 입력 모니터링)을 요구한다. 온보딩 UX에서 가장 마찰이 큰 지점.
 - **게임패드 주입은 v1에서 Windows(ViGEmBus, 드라이버 설치 필요)와 Linux(uinput)만.** macOS는 가상 게임패드 API가 없어 DriverKit 드라이버를 직접 써야 하므로 범위 밖.
+- **macOS 호스트에서 LTR과 intra-refresh는 불가능하다.** 계획서가 M4에 넣었던 두 항목이며, 파라미터는 전부 NVENC의 것이다. VideoToolbox에 intra-refresh 프로퍼티는 존재하지 않고(`kVTCompressionPropertyKey_*` 84개 전수 확인), `EnableLTR`은 존재하지만 **Apple Silicon 하드웨어 인코더가 거부한다**(실측 `ltr_supported() == false`). `MaxH264SliceBytes`가 `-12900`을 뱉는 것과 같은 부류다. 이 플랫폼의 손실 복구는 FEC이고, 참조 기반 복구가 필요하면 NVENC 경로가 필요하다.
 - **AV1 인코딩은 하드웨어 게이트**(NVIDIA Ada+ / AMD RDNA3+ / Intel Arc+). 반드시 협상하고 H.264로 폴백.
 - **HEVC는 상용 배포 시 라이선스 이슈**가 있다. 개인/오픈소스면 무관하나 상용화 계획이 있으면 확인 필요.
 - **Apple Silicon 인코더는 슬라이스 크기 제한을 지원하지 않는다.** 위 지연 항목 2 참조. macOS 호스트 한정 제약이며 Windows/NVENC에는 영향이 없다.
