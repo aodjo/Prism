@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use prism_core::clock::now_us;
 use prism_core::input::{Injector, PlatformInjector};
 use prism_core::net::ack::{is_newer, missing_in_history};
+use prism_core::net::cc::{CongestionConfig, CongestionController, DelaySample};
 use prism_core::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
 use prism_core::net::loss::LossInjector;
 use prism_core::net::packet::{
@@ -19,20 +20,109 @@ use prism_core::net::packet::{
     channel_of,
 };
 use prism_core::net::packetize::SlicePacketizer;
+use prism_core::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
 use prism_core::net::transport::UdpTransport;
 use prism_core::stats::LatencyRecorder;
 
-/// What the host has heard back from the client.
+/// How many recent frames the host remembers the capture time of.
+///
+/// Comfortably more than the thirty-two a feedback report can describe, so a report about
+/// the oldest frame in its own window still finds its timestamp.
+const CAPTURE_HISTORY: usize = 64;
+
+/// Frame identifier reserved to mean "this slot holds nothing usable".
+///
+/// A real frame with this identifier simply yields no delay sample, once every four
+/// billion frames — over a year at a hundred and twenty a second.
+const NO_FRAME: u32 = u32::MAX;
+
+/// When one recent frame was captured.
+///
+/// Two atomics rather than a lock. The send loop writes and the return-path thread reads,
+/// and that thread also injects input, which the plan requires to be the lowest-latency
+/// path in the system — it must never wait on the sender. The identifier is invalidated
+/// before the timestamp changes and restored after, so a reader that sees the same
+/// identifier either side of the timestamp knows the pair belongs together.
+#[derive(Debug)]
+struct CaptureSlot {
+    frame_id: AtomicU32,
+    capture_ts_us: AtomicU64,
+}
+
+impl Default for CaptureSlot {
+    /// Starts empty rather than claiming to hold frame zero.
+    fn default() -> Self {
+        Self {
+            frame_id: AtomicU32::new(NO_FRAME),
+            capture_ts_us: AtomicU64::new(0),
+        }
+    }
+}
+
+/// What the host has heard back from the client, and what it needs to interpret it.
 ///
 /// Written by the return-path thread and read by whoever prints the summary, so plain
 /// atomics rather than a lock: the writer must never block on the path that also injects
 /// input, and a reader that sees a slightly stale count is reporting, not deciding.
-#[derive(Debug, Default)]
-struct FeedbackHeard {
+#[derive(Debug)]
+struct ReturnPath {
     reports: AtomicU64,
     newest_acked: AtomicU32,
     missing_in_last: AtomicU32,
     ever: AtomicBool,
+    /// Capture times of recent frames, so a report can be turned into a one-way delay.
+    captures: [CaptureSlot; CAPTURE_HISTORY],
+    /// The bitrate the congestion controller currently wants, in bits per second.
+    ///
+    /// Zero until a controller is running, which is how the send loop knows to leave the
+    /// pacer at whatever rate it was configured with.
+    target_bps: AtomicU32,
+    /// How many times the controller has changed its mind.
+    rate_changes: AtomicU64,
+}
+
+impl Default for ReturnPath {
+    /// Starts with an empty capture history and no rate opinion.
+    ///
+    /// Written out rather than derived because a fixed-size array of a type without a
+    /// `Copy` default has no derived `Default` beyond thirty-two elements.
+    fn default() -> Self {
+        Self {
+            reports: AtomicU64::new(0),
+            newest_acked: AtomicU32::new(0),
+            missing_in_last: AtomicU32::new(0),
+            ever: AtomicBool::new(false),
+            captures: core::array::from_fn(|_| CaptureSlot::default()),
+            target_bps: AtomicU32::new(0),
+            rate_changes: AtomicU64::new(0),
+        }
+    }
+}
+
+impl ReturnPath {
+    /// Records when a frame was captured, evicting whatever the slot held before.
+    fn remember_capture(&self, frame_id: u32, capture_ts_us: u64) {
+        let slot = &self.captures[frame_id as usize % CAPTURE_HISTORY];
+
+        slot.frame_id.store(NO_FRAME, Ordering::Release);
+        slot.capture_ts_us.store(capture_ts_us, Ordering::Release);
+        slot.frame_id.store(frame_id, Ordering::Release);
+    }
+
+    /// Returns when a frame was captured, if it is still remembered.
+    ///
+    /// The identifier is read either side of the timestamp: if it changed, the sender was
+    /// mid-write and the pair cannot be trusted, so the sample is skipped rather than used.
+    /// Skipping costs nothing — another report follows in a frame's time.
+    fn capture_of(&self, frame_id: u32) -> Option<u64> {
+        let slot = &self.captures[frame_id as usize % CAPTURE_HISTORY];
+
+        let before = slot.frame_id.load(Ordering::Acquire);
+        let capture_ts_us = slot.capture_ts_us.load(Ordering::Acquire);
+        let after = slot.frame_id.load(Ordering::Acquire);
+
+        (before == frame_id && after == frame_id).then_some(capture_ts_us)
+    }
 }
 
 /// Owns the socket and the reusable send buffer for one session.
@@ -42,7 +132,7 @@ pub struct SliceSender {
     buffer: [u8; MAX_PACKET_SIZE],
     packets: u64,
     bytes: u64,
-    feedback: Arc<FeedbackHeard>,
+    feedback: Arc<ReturnPath>,
     /// Drops a fraction of video packets on the way out, when a run is testing recovery.
     ///
     /// Applies to parity as well as picture data. Exempting parity would make recovery look
@@ -56,6 +146,10 @@ pub struct SliceSender {
     parity: ParityBlock,
     parity_sent: u64,
     oversized_slice_warned: bool,
+    /// Spreads a frame's packets across the interval instead of blasting them at line rate.
+    pacer: Option<SendPacer>,
+    /// Whether the congestion controller is allowed to drive the pacer's rate.
+    adaptive: bool,
 }
 
 impl SliceSender {
@@ -73,13 +167,15 @@ impl SliceSender {
             buffer: [0; MAX_PACKET_SIZE],
             packets: 0,
             bytes: 0,
-            feedback: Arc::new(FeedbackHeard::default()),
+            feedback: Arc::new(ReturnPath::default()),
             loss: None,
             parity_loss: None,
             codec: FecCodec::new(),
             parity: ParityBlock::new(),
             parity_sent: 0,
             oversized_slice_warned: false,
+            pacer: None,
+            adaptive: false,
         })
     }
 
@@ -114,6 +210,74 @@ impl SliceSender {
     #[must_use]
     pub fn parity_sent(&self) -> u64 {
         self.parity_sent
+    }
+
+    /// Spreads outgoing packets over time instead of blasting them at line rate.
+    ///
+    /// `adaptive` lets the congestion controller drive the rate from feedback; without it
+    /// the pacer stays at `bitrate_bps` for the whole session, which is what a measurement
+    /// run wants when the controller is the thing under test.
+    pub fn enable_pacing(&mut self, bitrate_bps: u32, adaptive: bool) {
+        self.pacer = Some(SendPacer::new(PacerConfig {
+            bitrate_bps,
+            ..PacerConfig::default()
+        }));
+        self.adaptive = adaptive;
+
+        println!(
+            "host: pacing at {:.1} Mbps over {}% of each interval{}",
+            f64::from(bitrate_bps) / 1e6,
+            SPREAD_PERCENT,
+            if adaptive {
+                ", rate driven by feedback"
+            } else {
+                ", fixed rate"
+            }
+        );
+    }
+
+    /// Returns the bitrate the controller currently wants, or `None` if none is running.
+    ///
+    /// The pacer already follows this on its own. It is exposed because pacing alone is not
+    /// an actuator: slowing the wire while the source keeps producing the same bytes just
+    /// moves the queue inside the host. Whatever generates the frames has to follow it too.
+    #[must_use]
+    pub fn target_bps(&self) -> Option<u32> {
+        match self.feedback.target_bps.load(Ordering::Relaxed) {
+            0 => None,
+            bps => Some(bps),
+        }
+    }
+
+    /// Records when a frame was captured, so feedback about it can be timed.
+    ///
+    /// Called once per frame by the send loop. Without it the controller has nothing to
+    /// subtract a client timestamp from and takes no delay samples at all.
+    pub fn note_capture(&self, frame_id: u32, capture_ts_us: u64) {
+        self.feedback.remember_capture(frame_id, capture_ts_us);
+    }
+
+    /// Prints what the pacer and the controller did, if either was running.
+    pub fn report_pacing(&self) {
+        let Some(pacer) = self.pacer.as_ref() else {
+            return;
+        };
+
+        println!(
+            "pacing  : {} packets, {} waits totalling {:.2}s, final rate {:.1} Mbps",
+            pacer.packets(),
+            pacer.waits(),
+            pacer.total_wait().as_secs_f64(),
+            f64::from(pacer.bitrate_bps()) / 1e6,
+        );
+
+        if self.adaptive {
+            println!(
+                "control : {} rate changes, controller settled at {:.1} Mbps",
+                self.feedback.rate_changes.load(Ordering::Relaxed),
+                f64::from(self.feedback.target_bps.load(Ordering::Relaxed)) / 1e6,
+            );
+        }
     }
 
     /// Cuts one slice into packets and sends them.
@@ -153,21 +317,49 @@ impl SliceSender {
             let len = packet
                 .encode_into(&mut self.buffer)
                 .expect("packet fits the send buffer");
-
-            // Dropped after encoding rather than before, so the packet counter reflects what
-            // the session produced and the loss figure is measured against it.
-            if self.loss.as_mut().is_some_and(LossInjector::should_drop) {
-                self.packets += 1;
-                self.bytes += len as u64;
-                continue;
-            }
-
-            self.transport.send(&self.buffer[..len])?;
-            self.packets += 1;
-            self.bytes += len as u64;
+            self.emit(len)?;
         }
 
         self.send_parity(frame_id, slice_id, data, capture_ts_us)?;
+
+        Ok(())
+    }
+
+    /// Paces, optionally drops, and sends the first `len` bytes of the send buffer.
+    ///
+    /// Every video and parity packet leaves through here, so the pacing and the loss
+    /// injection are each written once. Control, feedback and input deliberately do not:
+    /// the plan gives input priority over everything, and eighteen bytes of cursor position
+    /// cannot congest anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the packet cannot be sent.
+    fn emit(&mut self, len: usize) -> io::Result<()> {
+        if let Some(pacer) = self.pacer.as_mut() {
+            if self.adaptive {
+                let target = self.feedback.target_bps.load(Ordering::Relaxed);
+                if target > 0 && target != pacer.bitrate_bps() {
+                    pacer.set_bitrate_bps(target);
+                }
+            }
+
+            let wait = pacer.wait_before(len, now_us().saturating_mul(1_000));
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
+            }
+        }
+
+        self.packets += 1;
+        self.bytes += len as u64;
+
+        // Counted before the drop, so the packet total describes what the session produced
+        // and the loss figure is measured against it.
+        if self.loss.as_mut().is_some_and(LossInjector::should_drop) {
+            return Ok(());
+        }
+
+        self.transport.send(&self.buffer[..len])?;
 
         Ok(())
     }
@@ -242,15 +434,7 @@ impl SliceSender {
                 continue;
             };
 
-            if self.loss.as_mut().is_some_and(LossInjector::should_drop) {
-                self.packets += 1;
-                self.bytes += len as u64;
-                continue;
-            }
-
-            self.transport.send(&self.buffer[..len])?;
-            self.packets += 1;
-            self.bytes += len as u64;
+            self.emit(len)?;
             self.parity_sent += 1;
         }
 
@@ -318,8 +502,19 @@ impl SliceSender {
     pub fn serve_return_path(&self, inject_input: bool) -> io::Result<()> {
         let transport = self.transport.try_clone()?;
         let feedback = Arc::clone(&self.feedback);
+        let adaptive = self.adaptive;
+        let start_bps = self.pacer.as_ref().map_or(0, SendPacer::bitrate_bps);
 
         std::thread::spawn(move || {
+            let mut control = adaptive.then(|| {
+                let mut config = CongestionConfig::default();
+                if start_bps > 0 {
+                    config.start_bps = start_bps.clamp(config.min_bps, config.max_bps);
+                }
+                CongestionController::new(config)
+            });
+            let mut last_sampled: Option<u32> = None;
+
             let mut recv_buf = [0u8; MAX_PACKET_SIZE];
             let mut send_buf = [0u8; CLOCK_PONG_LEN];
             let mut input = HostInput::new(inject_input);
@@ -405,6 +600,37 @@ impl SliceSender {
                         }
 
                         feedback.reports.fetch_add(1, Ordering::Relaxed);
+
+                        // A delay sample is only taken when the report describes a frame
+                        // newer than the last one sampled. A report repeating a frame
+                        // already measured carries a newer client timestamp against the
+                        // same capture time, which reads as delay climbing forever and
+                        // would walk the rate to the floor.
+                        let Some(cc) = control.as_mut() else {
+                            continue;
+                        };
+                        if last_sampled.is_some_and(|last| !is_newer(report.last_frame_id, last)) {
+                            continue;
+                        }
+                        let Some(capture_ts_us) = feedback.capture_of(report.last_frame_id) else {
+                            continue;
+                        };
+                        last_sampled = Some(report.last_frame_id);
+
+                        let before = cc.target_bps();
+                        let after = cc.observe(&DelaySample {
+                            // Signed on purpose: the two clocks are unsynchronised here, so
+                            // this is routinely negative. The controller only ever takes
+                            // differences, in which a constant offset cancels exactly.
+                            one_way_delay_us: report.client_ts_us as i64 - capture_ts_us as i64,
+                            observed_at_us: arrived_us,
+                            frame_loss: missing_in_history(report.recv_bitmap) as f32 / 32.0,
+                        });
+
+                        feedback.target_bps.store(after, Ordering::Relaxed);
+                        if after != before {
+                            feedback.rate_changes.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     _ => {}
                 }

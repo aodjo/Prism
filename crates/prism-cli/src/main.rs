@@ -125,6 +125,19 @@ enum Command {
         /// percent of the block, so a wild figure cannot spend the whole bitrate on repair.
         #[arg(long)]
         parity: Option<f64>,
+
+        /// Spread packets over the frame interval at this rate, in megabits per second.
+        ///
+        /// Omitted sends every packet as fast as the socket accepts it, which is what
+        /// causes the queueing a congestion controller then measures and reacts to.
+        #[arg(long)]
+        pace: Option<f64>,
+
+        /// Let the congestion controller drive the pacing rate from client feedback.
+        ///
+        /// Requires --pace, which supplies the rate it starts from.
+        #[arg(long)]
+        adaptive: bool,
     },
 
     /// Receive frames and report latency.
@@ -248,6 +261,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             loss,
             loss_seed,
             parity,
+            pace,
+            adaptive,
         } => {
             let config = host::HostConfig {
                 peer,
@@ -258,6 +273,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 loss_ppm: percent_to_ppm(loss),
                 loss_seed,
                 parity_loss: parity.map(|percent| (percent.clamp(0.0, 100.0) / 100.0) as f32),
+                pace_bps: pace.map(|mbps| (mbps.clamp(0.0, 10_000.0) * 1e6) as u32),
+                adaptive,
             };
 
             if !encode && !capture {

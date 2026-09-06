@@ -35,6 +35,10 @@ pub struct HostConfig {
     pub loss_seed: u64,
     /// Loss estimate to size Reed-Solomon parity against, or `None` to send none.
     pub parity_loss: Option<f32>,
+    /// Bitrate to pace outgoing packets at, or `None` to send them at line rate.
+    pub pace_bps: Option<u32>,
+    /// Whether the congestion controller may drive the pacing rate from feedback.
+    pub adaptive: bool,
 }
 
 /// Sends `config.frames` synthetic frames and reports what was transmitted.
@@ -59,6 +63,9 @@ pub fn run(config: HostConfig) -> io::Result<()> {
     );
 
     let mut sender = SliceSender::connect(config.peer)?;
+    if let Some(bitrate) = config.pace_bps {
+        sender.enable_pacing(bitrate, config.adaptive);
+    }
     sender.serve_return_path(true)?;
     if let Some(loss) = config.parity_loss {
         sender.enable_parity(loss);
@@ -82,12 +89,19 @@ pub fn run(config: HostConfig) -> io::Result<()> {
         // not queued behind a whole frame of video.
         sender.send_cursor()?;
         let capture_ts_us = now_us();
+        sender.note_capture(frame_id, capture_ts_us);
+
+        // The synthetic source follows the controller the way a real encoder would, by
+        // producing less. Sending a shorter prefix of each slice rather than rebuilding it
+        // keeps the frame path free of allocation.
+        let budget = frame_budget(sender.target_bps(), config.fps, config.frame_bytes);
 
         for (slice_id, slice) in slices.iter().enumerate() {
+            let bytes = slice_prefix(slice, slice_id, slices.len(), budget);
             sender.send_slice(
                 frame_id,
                 slice_id as u16,
-                slice,
+                bytes,
                 capture_ts_us,
                 frame_id == 0,
                 slice_id + 1 == slices.len(),
@@ -116,6 +130,9 @@ pub fn run_encoded(
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
 
     let mut sender = SliceSender::connect(config.peer)?;
+    if let Some(bitrate) = config.pace_bps {
+        sender.enable_pacing(bitrate, config.adaptive);
+    }
     sender.serve_return_path(true)?;
     if let Some(loss) = config.parity_loss {
         sender.enable_parity(loss);
@@ -159,6 +176,7 @@ pub fn run_encoded(
         };
 
         let capture_ts_us = frame.pts_us;
+        sender.note_capture(frame_id, capture_ts_us);
         let is_idr = frame.is_idr;
         let last = frame.slices.len() - 1;
 
@@ -221,6 +239,9 @@ pub fn run_captured(
 
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     let mut sender = SliceSender::connect(config.peer)?;
+    if let Some(bitrate) = config.pace_bps {
+        sender.enable_pacing(bitrate, config.adaptive);
+    }
     sender.serve_return_path(true)?;
     if let Some(loss) = config.parity_loss {
         sender.enable_parity(loss);
@@ -258,6 +279,7 @@ pub fn run_captured(
             continue;
         };
 
+        sender.note_capture(sent_frames, capture_ts_us);
         let is_idr = frame.is_idr;
         let last = frame.slices.len() - 1;
         for slice_id in 0..frame.slices.len() {
@@ -304,12 +326,52 @@ fn report(sender: &SliceSender, elapsed: Duration) {
         elapsed.as_secs_f64(),
         sender.bytes() as f64 * 8.0 / elapsed.as_secs_f64() / 1e6
     );
+    sender.report_pacing();
     if sender.parity_sent() > 0 {
         println!("parity  : {} shards sent", sender.parity_sent());
     }
     sender.report_loss();
     sender.report_feedback();
 }
+
+/// Returns how many bytes this frame may carry, given what the controller wants.
+///
+/// A real encoder is told a bitrate and produces frames that average it. The synthetic
+/// source does the same arithmetic directly. Without this the controller has nothing to
+/// actuate: pacing alone slows the wire while the source keeps producing at full rate, and
+/// the queue simply moves inside the host.
+fn frame_budget(target_bps: Option<u32>, fps: u32, configured: usize) -> usize {
+    let Some(bps) = target_bps else {
+        return configured;
+    };
+
+    let wanted = bps as usize / 8 / fps.max(1) as usize;
+
+    // Never more than the source was built to produce, and never so little that a slice
+    // ends up empty — an encoder cannot emit a frame of nothing either.
+    wanted.clamp(MIN_FRAME_BYTES, configured)
+}
+
+/// Returns the prefix of one slice that fits inside a frame budget.
+///
+/// The budget is split evenly, and the remainder goes to the last slice so the frame's
+/// total is exactly the budget rather than a rounding error below it.
+fn slice_prefix(slice: &[u8], slice_id: usize, slices: usize, budget: usize) -> &[u8] {
+    let base = budget / slices;
+    let wanted = if slice_id + 1 == slices {
+        base + budget % slices
+    } else {
+        base
+    };
+
+    &slice[..wanted.clamp(1, slice.len())]
+}
+
+/// Smallest frame the synthetic source will produce, in bytes.
+///
+/// One packet per slice at the eight slices the pipeline's encoders use at most. Below this
+/// the shape stops resembling a frame and the measurement stops meaning anything.
+const MIN_FRAME_BYTES: usize = 8 * 1200;
 
 /// Splits a frame budget into slice bitstreams with a distinguishable byte pattern.
 ///
