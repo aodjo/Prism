@@ -89,6 +89,50 @@ pub trait Injector: Sized {
 
 use crate::net::packet::InputEvent;
 
+/// Where the pointer is on this machine, and how big the screen holding it is.
+///
+/// The screen travels with the position because the two are only meaningful together: the
+/// client scales the position into its own window, and it cannot do that against a screen
+/// size it has to remember from an earlier message that may never have arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerSample {
+    /// Pixels from the left of the primary display.
+    pub x: u16,
+    /// Pixels from the top of the primary display.
+    pub y: u16,
+    /// Width of the primary display in pixels; never zero.
+    pub screen_width: u16,
+    /// Height of the primary display in pixels; never zero.
+    pub screen_height: u16,
+}
+
+/// Reads where the pointer is on this machine.
+///
+/// Deliberately not a method on [`Injector`]. Reading the pointer has nothing to do with
+/// injecting: the host samples it every frame from the thread that sends video, which owns
+/// no injector, and the answer has to include movement the host's own user made rather than
+/// only what this process injected.
+///
+/// Returns `None` on a platform with no implementation, and on any platform that will not
+/// say — a session with no desktop has no pointer to report.
+#[must_use]
+pub fn pointer() -> Option<PointerSample> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::pointer()
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        windows::pointer()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
 /// The injector for the platform this build targets.
 #[cfg(target_os = "macos")]
 pub type PlatformInjector = macos::MacInjector;

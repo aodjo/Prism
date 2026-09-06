@@ -9,8 +9,8 @@ use std::io;
 use prism_core::clock::now_us;
 use prism_core::input::{Injector, PlatformInjector};
 use prism_core::net::packet::{
-    CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, FLAG_IDR, FLAG_LAST_OF_FRAME, InputEvent,
-    InputPacket, MAX_PACKET_SIZE, channel_of,
+    CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR, FLAG_LAST_OF_FRAME,
+    InputEvent, InputPacket, MAX_PACKET_SIZE, channel_of,
 };
 use prism_core::net::packetize::SlicePacketizer;
 use prism_core::net::transport::UdpTransport;
@@ -86,6 +86,42 @@ impl SliceSender {
         }
 
         Ok(())
+    }
+
+    /// Samples the host pointer and tells the client where it is.
+    ///
+    /// Called once per frame, which is a rate the cursor's smoothness does not depend on:
+    /// the client draws the cursor from its own motion the instant that motion happens, and
+    /// uses this only to correct for everything it could not know about — the host's own
+    /// user, a window warping the pointer, an edge it clamped against.
+    ///
+    /// Returns whether there was a pointer to report. A host with no desktop has none, and
+    /// that is not an error worth stopping a session over.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the message cannot be sent.
+    pub fn send_cursor(&mut self) -> io::Result<bool> {
+        let Some(sample) = prism_core::input::pointer() else {
+            return Ok(false);
+        };
+
+        let cursor = CursorPosition {
+            sample_ts_us: now_us(),
+            x: sample.x,
+            y: sample.y,
+            screen_width: sample.screen_width,
+            screen_height: sample.screen_height,
+        };
+
+        let len = cursor
+            .encode_into(&mut self.buffer)
+            .expect("a clamped sample always encodes");
+        self.transport.send(&self.buffer[..len])?;
+        self.packets += 1;
+        self.bytes += len as u64;
+
+        Ok(true)
     }
 
     /// Returns how many packets have been sent.

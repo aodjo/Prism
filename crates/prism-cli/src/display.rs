@@ -12,13 +12,15 @@
 use std::error::Error;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use objc2_metal::MTLPixelFormat;
 use objc2_quartz_core::CAMetalLayer;
+use prism_core::cursor::CursorTracker;
 use prism_core::net::packet::{InputEvent, MouseButton};
+use prism_core::render::cursor::CursorOverlay;
 use prism_core::render::metal::MetalRenderer;
 use prism_core::render::overlay::TextOverlay;
 use prism_core::render::pacing::PresentPacer;
@@ -105,6 +107,16 @@ fn to_input_event(event: &Event) -> Option<InputEvent> {
             pressed: false,
         }),
         _ => None,
+    }
+}
+
+/// Feeds pointer motion to the tracker so the cursor moves without waiting for the host.
+///
+/// Only motion. A button or a key changes nothing about where the pointer is, and a scroll
+/// moves the content rather than the cursor.
+fn predict(cursor: &mut CursorTracker, stamped_ts_us: u64, event: InputEvent) {
+    if let InputEvent::MouseMove { dx, dy } = event {
+        cursor.moved(stamped_ts_us, dx, dy);
     }
 }
 
@@ -248,9 +260,11 @@ pub fn run(
     let (pictures_tx, pictures_rx) = sync_channel(PICTURE_QUEUE_DEPTH);
     let offset = Arc::new(AtomicI64::new(client::OFFSET_UNKNOWN));
     let input_slot: Arc<OnceLock<client::InputSender>> = Arc::new(OnceLock::new());
+    let cursor_sink: client::CursorSink = Arc::new(Mutex::new(None));
     let worker = {
         let offset = Arc::clone(&offset);
         let input = Arc::clone(&input_slot);
+        let cursor = Arc::clone(&cursor_sink);
         thread::spawn(move || {
             client::run(
                 config,
@@ -258,6 +272,7 @@ pub fn run(
                     pictures: Some(pictures_tx),
                     offset: Some(offset),
                     input: Some(input),
+                    cursor: Some(cursor),
                 },
             )
         })
@@ -266,6 +281,9 @@ pub fn run(
     let mut events = sdl.event_pump()?;
     let mut pacer = PresentPacer::new(pacing_us);
     let mut overlay = TextOverlay::new(renderer.device(), 340, 118, 13.0)?;
+    let cursor_bitmap = CursorOverlay::new(renderer.device())?;
+    let mut cursor = CursorTracker::new();
+    let mut last_reading = None;
     let mut latency = LatencyRecorder::new(512);
     let mut shown = 0u64;
     let mut missed = 0u64;
@@ -286,8 +304,9 @@ pub fn run(
             if capture_input {
                 if let Some(sender) = input_slot.get() {
                     if let Some(input) = to_input_event(&event) {
-                        if sender.send(input).is_ok() {
+                        if let Ok(stamped) = sender.send(input) {
                             sent_input += 1;
+                            predict(&mut cursor, stamped, input);
                         }
                     }
                 }
@@ -296,8 +315,21 @@ pub fn run(
 
         if synthetic_input {
             if let Some(sender) = input_slot.get() {
-                if sender.send(client::synthetic_motion(sent_input)).is_ok() {
+                let motion = client::synthetic_motion(sent_input);
+                if let Ok(stamped) = sender.send(motion) {
                     sent_input += 1;
+                    predict(&mut cursor, stamped, motion);
+                }
+            }
+        }
+
+        // Corrections are applied where they are read rather than in the receive thread,
+        // so the tracker stays owned by the one thread that draws it.
+        if let Ok(slot) = cursor_sink.lock() {
+            if *slot != last_reading {
+                last_reading = *slot;
+                if let Some(reading) = *slot {
+                    cursor.observe(reading);
                 }
             }
         }
@@ -327,7 +359,22 @@ pub fn run(
                     hud_frames = 0;
                 }
 
-                if renderer.present(picture.pixel_buffer(), layer, Some(&overlay))? {
+                // A fixed array rather than a vector: this runs once per displayed frame,
+                // and the frame path does not allocate.
+                //
+                // The cursor comes after the statistics so it draws on top of them. It is
+                // the thing being pointed with, and it should never vanish behind a panel.
+                let target = (drawable_width as usize, drawable_height as usize);
+                let mut quads = [overlay.quad(target.0, target.1); 2];
+                let count = match cursor.normalised() {
+                    Some(at) => {
+                        quads[1] = cursor_bitmap.quad(at, target.0, target.1);
+                        2
+                    }
+                    None => 1,
+                };
+
+                if renderer.present(picture.pixel_buffer(), layer, &quads[..count])? {
                     shown += 1;
                     hud_frames += 1;
                 } else {

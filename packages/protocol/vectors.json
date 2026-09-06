@@ -8,7 +8,8 @@
     "controlHeaderLen": 2,
     "clockPingLen": 10,
     "clockPongLen": 26,
-    "inputPacketLen": 15
+    "inputPacketLen": 15,
+    "cursorPositionLen": 18
   },
   "channels": {
     "control": 0,
@@ -130,11 +131,27 @@
       "name": "unknown-input-kind",
       "hex": "030940420f0000000000fbff0a0000",
       "reason": "input kind 9 is not defined"
+    },
+    {
+      "name": "cursor-position-truncated",
+      "hex": "000240420f00000000002003c201000aa0",
+      "reason": "cursor position shorter than CURSOR_POSITION_LEN"
+    },
+    {
+      "name": "cursor-position-zero-width",
+      "hex": "000240420f00000000002003c2010000a005",
+      "reason": "cursor position with a screen of no width"
+    },
+    {
+      "name": "cursor-position-zero-height",
+      "hex": "000240420f00000000002003c201000a0000",
+      "reason": "cursor position with a screen of no height"
     }
   ],
   "controlTypes": {
     "clockPing": 0,
-    "clockPong": 1
+    "clockPong": 1,
+    "cursorPosition": 2
   },
   "clockPings": [
     {
@@ -211,6 +228,41 @@
         "originTsUs": "3000000"
       },
       "hex": "0303c0c62d00000000000400000001"
+    }
+  ],
+  "cursorPositions": [
+    {
+      "name": "canonical",
+      "fields": {
+        "sampleTsUs": "1000000",
+        "x": 800,
+        "y": 450,
+        "screenWidth": 2560,
+        "screenHeight": 1440
+      },
+      "hex": "000240420f00000000002003c201000aa005"
+    },
+    {
+      "name": "origin",
+      "fields": {
+        "sampleTsUs": "0",
+        "x": 0,
+        "y": 0,
+        "screenWidth": 1,
+        "screenHeight": 1
+      },
+      "hex": "000200000000000000000000000001000100"
+    },
+    {
+      "name": "saturated",
+      "fields": {
+        "sampleTsUs": "18446744073709551615",
+        "x": 65535,
+        "y": 65535,
+        "screenWidth": 65535,
+        "screenHeight": 65535
+      },
+      "hex": "0002ffffffffffffffffffffffffffffffff"
     }
   ]
 }

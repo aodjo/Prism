@@ -28,7 +28,6 @@ use objc2_metal::{
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::render::RenderError;
-use crate::render::overlay::TextOverlay;
 
 /// The shader that turns an NV12 picture into RGB.
 ///
@@ -104,6 +103,21 @@ fragment float4 prism_overlay_fragment(OverlayVertexOut in [[stage_in]],
     return glyphs.sample(nearest, in.uv);
 }
 "#;
+
+/// One textured rectangle blended over the picture.
+///
+/// The statistics overlay and the cursor are the same operation — an RGBA bitmap with
+/// premultiplied alpha, drawn somewhere on the target — so the renderer takes a list of
+/// them rather than knowing what either one is.
+#[derive(Debug, Clone, Copy)]
+pub struct Quad<'a> {
+    /// The bitmap to sample, with premultiplied alpha.
+    pub texture: &'a ProtocolObject<dyn MTLTexture>,
+    /// Left, top, width and height in normalised device coordinates, where y grows upwards.
+    ///
+    /// [`place`] builds this from a position and a pixel size.
+    pub rect: [f32; 4],
+}
 
 /// Draws decoded pictures into a Metal texture.
 #[derive(Debug)]
@@ -228,7 +242,7 @@ impl MetalRenderer {
         picture: &CVPixelBuffer,
         target: &ProtocolObject<dyn MTLTexture>,
     ) -> Result<(), RenderError> {
-        let command_buffer = self.record(picture, target, None)?;
+        let command_buffer = self.record(picture, target, &[])?;
         command_buffer.commit();
         command_buffer.waitUntilCompleted();
 
@@ -253,14 +267,14 @@ impl MetalRenderer {
         &mut self,
         picture: &CVPixelBuffer,
         layer: &CAMetalLayer,
-        overlay: Option<&TextOverlay>,
+        quads: &[Quad<'_>],
     ) -> Result<bool, RenderError> {
         let Some(drawable) = layer.nextDrawable() else {
             return Ok(false);
         };
 
         let target = drawable.texture();
-        let command_buffer = self.record(picture, &target, overlay)?;
+        let command_buffer = self.record(picture, &target, quads)?;
 
         command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
         command_buffer.commit();
@@ -281,7 +295,7 @@ impl MetalRenderer {
         &mut self,
         picture: &CVPixelBuffer,
         target: &ProtocolObject<dyn MTLTexture>,
-        overlay: Option<&TextOverlay>,
+        quads: &[Quad<'_>],
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>, RenderError> {
         let (width, height) = (
             CVPixelBufferGetWidth(picture),
@@ -330,20 +344,27 @@ impl MetalRenderer {
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
         }
 
-        if let Some(overlay) = overlay {
-            let rect = overlay_rect(overlay, target.width(), target.height());
-
+        if !quads.is_empty() {
             encoder.setRenderPipelineState(&self.overlay_pipeline);
-            // SAFETY: the rectangle is four floats, matching the shader's `float4`, and
-            // the overlay texture outlives the encoder.
-            unsafe {
-                encoder.setVertexBytes_length_atIndex(
-                    NonNull::from(&rect).cast(),
-                    core::mem::size_of_val(&rect),
-                    0,
-                );
-                encoder.setFragmentTexture_atIndex(Some(overlay.texture()), 0);
-                encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+
+            // Drawn in the order given, so a caller decides what sits on top of what by
+            // where it puts it in the slice.
+            for quad in quads {
+                // SAFETY: the rectangle is four floats, matching the shader's `float4`, and
+                // the texture outlives the encoder.
+                unsafe {
+                    encoder.setVertexBytes_length_atIndex(
+                        NonNull::from(&quad.rect).cast(),
+                        core::mem::size_of_val(&quad.rect),
+                        0,
+                    );
+                    encoder.setFragmentTexture_atIndex(Some(quad.texture), 0);
+                    encoder.drawPrimitives_vertexStart_vertexCount(
+                        MTLPrimitiveType::Triangle,
+                        0,
+                        6,
+                    );
+                }
             }
         }
 
@@ -441,16 +462,27 @@ fn build_overlay_pipeline(
         })
 }
 
-/// Returns where the overlay sits on the target, in normalised device coordinates.
+/// Places a bitmap of `width` by `height` pixels with its top left corner at a point.
 ///
-/// Pinned to the top left at its natural pixel size, so the text stays legible whatever
-/// the window is scaled to rather than stretching with it.
-fn overlay_rect(overlay: &TextOverlay, target_width: usize, target_height: usize) -> [f32; 4] {
-    let margin_x = 16.0 / target_width.max(1) as f32;
-    let margin_y = 16.0 / target_height.max(1) as f32;
+/// The point is a fraction of the target, the size is in pixels, and the result is in
+/// normalised device coordinates. Sizing in pixels rather than fractions is what keeps
+/// text legible and a cursor cursor-sized whatever the window is scaled to, instead of
+/// stretching them with it.
+#[must_use]
+pub fn place(
+    at: (f32, f32),
+    width: usize,
+    height: usize,
+    target_width: usize,
+    target_height: usize,
+) -> [f32; 4] {
+    let target_width = target_width.max(1) as f32;
+    let target_height = target_height.max(1) as f32;
 
-    let width = (overlay.width() as f32 / target_width.max(1) as f32) * 2.0;
-    let height = (overlay.height() as f32 / target_height.max(1) as f32) * 2.0;
-
-    [-1.0 + margin_x * 2.0, 1.0 - margin_y * 2.0, width, height]
+    [
+        at.0.mul_add(2.0, -1.0),
+        at.1.mul_add(-2.0, 1.0),
+        (width as f32 / target_width) * 2.0,
+        (height as f32 / target_height) * 2.0,
+    ]
 }

@@ -37,6 +37,9 @@ pub const CLOCK_PONG_LEN: usize = 26;
 /// Exact byte length of an input event packet.
 pub const INPUT_PACKET_LEN: usize = 15;
 
+/// Exact byte length of a cursor position message.
+pub const CURSOR_POSITION_LEN: usize = 18;
+
 /// Reserved video flag bits; any packet setting one of these is rejected.
 pub const VIDEO_FLAGS_RESERVED_MASK: u8 = 0xf8;
 
@@ -99,6 +102,8 @@ pub enum ControlType {
     ClockPing = 0,
     /// Host's answer, carrying both of its own timestamps.
     ClockPong = 1,
+    /// Where the host's pointer is, so the client can draw the cursor itself.
+    CursorPosition = 2,
 }
 
 impl TryFrom<u8> for ControlType {
@@ -114,6 +119,7 @@ impl TryFrom<u8> for ControlType {
         match tag {
             0 => Ok(ControlType::ClockPing),
             1 => Ok(ControlType::ClockPong),
+            2 => Ok(ControlType::CursorPosition),
             other => Err(ProtocolError::UnknownControlType(other)),
         }
     }
@@ -182,6 +188,18 @@ pub enum ProtocolError {
     PayloadTooLarge {
         /// Payload length that was rejected.
         actual: usize,
+    },
+
+    /// Cursor position claimed a screen with no area.
+    ///
+    /// The client divides by these to place the cursor, so a zero would either crash it or
+    /// silently put the cursor nowhere. A screen of no pixels is not a thing that exists.
+    #[error("cursor position claims a {width}x{height} screen")]
+    EmptyScreen {
+        /// Width the sender claimed.
+        width: u16,
+        /// Height the sender claimed.
+        height: u16,
     },
 
     /// Caller-supplied encode buffer was too small for the packet.
@@ -611,6 +629,129 @@ impl ClockPong {
     }
 }
 
+/// Where the host's pointer is, as carried on [`Channel::Control`].
+///
+/// The host keeps the cursor out of the captured video, so the client has to draw it. That
+/// is the point: a cursor baked into the frames inherits the whole video latency, while one
+/// drawn by the client answers the hand holding the mouse immediately and is corrected by
+/// these messages as they arrive.
+///
+/// The screen size travels with every message rather than being negotiated once. It is four
+/// bytes against a packet already this small, and it means a client that joins late, or
+/// misses the message where the host changed resolution, is never left scaling against a
+/// screen that no longer exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPosition {
+    /// Host clock when the pointer was read, in microseconds.
+    ///
+    /// This is what makes the message usable for correction rather than only display: the
+    /// client stamps the motion it sends in the same clock, so it can tell which of its own
+    /// movements this reading already accounts for.
+    pub sample_ts_us: u64,
+    /// Pixels from the left of the host's primary display.
+    pub x: u16,
+    /// Pixels from the top of the host's primary display.
+    pub y: u16,
+    /// Width of the host's primary display in pixels; never zero.
+    pub screen_width: u16,
+    /// Height of the host's primary display in pixels; never zero.
+    pub screen_height: u16,
+}
+
+impl CursorPosition {
+    /// Serialises this reading into `buf` and returns how many bytes were written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than
+    /// [`CURSOR_POSITION_LEN`], and [`ProtocolError::EmptyScreen`] if either dimension is
+    /// zero, so a bad reading is caught where it is made rather than on the far side.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{CURSOR_POSITION_LEN, CursorPosition};
+    /// let cursor = CursorPosition {
+    ///     sample_ts_us: 1_000_000,
+    ///     x: 800,
+    ///     y: 450,
+    ///     screen_width: 2560,
+    ///     screen_height: 1440,
+    /// };
+    /// let mut buf = [0u8; CURSOR_POSITION_LEN];
+    /// assert_eq!(cursor.encode_into(&mut buf).unwrap(), CURSOR_POSITION_LEN);
+    /// ```
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < CURSOR_POSITION_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: CURSOR_POSITION_LEN,
+            });
+        }
+
+        if self.screen_width == 0 || self.screen_height == 0 {
+            return Err(ProtocolError::EmptyScreen {
+                width: self.screen_width,
+                height: self.screen_height,
+            });
+        }
+
+        buf[0] = Channel::Control as u8;
+        buf[1] = ControlType::CursorPosition as u8;
+        buf[2..10].copy_from_slice(&self.sample_ts_us.to_le_bytes());
+        buf[10..12].copy_from_slice(&self.x.to_le_bytes());
+        buf[12..14].copy_from_slice(&self.y.to_le_bytes());
+        buf[14..16].copy_from_slice(&self.screen_width.to_le_bytes());
+        buf[16..18].copy_from_slice(&self.screen_height.to_le_bytes());
+
+        Ok(CURSOR_POSITION_LEN)
+    }
+
+    /// Parses a cursor position, requiring an exact length match and a screen with area.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::UnknownControlType`],
+    /// [`ProtocolError::WrongLength`], or [`ProtocolError::EmptyScreen`] as appropriate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{CURSOR_POSITION_LEN, CursorPosition};
+    /// let cursor = CursorPosition {
+    ///     sample_ts_us: 5,
+    ///     x: 1,
+    ///     y: 2,
+    ///     screen_width: 3,
+    ///     screen_height: 4,
+    /// };
+    /// let mut buf = [0u8; CURSOR_POSITION_LEN];
+    /// cursor.encode_into(&mut buf).unwrap();
+    /// assert_eq!(CursorPosition::decode(&buf).unwrap(), cursor);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_control(bytes, ControlType::CursorPosition, CURSOR_POSITION_LEN)?;
+
+        let screen_width = read_u16(bytes, 14);
+        let screen_height = read_u16(bytes, 16);
+
+        if screen_width == 0 || screen_height == 0 {
+            return Err(ProtocolError::EmptyScreen {
+                width: screen_width,
+                height: screen_height,
+            });
+        }
+
+        Ok(Self {
+            sample_ts_us: read_u64(bytes, 2),
+            x: read_u16(bytes, 10),
+            y: read_u16(bytes, 12),
+            screen_width,
+            screen_height,
+        })
+    }
+}
+
 /// Reads the control message type from a control packet.
 ///
 /// # Errors
@@ -676,6 +817,19 @@ fn expect_control(bytes: &[u8], expected: ControlType, length: usize) -> Result<
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(
         bytes[offset..offset + 8]
+            .try_into()
+            .expect("length was validated"),
+    )
+}
+
+/// Reads a little-endian `u16` at `offset`.
+///
+/// # Panics
+///
+/// Panics if `bytes` is shorter than `offset + 2`; callers validate the length first.
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(
+        bytes[offset..offset + 2]
             .try_into()
             .expect("length was validated"),
     )
