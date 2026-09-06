@@ -22,6 +22,7 @@ The first byte of every packet is the channel tag.
 | `CONTROL_HEADER_LEN` | 2 | Channel tag + control message type |
 | `CLOCK_PING_LEN` | 10 | Fixed size |
 | `CLOCK_PONG_LEN` | 26 | Fixed size |
+| `INPUT_PACKET_LEN` | 15 | Fixed size, every kind |
 | `VIDEO_HEADER_LEN` | 20 | Channel tag + video header |
 | `MAX_VIDEO_PAYLOAD` | 1180 | `MAX_PACKET_SIZE - VIDEO_HEADER_LEN` |
 | `FEEDBACK_PACKET_LEN` | 17 | Fixed size |
@@ -123,10 +124,48 @@ offset  size  field    type   notes
 18      8     t3       u64    host clock when the pong was sent
 ```
 
+## Input packets (channel 3)
+
+Fixed at 15 bytes for every kind. The two coordinate fields are reinterpreted per kind; a
+tagged union with per-kind lengths would save a few bytes on a packet that is already tiny,
+at the cost of a decoder that has to branch before it knows how much to read.
+
+```
+offset  size  field           type   notes
+0       1     channel         u8     always 3
+1       1     kind            u8     see below
+2       8     origin_ts_us    u64    when it happened, in the HOST's clock
+10      2     x               i16    depends on kind
+12      2     y               i16    depends on kind
+14      1     flags           u8     bit 0 = pressed
+```
+
+| Kind | Value | `x` | `y` | `flags` |
+|---|---|---|---|---|
+| `MouseMove` | 0 | dx, positive right | dy, positive down | — |
+| `MouseButton` | 1 | button: 0 left, 1 right, 2 middle | — | pressed |
+| `MouseScroll` | 2 | dx | dy | — |
+| `Key` | 3 | USB HID usage code | — | pressed |
+
+Motion is **relative**, not absolute: that is what a captured pointer produces and what a
+game reads, and an absolute position would have to be scaled between two different screen
+sizes and lose precision doing it.
+
+Keys are identified by **USB HID usage code**. Windows and macOS each have their own
+keyboard numbering and neither is portable, but both can be mapped from HID — which is
+also what the client's input library reports, so the client side is the identity mapping.
+
+`origin_ts_us` is carried **in the host's clock**, converted by the client before sending.
+The client is the side that measures the offset between the two clocks, so it is the side
+that can do the conversion; a host receiving a raw client timestamp could only compare it
+against its own clock and get the offset back as latency.
+
+Input is sent the instant it happens, with no pacing and no batching. It is the one path
+where a few milliseconds are felt directly rather than seen.
+
 ## Reserved
 
-`Audio` and `Input` payload layouts are defined in M7 and M3 respectively. Until then only
-their channel tags are fixed.
+The `Audio` payload layout is defined in M7. Until then only its channel tag is fixed.
 
 ## Test vectors
 

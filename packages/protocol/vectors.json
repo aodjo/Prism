@@ -7,7 +7,8 @@
     "feedbackPacketLen": 17,
     "controlHeaderLen": 2,
     "clockPingLen": 10,
-    "clockPongLen": 26
+    "clockPongLen": 26,
+    "inputPacketLen": 15
   },
   "channels": {
     "control": 0,
@@ -119,6 +120,16 @@
       "name": "unknown-control-type",
       "hex": "0009",
       "reason": "control type 9 is not defined"
+    },
+    {
+      "name": "input-short",
+      "hex": "030040420f0000000000fbff0a00",
+      "reason": "input packet shorter than INPUT_PACKET_LEN"
+    },
+    {
+      "name": "unknown-input-kind",
+      "hex": "030940420f0000000000fbff0a0000",
+      "reason": "input kind 9 is not defined"
     }
   ],
   "controlTypes": {
@@ -143,6 +154,63 @@
         "t3Us": "1000600"
       },
       "hex": "000140420f000000000034440f000000000098440f0000000000"
+    }
+  ],
+  "inputKinds": {
+    "mouseMove": 0,
+    "mouseButton": 1,
+    "mouseScroll": 2,
+    "key": 3
+  },
+  "mouseButtons": {
+    "left": 0,
+    "right": 1,
+    "middle": 2
+  },
+  "inputPackets": [
+    {
+      "name": "mouse-move",
+      "fields": {
+        "kind": 0,
+        "x": -5,
+        "y": 10,
+        "flags": 0,
+        "originTsUs": "1000000"
+      },
+      "hex": "030040420f0000000000fbff0a0000"
+    },
+    {
+      "name": "mouse-button-left-down",
+      "fields": {
+        "kind": 1,
+        "x": 0,
+        "y": 0,
+        "flags": 1,
+        "originTsUs": "2000000"
+      },
+      "hex": "030180841e00000000000000000001"
+    },
+    {
+      "name": "mouse-scroll-down",
+      "fields": {
+        "kind": 2,
+        "x": 0,
+        "y": -3,
+        "flags": 0,
+        "originTsUs": "4000000"
+      },
+      "hex": "030200093d00000000000000fdff00"
+    },
+    {
+      "name": "key-a-down",
+      "fields": {
+        "kind": 3,
+        "x": 4,
+        "y": 0,
+        "flags": 1,
+        "originTsUs": "3000000"
+      },
+      "hex": "0303c0c62d00000000000400000001"
     }
   ]
 }

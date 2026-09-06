@@ -12,16 +12,17 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use prism_core::clock::now_us;
 use prism_core::net::clocksync::ClockSync;
 use prism_core::net::packet::{
-    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, MAX_PACKET_SIZE, VideoPacket, channel_of,
+    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, INPUT_PACKET_LEN, InputEvent, InputPacket,
+    MAX_PACKET_SIZE, VideoPacket, channel_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::transport::UdpTransport;
@@ -55,6 +56,71 @@ const PING_INTERVAL: Duration = Duration::from_millis(250);
 /// Shared with whoever else needs to convert host timestamps — the display thread reads
 /// the same value to work out how old each picture is.
 pub const OFFSET_UNKNOWN: i64 = i64::MIN;
+
+/// Sends input events straight to the host.
+///
+/// Handed to the thread that captures input so it can write to the socket itself. Passing
+/// events to the receive thread instead would cost up to a packet interval of waiting,
+/// which is exactly the delay this path exists to avoid.
+///
+/// Nothing uses it away from macOS yet, because the window that captures input is the
+/// only caller and only macOS has one. It is built everywhere regardless so the wire
+/// side stays compiled and tested on every platform.
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct InputSender {
+    transport: UdpTransport,
+    host: SocketAddr,
+    offset: Arc<AtomicI64>,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl InputSender {
+    /// Sends one input event immediately.
+    ///
+    /// No pacing and no batching: this is the one path where a millisecond is felt rather
+    /// than seen.
+    ///
+    /// The timestamp is converted into the host's clock before sending, because this side
+    /// is the one that knows the offset. Sending a raw local time would leave the host
+    /// measuring the clock difference and calling it input latency.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the packet cannot be sent.
+    pub fn send(&self, event: InputEvent) -> io::Result<()> {
+        let offset = self.offset.load(Ordering::Relaxed);
+        let now = now_us();
+        let origin_ts_us = if offset == OFFSET_UNKNOWN {
+            now
+        } else {
+            (i128::from(now) + i128::from(offset)).max(0) as u64
+        };
+
+        let packet = InputPacket {
+            origin_ts_us,
+            event,
+        };
+
+        let mut buf = [0u8; INPUT_PACKET_LEN];
+        if packet.encode_into(&mut buf).is_ok() {
+            self.transport.send_to(&buf, self.host)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// What the caller wants from a client session beyond the counters it prints.
+#[derive(Debug, Default)]
+pub struct ClientHooks {
+    /// Where decoded pictures go, when someone is showing them.
+    pub pictures: Option<PictureSink>,
+    /// Published as the clock offset is learned, for anyone converting host timestamps.
+    pub offset: Option<Arc<AtomicI64>>,
+    /// Filled in once the host's address is known, so input can be sent to it.
+    pub input: Option<Arc<OnceLock<InputSender>>>,
+}
 
 /// How the receiving client should behave.
 #[derive(Debug, Clone, Copy)]
@@ -104,11 +170,13 @@ struct DecodeReport {
 ///
 /// Returns an [`io::Error`] if the socket cannot be bound or read, other than the
 /// timeout that ends the run normally.
-pub fn run(
-    config: ClientConfig,
-    pictures: Option<PictureSink>,
-    offset: Arc<AtomicI64>,
-) -> io::Result<()> {
+pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
+    let ClientHooks {
+        pictures,
+        offset,
+        input,
+    } = hooks;
+    let offset = offset.unwrap_or_else(|| Arc::new(AtomicI64::new(OFFSET_UNKNOWN)));
     let transport = UdpTransport::bind(config.bind)?;
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
@@ -158,7 +226,18 @@ pub fn run(
             Err(err) if is_timeout(&err) => break,
             Err(err) => return Err(err),
         };
-        host.get_or_insert(from);
+        if host.is_none() {
+            host = Some(from);
+            if let Some(slot) = input.as_ref() {
+                if let Ok(cloned) = transport.try_clone() {
+                    let _ = slot.set(InputSender {
+                        transport: cloned,
+                        host: from,
+                        offset: Arc::clone(&offset),
+                    });
+                }
+            }
+        }
 
         if channel_of(bytes) == Ok(Channel::Control) {
             let t4_us = now_us();
