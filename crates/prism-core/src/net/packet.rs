@@ -34,6 +34,9 @@ pub const CLOCK_PING_LEN: usize = 10;
 /// Exact byte length of a clock synchronisation pong.
 pub const CLOCK_PONG_LEN: usize = 26;
 
+/// Exact byte length of an input event packet.
+pub const INPUT_PACKET_LEN: usize = 15;
+
 /// Reserved video flag bits; any packet setting one of these is rejected.
 pub const VIDEO_FLAGS_RESERVED_MASK: u8 = 0xf8;
 
@@ -134,6 +137,14 @@ pub enum ProtocolError {
     /// Control message type was not one this build knows.
     #[error("unknown control type {0}")]
     UnknownControlType(u8),
+
+    /// Input event kind was not one this build knows.
+    #[error("unknown input kind {0}")]
+    UnknownInputKind(u8),
+
+    /// Pointer button index was not one this build knows.
+    #[error("unknown mouse button {0}")]
+    UnknownMouseButton(i16),
 
     /// Packet was routed to a decoder for a different channel.
     #[error("expected channel {expected:?}, got tag {got}")]
@@ -668,4 +679,254 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
             .try_into()
             .expect("length was validated"),
     )
+}
+
+/// Reads a little-endian `i16` at `offset`.
+///
+/// # Panics
+///
+/// Panics if `bytes` is shorter than `offset + 2`; callers validate the length first.
+fn read_i16(bytes: &[u8], offset: usize) -> i16 {
+    i16::from_le_bytes(
+        bytes[offset..offset + 2]
+            .try_into()
+            .expect("length was validated"),
+    )
+}
+
+/// What an input packet describes.
+///
+/// The wire layout is one fixed size for all four, with the two coordinate fields
+/// reinterpreted per kind. A tagged union with per-kind lengths would save a few bytes on
+/// a packet that is already tiny, at the cost of a decoder that has to branch before it
+/// knows how much to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InputKind {
+    /// Pointer motion, in device units relative to the last report.
+    MouseMove = 0,
+    /// A pointer button going down or coming up.
+    MouseButton = 1,
+    /// Scroll wheel motion.
+    MouseScroll = 2,
+    /// A key going down or coming up.
+    Key = 3,
+}
+
+impl TryFrom<u8> for InputKind {
+    type Error = ProtocolError;
+
+    /// Converts a raw kind byte into an [`InputKind`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::UnknownInputKind`] for a kind this build does not know.
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        match tag {
+            0 => Ok(InputKind::MouseMove),
+            1 => Ok(InputKind::MouseButton),
+            2 => Ok(InputKind::MouseScroll),
+            3 => Ok(InputKind::Key),
+            other => Err(ProtocolError::UnknownInputKind(other)),
+        }
+    }
+}
+
+/// Which pointer button an event refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum MouseButton {
+    /// The primary button.
+    Left = 0,
+    /// The secondary button.
+    Right = 1,
+    /// The wheel button.
+    Middle = 2,
+}
+
+impl TryFrom<i16> for MouseButton {
+    type Error = ProtocolError;
+
+    /// Converts a raw button index into a [`MouseButton`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::UnknownMouseButton`] for a button this build does not know.
+    fn try_from(index: i16) -> Result<Self, Self::Error> {
+        match index {
+            0 => Ok(MouseButton::Left),
+            1 => Ok(MouseButton::Right),
+            2 => Ok(MouseButton::Middle),
+            other => Err(ProtocolError::UnknownMouseButton(other)),
+        }
+    }
+}
+
+/// One input event, as carried on [`Channel::Input`].
+///
+/// Motion is relative rather than absolute because that is what a captured pointer
+/// produces and what a game reads: an absolute position would have to be scaled between
+/// two different screen sizes and would lose precision doing it.
+///
+/// Keys are identified by USB HID usage code. Both Windows and macOS have their own
+/// keyboard numbering and neither is portable, but both can be mapped from HID, which is
+/// also what the client's input library reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEvent {
+    /// Pointer motion relative to the last report.
+    MouseMove {
+        /// Horizontal movement; positive is right.
+        dx: i16,
+        /// Vertical movement; positive is down.
+        dy: i16,
+    },
+    /// A pointer button changing state.
+    MouseButton {
+        /// Which button changed.
+        button: MouseButton,
+        /// Whether it is now down.
+        pressed: bool,
+    },
+    /// Scroll wheel motion.
+    MouseScroll {
+        /// Horizontal scroll; positive is right.
+        dx: i16,
+        /// Vertical scroll; positive is down.
+        dy: i16,
+    },
+    /// A key changing state.
+    Key {
+        /// USB HID usage code for the key.
+        usage: u16,
+        /// Whether it is now down.
+        pressed: bool,
+    },
+}
+
+/// An input event with the time it happened.
+///
+/// The timestamp is what makes the input path measurable. Without it the only thing that
+/// can be observed about input is whether it arrived, and this is the one part of the
+/// pipeline where a few milliseconds are felt directly rather than seen.
+///
+/// It is carried **in the host's clock**, converted by the client before sending. The
+/// client is the side that measures the offset between the two, so it is the side that
+/// can do the conversion; a host receiving a raw client timestamp could only compare it
+/// against its own clock and get the offset back as latency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputPacket {
+    /// When the event happened, in the host's clock, in microseconds.
+    pub origin_ts_us: u64,
+    /// What happened.
+    pub event: InputEvent,
+}
+
+impl InputPacket {
+    /// Serialises this event into `buf` and returns how many bytes were written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than
+    /// [`INPUT_PACKET_LEN`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{INPUT_PACKET_LEN, InputEvent, InputPacket};
+    /// let packet = InputPacket {
+    ///     origin_ts_us: 1_000_000,
+    ///     event: InputEvent::MouseMove { dx: -5, dy: 10 },
+    /// };
+    /// let mut buf = [0u8; INPUT_PACKET_LEN];
+    /// assert_eq!(packet.encode_into(&mut buf).unwrap(), INPUT_PACKET_LEN);
+    /// ```
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < INPUT_PACKET_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: INPUT_PACKET_LEN,
+            });
+        }
+
+        let (kind, x, y, flags) = match self.event {
+            InputEvent::MouseMove { dx, dy } => (InputKind::MouseMove, dx, dy, 0),
+            InputEvent::MouseScroll { dx, dy } => (InputKind::MouseScroll, dx, dy, 0),
+            InputEvent::MouseButton { button, pressed } => {
+                (InputKind::MouseButton, button as i16, 0, u8::from(pressed))
+            }
+            InputEvent::Key { usage, pressed } => {
+                (InputKind::Key, usage as i16, 0, u8::from(pressed))
+            }
+        };
+
+        buf[0] = Channel::Input as u8;
+        buf[1] = kind as u8;
+        buf[2..10].copy_from_slice(&self.origin_ts_us.to_le_bytes());
+        buf[10..12].copy_from_slice(&x.to_le_bytes());
+        buf[12..14].copy_from_slice(&y.to_le_bytes());
+        buf[14] = flags;
+
+        Ok(INPUT_PACKET_LEN)
+    }
+
+    /// Parses an input event, requiring an exact length match.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`] if the tag is not [`Channel::Input`],
+    /// [`ProtocolError::WrongLength`] on a size mismatch,
+    /// [`ProtocolError::UnknownInputKind`] for an unrecognised kind, and
+    /// [`ProtocolError::UnknownMouseButton`] for an unrecognised button.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{INPUT_PACKET_LEN, InputEvent, InputPacket};
+    /// let packet = InputPacket {
+    ///     origin_ts_us: 7,
+    ///     event: InputEvent::Key { usage: 0x04, pressed: true },
+    /// };
+    /// let mut buf = [0u8; INPUT_PACKET_LEN];
+    /// packet.encode_into(&mut buf).unwrap();
+    /// assert_eq!(InputPacket::decode(&buf).unwrap(), packet);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let channel = channel_of(bytes)?;
+        if channel != Channel::Input {
+            return Err(ProtocolError::WrongChannel {
+                expected: Channel::Input,
+                got: bytes[0],
+            });
+        }
+
+        if bytes.len() != INPUT_PACKET_LEN {
+            return Err(ProtocolError::WrongLength {
+                actual: bytes.len(),
+                expected: INPUT_PACKET_LEN,
+            });
+        }
+
+        let kind = InputKind::try_from(bytes[1])?;
+        let x = read_i16(bytes, 10);
+        let y = read_i16(bytes, 12);
+        let pressed = bytes[14] & 1 != 0;
+
+        let event = match kind {
+            InputKind::MouseMove => InputEvent::MouseMove { dx: x, dy: y },
+            InputKind::MouseScroll => InputEvent::MouseScroll { dx: x, dy: y },
+            InputKind::MouseButton => InputEvent::MouseButton {
+                button: MouseButton::try_from(x)?,
+                pressed,
+            },
+            InputKind::Key => InputEvent::Key {
+                usage: x as u16,
+                pressed,
+            },
+        };
+
+        Ok(Self {
+            origin_ts_us: read_u64(bytes, 2),
+            event,
+        })
+    }
 }

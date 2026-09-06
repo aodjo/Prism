@@ -13,6 +13,9 @@ export {
   Channel,
   ControlType,
   FEEDBACK_PACKET_LEN,
+  INPUT_PACKET_LEN,
+  InputKind,
+  MouseButton,
   FORMAT_VERSION,
   MAX_PACKET_SIZE,
   MAX_VIDEO_PAYLOAD,
@@ -27,10 +30,19 @@ export {
   decodeClockPing,
   decodeClockPong,
   decodeFeedbackPacket,
+  decodeInputPacket,
   decodeVideoPacket,
   encodeClockPing,
   encodeClockPong,
   encodeFeedbackPacket,
+  encodeInputPacket,
   encodeVideoPacket,
 } from './packet.js';
-export type { ClockPing, ClockPong, FeedbackPacket, VideoPacket } from './packet.js';
+export type {
+  ClockPing,
+  ClockPong,
+  FeedbackPacket,
+  InputEvent,
+  InputPacket,
+  VideoPacket,
+} from './packet.js';

@@ -1,5 +1,8 @@
 import {
   CLOCK_PING_LEN,
+  INPUT_PACKET_LEN,
+  InputKind,
+  MouseButton,
   CLOCK_PONG_LEN,
   CONTROL_HEADER_LEN,
   Channel,
@@ -492,5 +495,147 @@ function expectControl(bytes: Uint8Array, expected: ControlType, length: number)
     throw new PrismProtocolError(
       `control packet is ${bytes.length} bytes, expected exactly ${length}`,
     );
+  }
+}
+
+/**
+ * One input event, as carried on {@link Channel.Input}.
+ *
+ * Motion is relative rather than absolute because that is what a captured pointer
+ * produces and what a game reads. Keys are identified by USB HID usage code, which both
+ * Windows and macOS can be mapped from and neither uses natively.
+ */
+export type InputEvent =
+  | { kind: InputKind.MouseMove; dx: number; dy: number }
+  | { kind: InputKind.MouseButton; button: MouseButton; pressed: boolean }
+  | { kind: InputKind.MouseScroll; dx: number; dy: number }
+  | { kind: InputKind.Key; usage: number; pressed: boolean };
+
+/**
+ * An input event with the time it happened.
+ *
+ * The timestamp is carried in the host's clock, converted by the client before sending:
+ * the client is the side that measures the offset between the two, so it is the side that
+ * can do the conversion.
+ */
+export interface InputPacket {
+  originTsUs: bigint;
+  event: InputEvent;
+}
+
+/**
+ * Serialises an input event into its fixed 15-byte layout.
+ *
+ * @param {InputPacket} packet - Packet fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer of exactly `INPUT_PACKET_LEN` bytes.
+ * @throws {PrismProtocolError} If the timestamp or a coordinate is out of range for its wire field.
+ *
+ * @example
+ * encodeInputPacket({
+ *   originTsUs: 1_000_000n,
+ *   event: { kind: InputKind.MouseMove, dx: -5, dy: 10 },
+ * }).length; // 15
+ */
+export function encodeInputPacket(packet: InputPacket): Uint8Array {
+  assertU64('originTsUs', packet.originTsUs);
+
+  let x = 0;
+  let y = 0;
+  let flags = 0;
+
+  switch (packet.event.kind) {
+    case InputKind.MouseMove:
+    case InputKind.MouseScroll:
+      x = packet.event.dx;
+      y = packet.event.dy;
+      break;
+    case InputKind.MouseButton:
+      x = packet.event.button;
+      flags = packet.event.pressed ? 1 : 0;
+      break;
+    case InputKind.Key:
+      x = packet.event.usage > 0x7fff ? packet.event.usage - 0x10000 : packet.event.usage;
+      flags = packet.event.pressed ? 1 : 0;
+      break;
+  }
+
+  assertI16('x', x);
+  assertI16('y', y);
+
+  const bytes = new Uint8Array(INPUT_PACKET_LEN);
+  const view = new DataView(bytes.buffer);
+
+  view.setUint8(0, Channel.Input);
+  view.setUint8(1, packet.event.kind);
+  view.setBigUint64(2, packet.originTsUs, true);
+  view.setInt16(10, x, true);
+  view.setInt16(12, y, true);
+  view.setUint8(14, flags);
+
+  return bytes;
+}
+
+/**
+ * Parses an input event, requiring an exact length match.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {InputPacket} The decoded event.
+ * @throws {PrismProtocolError} If the channel, length, kind, or button is not one this build knows.
+ *
+ * @example
+ * decodeInputPacket(encodeInputPacket(packet)).event.kind; // InputKind.MouseMove
+ */
+export function decodeInputPacket(bytes: Uint8Array): InputPacket {
+  if (channelOf(bytes) !== Channel.Input) {
+    throw new PrismProtocolError(`expected channel ${Channel.Input}, got ${bytes.at(0)}`);
+  }
+
+  if (bytes.length !== INPUT_PACKET_LEN) {
+    throw new PrismProtocolError(
+      `input packet is ${bytes.length} bytes, expected exactly ${INPUT_PACKET_LEN}`,
+    );
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const kind = view.getUint8(1);
+  const x = view.getInt16(10, true);
+  const y = view.getInt16(12, true);
+  const pressed = (view.getUint8(14) & 1) !== 0;
+  const originTsUs = view.getBigUint64(2, true);
+
+  switch (kind) {
+    case InputKind.MouseMove:
+      return { originTsUs, event: { kind: InputKind.MouseMove, dx: x, dy: y } };
+    case InputKind.MouseScroll:
+      return { originTsUs, event: { kind: InputKind.MouseScroll, dx: x, dy: y } };
+    case InputKind.MouseButton:
+      if (x !== MouseButton.Left && x !== MouseButton.Right && x !== MouseButton.Middle) {
+        throw new PrismProtocolError(`unknown mouse button ${x}`);
+      }
+      return { originTsUs, event: { kind: InputKind.MouseButton, button: x, pressed } };
+    case InputKind.Key:
+      return {
+        originTsUs,
+        event: { kind: InputKind.Key, usage: x < 0 ? x + 0x10000 : x, pressed },
+      };
+    default:
+      throw new PrismProtocolError(`unknown input kind ${kind}`);
+  }
+}
+
+/**
+ * Throws unless a value fits a signed 16-bit wire field.
+ *
+ * @param {string} field - Field name, used in the error message.
+ * @param {number} value - Value to check.
+ * @returns {void} Nothing; the function is used purely for its throwing behaviour.
+ * @throws {PrismProtocolError} If `value` is not an integer in the range -32768 to 32767.
+ *
+ * @example
+ * assertI16('dx', -5); // passes
+ */
+function assertI16(field: string, value: number): void {
+  if (!Number.isInteger(value) || value < -0x8000 || value > 0x7fff) {
+    throw new PrismProtocolError(`${field} must be an integer in [-32768, 32767], got ${value}`);
   }
 }
