@@ -7,9 +7,10 @@
 use std::io;
 
 use prism_core::clock::now_us;
+use prism_core::input::{Injector, PlatformInjector};
 use prism_core::net::packet::{
-    CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, FLAG_IDR, FLAG_LAST_OF_FRAME, InputPacket,
-    MAX_PACKET_SIZE, channel_of,
+    CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, FLAG_IDR, FLAG_LAST_OF_FRAME, InputEvent,
+    InputPacket, MAX_PACKET_SIZE, channel_of,
 };
 use prism_core::net::packetize::SlicePacketizer;
 use prism_core::net::transport::UdpTransport;
@@ -115,13 +116,17 @@ impl SliceSender {
         std::thread::spawn(move || {
             let mut recv_buf = [0u8; MAX_PACKET_SIZE];
             let mut send_buf = [0u8; CLOCK_PONG_LEN];
-            let mut injector = inject_input.then(new_injector).flatten();
+            let mut input = HostInput::new(inject_input);
             let mut latency = LatencyRecorder::new(4096);
             let mut injected = 0u64;
 
             loop {
-                let Ok(bytes) = transport.recv_into(&mut recv_buf) else {
-                    return;
+                let bytes = match transport.recv_into(&mut recv_buf) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        eprintln!("host: return path recv failed: {err} ({:?})", err.kind());
+                        return;
+                    }
                 };
                 let arrived_us = now_us();
 
@@ -157,10 +162,10 @@ impl SliceSender {
                         );
                         injected += 1;
 
-                        inject(injector.as_mut(), packet.event);
+                        input.inject(packet.event);
 
                         if injected == 20 {
-                            report_injection(injector.as_ref());
+                            input.report_once();
                         }
 
                         if injected % 500 == 0 {
@@ -182,69 +187,78 @@ impl SliceSender {
     }
 }
 
-/// Creates the platform injector, reporting why if it cannot.
+/// Holds the host's injector and everything that has to be said about it exactly once.
 ///
-/// Injection is optional: a session that only watches is still useful, and the reason it
-/// cannot control the host — usually a missing Accessibility grant — is worth saying once
-/// rather than on every event.
-#[cfg(target_os = "macos")]
-fn new_injector() -> Option<prism_core::input::macos::MacInjector> {
-    match prism_core::input::macos::MacInjector::new() {
-        Ok(injector) => Some(injector),
-        Err(err) => {
-            eprintln!("host: input will not be injected: {err}");
+/// Injection is optional — a session that only watches is still useful — so a host that
+/// cannot control the machine carries no injector rather than refusing to start. The
+/// reasons it might fail repeat on every event if left alone: a missing Accessibility
+/// grant on macOS, an elevated foreground window on Windows. Each is worth one line.
+struct HostInput {
+    injector: Option<PlatformInjector>,
+    complained: bool,
+    confirmed: bool,
+}
+
+impl HostInput {
+    /// Creates the platform injector, saying why if it cannot.
+    fn new(enabled: bool) -> Self {
+        let injector = if enabled {
+            match PlatformInjector::new() {
+                Ok(injector) => Some(injector),
+                Err(err) => {
+                    eprintln!("host: input will not be injected: {err}");
+                    None
+                }
+            }
+        } else {
             None
+        };
+
+        Self {
+            injector,
+            complained: false,
+            confirmed: false,
         }
     }
-}
 
-/// Reports that this platform has no injector yet.
-#[cfg(not(target_os = "macos"))]
-fn new_injector() -> Option<()> {
-    eprintln!("host: input injection is not implemented on this platform yet");
-    None
-}
+    /// Injects one event, complaining at most once about a kind of failure that repeats.
+    fn inject(&mut self, event: InputEvent) {
+        let Some(injector) = self.injector.as_mut() else {
+            return;
+        };
 
-/// Says once whether injected events are actually reaching the system.
-///
-/// `CGEventPost` returns nothing and does nothing when the process is untrusted, so the
-/// only evidence it worked is the pointer having moved where it was told to.
-#[cfg(target_os = "macos")]
-fn report_injection(injector: Option<&prism_core::input::macos::MacInjector>) {
-    match injector {
-        Some(injector) if injector.injection_is_landing() => {
-            println!("input  : injection confirmed, the pointer followed");
-        }
-        Some(_) => println!(
-            "input  : events are posted but the pointer did not follow — check Accessibility, \
-             unless the client is on this same machine, where its captured pointer holds the \
-             cursor still and this check cannot tell the two apart"
-        ),
-        None => {}
-    }
-}
-
-/// Says nothing on a platform with no injector.
-#[cfg(not(target_os = "macos"))]
-fn report_injection(injector: Option<&()>) {
-    let _ = injector;
-}
-
-/// Injects one event, if there is an injector to do it with.
-#[cfg(target_os = "macos")]
-fn inject(
-    injector: Option<&mut prism_core::input::macos::MacInjector>,
-    event: prism_core::net::packet::InputEvent,
-) {
-    if let Some(injector) = injector {
         if let Err(err) = injector.inject(event) {
-            eprintln!("host: {err}");
+            if !self.complained {
+                eprintln!("host: {err}");
+                self.complained = true;
+            }
         }
     }
-}
 
-/// Discards an event on a platform with no injector.
-#[cfg(not(target_os = "macos"))]
-fn inject(injector: Option<&mut ()>, event: prism_core::net::packet::InputEvent) {
-    let _ = (injector, event);
+    /// Says once whether injected events are actually reaching the system.
+    ///
+    /// Worth saying because both platforms can accept an event and do nothing with it:
+    /// macOS posts into the void when the process is untrusted, and Windows refuses
+    /// outright when a more privileged window holds the foreground.
+    fn report_once(&mut self) {
+        if self.confirmed || self.injector.is_none() {
+            return;
+        }
+        self.confirmed = true;
+
+        if self
+            .injector
+            .as_ref()
+            .is_some_and(PlatformInjector::injection_is_landing)
+        {
+            println!("input  : injection confirmed, events are reaching the system");
+        } else {
+            println!(
+                "input  : events are being posted but do not appear to land — check the \
+                 permission to control this machine, unless the client is on this same \
+                 machine, where its captured pointer holds the cursor still and this check \
+                 cannot tell the two apart"
+            );
+        }
+    }
 }

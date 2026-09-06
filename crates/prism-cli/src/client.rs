@@ -496,3 +496,54 @@ fn is_timeout(err: &io::Error) -> bool {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
     )
 }
+
+/// How often a synthetic run fabricates a pointer report.
+///
+/// One millisecond is the rate a gaming mouse polls at, which is the rate the input path
+/// is designed to carry, so a measurement taken at anything slower would flatter it.
+const SYNTHETIC_INPUT_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Returns the fabricated pointer motion at a given point in a measurement run.
+///
+/// A small back and forth rather than a drift, so a long run does not walk the host's
+/// pointer off the screen and start clamping against an edge.
+///
+/// # Examples
+///
+/// ```ignore
+/// let event = synthetic_motion(0);
+/// ```
+#[must_use]
+pub fn synthetic_motion(sequence: u64) -> InputEvent {
+    InputEvent::MouseMove {
+        dx: if sequence % 2 == 0 { 2 } else { -2 },
+        dy: 0,
+    }
+}
+
+/// Starts a thread that fabricates pointer motion once the host's address is known.
+///
+/// This exists so the input path can be measured without a window, which is the only way
+/// to measure it against a host whose video this client cannot decode — a Windows host has
+/// no encoder yet, and waiting for one before testing input would leave the whole return
+/// path unexercised on the platform it matters most on.
+///
+/// The thread runs until the process exits, which is fine for a tool whose sessions last
+/// exactly as long as the process.
+pub fn spawn_synthetic_input(slot: Arc<OnceLock<InputSender>>) {
+    std::thread::spawn(move || {
+        let mut sequence = 0u64;
+
+        loop {
+            std::thread::sleep(SYNTHETIC_INPUT_INTERVAL);
+
+            let Some(sender) = slot.get() else {
+                continue;
+            };
+
+            if sender.send(synthetic_motion(sequence)).is_ok() {
+                sequence += 1;
+            }
+        }
+    });
+}

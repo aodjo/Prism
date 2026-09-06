@@ -84,7 +84,10 @@ fn to_input_event(event: &Event) -> Option<InputEvent> {
             ..
         } => Some(InputEvent::MouseScroll {
             dx: *integer_x as i16,
-            dy: *integer_y as i16,
+            // SDL counts a wheel pushed away from the user as positive; the wire counts
+            // downward as positive, to agree with pointer motion. Without this the host
+            // scrolls the wrong way.
+            dy: -(*integer_y as i16),
         }),
         Event::KeyDown {
             scancode: Some(scancode),
@@ -293,10 +296,7 @@ pub fn run(
 
         if synthetic_input {
             if let Some(sender) = input_slot.get() {
-                // A small back and forth rather than a drift, so a measurement run does
-                // not walk the host's pointer off the screen.
-                let dx = if sent_input % 2 == 0 { 2 } else { -2 };
-                if sender.send(InputEvent::MouseMove { dx, dy: 0 }).is_ok() {
+                if sender.send(client::synthetic_motion(sent_input)).is_ok() {
                     sent_input += 1;
                 }
             }

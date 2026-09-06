@@ -63,6 +63,12 @@ enum Command {
     /// Produce frames and send them to a client.
     Host {
         /// Address of the receiving client.
+        ///
+        /// The socket is connected to it, so anything the client sends back has to come
+        /// from this exact address or the kernel discards it without a word. On a client
+        /// with two interfaces on one subnet that is not the address it is reachable at,
+        /// it is the one it routes out of — `route get <this host>` on the client says
+        /// which.
         #[arg(long)]
         peer: SocketAddr,
 
@@ -290,13 +296,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
 
             #[cfg(not(target_os = "macos"))]
             {
-                let _ = (
-                    window_width,
-                    window_height,
-                    pacing_us,
-                    no_input,
-                    synthetic_input,
-                );
+                let _ = (window_width, window_height, pacing_us, no_input);
                 if config.decode {
                     return Err("decoding is not implemented on this platform yet".into());
                 }
@@ -304,6 +304,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     config,
                     client::ClientHooks {
                         offset: Some(offset),
+                        input: synthetic_input.then(windowless_input),
                         ..client::ClientHooks::default()
                     },
                 )?)
@@ -325,6 +326,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         config,
                         client::ClientHooks {
                             offset: Some(offset),
+                            input: synthetic_input.then(windowless_input),
                             ..client::ClientHooks::default()
                         },
                     )?)
@@ -363,4 +365,16 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             }
         }
     }
+}
+
+/// Builds the input slot for a client with no window, and starts fabricating motion into it.
+///
+/// A client that shows the stream captures real input from its window. One that does not
+/// has nothing to capture, so the only way it can exercise the return path is to make the
+/// events up. That is worth having because it is the only way to measure input against a
+/// host whose video this client cannot decode.
+fn windowless_input() -> std::sync::Arc<std::sync::OnceLock<client::InputSender>> {
+    let slot = std::sync::Arc::new(std::sync::OnceLock::new());
+    client::spawn_synthetic_input(std::sync::Arc::clone(&slot));
+    slot
 }

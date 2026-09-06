@@ -16,7 +16,7 @@ use objc2_core_graphics::{
     CGEventTapLocation, CGEventType, CGMainDisplayID, CGMouseButton,
 };
 
-use crate::input::InputError;
+use crate::input::{Injector, InputError};
 use crate::net::packet::{InputEvent, MouseButton};
 
 /// Where injected events enter the system.
@@ -36,78 +36,10 @@ pub struct MacInjector {
 }
 
 impl MacInjector {
-    /// Creates an injector, failing if the process may not control the machine.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InputError::PermissionDenied`] if Accessibility has not been granted, and
-    /// [`InputError::Inject`] if CoreGraphics will not create an event source.
-    pub fn new() -> Result<Self, InputError> {
-        // SAFETY: the function takes no arguments and only reports the trust state.
-        if !unsafe { AXIsProcessTrusted() } {
-            return Err(InputError::PermissionDenied);
-        }
-
-        let source =
-            CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok_or(InputError::Inject {
-                reason: "could not create an event source",
-            })?;
-
-        let bounds = CGDisplayBounds(CGMainDisplayID());
-
-        // Start from wherever the pointer already is rather than jumping it to the middle
-        // of the screen the moment a session connects.
-        let position = system_pointer().unwrap_or(CGPoint {
-            x: bounds.origin.x + bounds.size.width / 2.0,
-            y: bounds.origin.y + bounds.size.height / 2.0,
-        });
-
-        Ok(Self {
-            source,
-            bounds,
-            position,
-            buttons: [false; 3],
-            flags: CGEventFlags::empty(),
-        })
-    }
-
     /// Returns where the injector believes the pointer is.
     #[must_use]
     pub fn position(&self) -> (f64, f64) {
         (self.position.x, self.position.y)
-    }
-
-    /// Returns whether the system pointer is where this injector last put it.
-    ///
-    /// Worth checking once after the first movement. `CGEventPost` returns nothing and
-    /// fails silently when the process is not trusted, so agreement between the tracked
-    /// position and the real one is the only evidence that events are actually landing.
-    ///
-    /// Posting is asynchronous, so this answers about the state a moment ago. Call it
-    /// after the pointer has had time to settle rather than immediately after a move, or
-    /// it will report a position the system has not caught up to yet.
-    #[must_use]
-    pub fn injection_is_landing(&self) -> bool {
-        let Some(actual) = system_pointer() else {
-            return false;
-        };
-
-        (actual.x - self.position.x).abs() < 2.0 && (actual.y - self.position.y).abs() < 2.0
-    }
-
-    /// Injects one event.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InputError::Inject`] if CoreGraphics will not build the event, which
-    /// happens for a key this build cannot map.
-    pub fn inject(&mut self, event: InputEvent) -> Result<(), InputError> {
-        match event {
-            InputEvent::MouseMove { dx, dy } => self.move_pointer(f64::from(dx), f64::from(dy)),
-            InputEvent::MouseButton { button, pressed } => self.press_button(button, pressed),
-            InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
-            InputEvent::Key { usage, pressed } => self.press_key(usage, pressed),
-        }
     }
 
     /// Moves the pointer by a relative amount and posts the motion.
@@ -271,6 +203,54 @@ unsafe extern "C-unwind" {
 ///
 /// A fresh event with no source carries the current pointer location, which is the
 /// cheapest way to ask.
+impl Injector for MacInjector {
+    fn new() -> Result<Self, InputError> {
+        // SAFETY: the function takes no arguments and only reports the trust state.
+        if !unsafe { AXIsProcessTrusted() } {
+            return Err(InputError::PermissionDenied);
+        }
+
+        let source =
+            CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok_or(InputError::Inject {
+                reason: "could not create an event source",
+            })?;
+
+        let bounds = CGDisplayBounds(CGMainDisplayID());
+
+        // Start from wherever the pointer already is rather than jumping it to the middle
+        // of the screen the moment a session connects.
+        let position = system_pointer().unwrap_or(CGPoint {
+            x: bounds.origin.x + bounds.size.width / 2.0,
+            y: bounds.origin.y + bounds.size.height / 2.0,
+        });
+
+        Ok(Self {
+            source,
+            bounds,
+            position,
+            buttons: [false; 3],
+            flags: CGEventFlags::empty(),
+        })
+    }
+
+    fn inject(&mut self, event: InputEvent) -> Result<(), InputError> {
+        match event {
+            InputEvent::MouseMove { dx, dy } => self.move_pointer(f64::from(dx), f64::from(dy)),
+            InputEvent::MouseButton { button, pressed } => self.press_button(button, pressed),
+            InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
+            InputEvent::Key { usage, pressed } => self.press_key(usage, pressed),
+        }
+    }
+
+    fn injection_is_landing(&self) -> bool {
+        let Some(actual) = system_pointer() else {
+            return false;
+        };
+
+        (actual.x - self.position.x).abs() < 2.0 && (actual.y - self.position.y).abs() < 2.0
+    }
+}
+
 fn system_pointer() -> Option<CGPoint> {
     let event = CGEvent::new(None)?;
     Some(CGEvent::location(Some(&event)))
