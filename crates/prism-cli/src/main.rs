@@ -22,6 +22,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use prism_core::identity;
 use prism_core::net::handshake::Identity;
+use prism_core::net::pairing::Pin;
 
 /// How the client trades latency against even presentation.
 ///
@@ -561,11 +562,11 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     identity: path,
                 } => {
                     let identity = open_identity(path.as_deref())?;
-                    let peer =
-                        prism_core::control::pair::host(bind, &identity, &peers, |pin, at| {
-                            println!("pairing code: {}", pin.to_display());
-                            println!("waiting on {at}");
-                        })?;
+                    let pin = Pin::generate()?;
+                    println!("pairing code: {}", pin.to_display());
+                    println!("waiting on {bind}");
+
+                    let peer = prism_core::control::pair::host(bind, &identity, &peers, pin)?;
                     println!("paired with {}", identity::to_hex(&peer));
                 }
                 PairSide::Client {
