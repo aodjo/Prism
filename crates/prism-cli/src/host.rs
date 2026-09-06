@@ -415,3 +415,314 @@ fn build_slices(frame_bytes: usize, slices: usize) -> Vec<Vec<u8>> {
         })
         .collect()
 }
+
+/// Encodes and sends frames on Windows, capturing the desktop or painting a pattern.
+///
+/// This is the Windows half of the vertical slice: Windows.Graphics.Capture hands over a
+/// Direct3D texture, a shader converts it to NV12 on the GPU, and NVENC encodes it — none
+/// of which ever touches system memory. The synthetic path takes the same route from a
+/// pre-painted texture, so the only difference between them is where the picture came from.
+///
+/// # Errors
+///
+/// Returns an error if Direct3D, the converter, the encoder or capture cannot be created,
+/// or if a frame cannot be encoded or sent.
+#[cfg(target_os = "windows")]
+pub fn run_windows(
+    config: HostConfig,
+    encoder_config: prism_core::encode::EncoderConfig,
+    capture: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use prism_core::encode::nv12::{Bgra2Nv12, Nv12Texture};
+    use prism_core::encode::nvenc::NvencEncoder;
+    use windows::core::Interface;
+
+    let mut source = WindowsSource::new(&encoder_config, capture)?;
+    let (width, height) = source.size();
+
+    // The encoder is created on the device the frames already live on, because a second
+    // device would mean copying every frame between them.
+    let device = source.device();
+    let target = Nv12Texture::new(device, width, height)?;
+    let converter = Bgra2Nv12::new(device)?;
+
+    let encoder_config = prism_core::encode::EncoderConfig {
+        width,
+        height,
+        ..encoder_config
+    };
+
+    // SAFETY: the device and the texture both outlive the encoder, which is dropped at the
+    // end of this function.
+    let mut encoder =
+        unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), encoder_config) }?;
+
+    let mut sender = SliceSender::connect(config.peer)?;
+    if let Some(bitrate) = config.pace_bps {
+        sender.enable_pacing(bitrate, config.adaptive);
+    }
+    sender.serve_return_path(true)?;
+    if let Some(loss) = config.parity_loss {
+        sender.enable_parity(loss);
+    }
+    if config.loss_ppm > 0 {
+        sender.inject_loss(config.loss_ppm, config.loss_seed);
+    }
+
+    println!(
+        "host: {} at {width}x{height}, NVENC at {} kbps, to {}",
+        if capture { "capturing" } else { "painting" },
+        encoder_config.bitrate_bps / 1000,
+        config.peer
+    );
+
+    let start = Instant::now();
+    let interval = frame_interval(config.fps);
+    let mut sent = 0u32;
+    let mut idle = 0u32;
+
+    while sent < config.frames {
+        let Some(bgra) = source.next_frame(interval) else {
+            idle += 1;
+            if idle > 200 {
+                return Err("the source stopped producing frames".into());
+            }
+            continue;
+        };
+        idle = 0;
+
+        if !capture {
+            pace(start, interval, sent);
+        }
+
+        let capture_ts_us = now_us();
+        sender.note_capture(sent, capture_ts_us);
+        sender.send_cursor()?;
+        follow_target_nvenc(&mut encoder, &sender);
+
+        converter.convert(&bgra, &target)?;
+        let frame = encoder.encode(capture_ts_us, sent == 0)?;
+
+        let last = frame.slices.len().saturating_sub(1);
+        for index in 0..frame.slices.len() {
+            let data = frame.slice(index).expect("slice index is in range");
+            sender.send_slice(
+                sent,
+                index as u16,
+                data,
+                capture_ts_us,
+                frame.is_idr,
+                index == last,
+            )?;
+        }
+
+        sent += 1;
+    }
+
+    report(&sender, start.elapsed());
+    sender.report_pacing();
+    if sender.parity_sent() > 0 {
+        println!("parity  : {} shards sent", sender.parity_sent());
+    }
+    sender.report_loss();
+    sender.report_feedback();
+
+    Ok(())
+}
+
+/// Points NVENC at whatever bitrate the congestion controller currently wants.
+#[cfg(target_os = "windows")]
+fn follow_target_nvenc(
+    encoder: &mut prism_core::encode::nvenc::NvencEncoder,
+    sender: &SliceSender,
+) {
+    let _ = (encoder, sender);
+    // NVENC changes rate through nvEncReconfigureEncoder rather than a property set, which
+    // is a separate structure this build does not yet declare. The controller still drives
+    // the pacer; the encoder follows once reconfiguration lands.
+}
+
+/// Where a Windows host's pictures come from.
+///
+/// Capture and the synthetic pattern differ only in this; everything downstream is the same
+/// path, which is what makes a measurement taken with the pattern say something about the
+/// real one.
+#[cfg(target_os = "windows")]
+enum WindowsSource {
+    /// The desktop, through Windows.Graphics.Capture.
+    Desktop(Box<prism_core::capture::wgc::ScreenCapture>),
+    /// A pre-painted cycle of textures, for a run with no desktop to capture.
+    ///
+    /// Painted once at startup rather than per frame. A host loop that allocates and uploads
+    /// a texture every frame would be measuring that upload as much as the encoder.
+    Painted {
+        device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        frames: Vec<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D>,
+        next: usize,
+        width: u32,
+        height: u32,
+    },
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsSource {
+    /// Starts capture, or paints a cycle of frames when capture is not wanted.
+    fn new(
+        config: &prism_core::encode::EncoderConfig,
+        capture: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        use prism_core::capture::CaptureConfig;
+        use prism_core::capture::wgc::ScreenCapture;
+
+        if capture {
+            let capture = ScreenCapture::start(CaptureConfig {
+                fps: config.fps,
+                ..CaptureConfig::default()
+            })?;
+
+            return Ok(Self::Desktop(Box::new(capture)));
+        }
+
+        // Even dimensions, because NV12 subsamples chroma by two.
+        let (width, height) = (config.width & !1, config.height & !1);
+        let device = create_device()?;
+        let frames = (0..PAINTED_FRAMES)
+            .map(|step| paint_bgra(&device, width, height, step))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self::Painted {
+            device,
+            frames,
+            next: 0,
+            width,
+            height,
+        })
+    }
+
+    /// Returns the size of the pictures this source produces.
+    fn size(&self) -> (u32, u32) {
+        match self {
+            // Even, for the same reason as above.
+            Self::Desktop(capture) => (capture.width() & !1, capture.height() & !1),
+            Self::Painted { width, height, .. } => (*width, *height),
+        }
+    }
+
+    /// Returns the Direct3D device the pictures live on.
+    fn device(&self) -> &windows::Win32::Graphics::Direct3D11::ID3D11Device {
+        match self {
+            Self::Desktop(capture) => capture.device(),
+            Self::Painted { device, .. } => device,
+        }
+    }
+
+    /// Returns the next picture, waiting up to `timeout` for the compositor.
+    fn next_frame(
+        &mut self,
+        timeout: Duration,
+    ) -> Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D> {
+        match self {
+            Self::Desktop(capture) => capture.poll(timeout)?.texture().ok(),
+            Self::Painted { frames, next, .. } => {
+                let texture = frames.get(*next % frames.len())?.clone();
+                *next = next.wrapping_add(1);
+                Some(texture)
+            }
+        }
+    }
+}
+
+/// How many distinct pictures the painted source cycles through.
+///
+/// Enough that consecutive frames differ, so the encoder has real work to do, and few enough
+/// that they are all painted before the run starts.
+#[cfg(target_os = "windows")]
+const PAINTED_FRAMES: u32 = 16;
+
+/// Creates a Direct3D device for the painted source.
+#[cfg(target_os = "windows")]
+fn create_device()
+-> Result<windows::Win32::Graphics::Direct3D11::ID3D11Device, Box<dyn std::error::Error>> {
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+    };
+
+    let mut device: Option<ID3D11Device> = None;
+
+    // SAFETY: every pointer argument is null or a live local, and the output is read only
+    // when the call reports success.
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            Default::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+    }?;
+
+    device.ok_or_else(|| "Direct3D reported success but produced no device".into())
+}
+
+/// Paints one BGRA texture with a pattern that differs per step.
+#[cfg(target_os = "windows")]
+fn paint_bgra(
+    device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    width: u32,
+    height: u32,
+    step: u32,
+) -> Result<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D, Box<dyn std::error::Error>> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_DEFAULT,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    let pixels: Vec<u8> = (0..width * height)
+        .flat_map(|index| {
+            let x = (index % width) as u8;
+            let y = (index / width) as u8;
+            [
+                x.wrapping_add((step as u8).wrapping_mul(3)),
+                y,
+                (step as u8).wrapping_mul(7),
+                255,
+            ]
+        })
+        .collect();
+
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+
+    let data = D3D11_SUBRESOURCE_DATA {
+        pSysMem: pixels.as_ptr().cast(),
+        SysMemPitch: width * 4,
+        SysMemSlicePitch: 0,
+    };
+
+    let mut texture = None;
+
+    // SAFETY: the description and the pixel buffer agree on the size, the buffer outlives
+    // the call, and the output is a live local.
+    unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut texture)) }?;
+
+    texture.ok_or_else(|| "Direct3D reported success but produced no texture".into())
+}

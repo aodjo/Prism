@@ -736,6 +736,10 @@ impl NvencEncoder {
             "fetch the low latency preset",
         )?;
 
+        // SAFETY: the offsets come from the header as the compiler reports them, and they
+        // are all inside the configuration the driver just filled.
+        unsafe { self.apply_rate_control(config_ptr) };
+
         let mut params = InitializeParams {
             version: struct_version_high(api, 7),
             encode_guid: H264,
@@ -763,6 +767,62 @@ impl NvencEncoder {
             initialize(self.session, &mut params),
             "initialize the encoder",
         )
+    }
+
+    /// Overwrites the preset's rate control with what this session was asked for.
+    ///
+    /// The preset alone does not honour a bitrate. Passing it through unchanged produced
+    /// forty megabits against a twenty megabit request, and frames four times the size the
+    /// budget allows — which the client could not keep up with, so it dropped frames, and a
+    /// stream with a single keyframe never recovers from a dropped reference.
+    ///
+    /// Constant bitrate with a one-frame VBV window, which is the plan's first and most
+    /// important latency decision: a larger window lets the encoder emit a frame that takes
+    /// several frame times to transmit, and that is the single biggest source of latency
+    /// spikes.
+    ///
+    /// # Safety
+    ///
+    /// `config` must point at a configuration structure the driver has filled.
+    unsafe fn apply_rate_control(&self, config: *mut u8) {
+        // Offsets within NV_ENC_CONFIG, read from the header by a compiler rather than
+        // counted by hand.
+        const GOP_LENGTH: usize = 20;
+        const FRAME_INTERVAL_P: usize = 24;
+        const RC_MODE: usize = 44;
+        const AVERAGE_BITRATE: usize = 60;
+        const MAX_BITRATE: usize = 64;
+        const VBV_BUFFER_SIZE: usize = 68;
+        const VBV_INITIAL_DELAY: usize = 72;
+
+        /// `NV_ENC_PARAMS_RC_CBR`.
+        const RC_CBR: u32 = 2;
+
+        /// An infinite group of pictures: one keyframe at the start and nothing but P
+        /// frames after it. Recovery is the transport's job through parity, not a periodic
+        /// keyframe the whole stream pays for.
+        const GOP_INFINITE: u32 = u32::MAX;
+
+        let bitrate = self.config.bitrate_bps;
+        // Exactly one frame of budget. This is the vbvBufferSize the plan calls the largest
+        // single cause of latency spikes when it is set larger.
+        let frame_budget = bitrate / self.config.fps.max(1);
+
+        // SAFETY: every offset is inside the structure, and each write is a `u32` at a
+        // four-byte aligned offset.
+        unsafe {
+            let put =
+                |offset: usize, value: u32| config.add(offset).cast::<u32>().write_unaligned(value);
+
+            put(GOP_LENGTH, GOP_INFINITE);
+            // Every frame is a P frame; no B frames, which reorder output and cost a frame.
+            put(FRAME_INTERVAL_P, 1);
+            put(RC_MODE, RC_CBR);
+            put(AVERAGE_BITRATE, bitrate);
+            put(MAX_BITRATE, bitrate);
+            put(VBV_BUFFER_SIZE, frame_budget);
+            put(VBV_INITIAL_DELAY, frame_budget);
+        }
     }
 
     /// Registers the NV12 texture so frames can be mapped rather than copied.
