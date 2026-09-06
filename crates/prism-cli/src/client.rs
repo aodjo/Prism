@@ -151,8 +151,12 @@ pub struct ClientHooks {
 /// How the receiving client should behave.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Address of the host to connect to.
-    pub host: SocketAddr,
+    /// Address of the host, when it is directly reachable.
+    ///
+    /// `None` means ask the rendezvous server, which is what a host behind NAT requires.
+    pub host: Option<SocketAddr>,
+    /// Rendezvous server to find the host through.
+    pub rendezvous: Option<SocketAddr>,
     /// Stop after this many frames, or run until idle if `None`.
     pub frames: Option<u32>,
     /// Give up after this long with no packets.
@@ -198,6 +202,44 @@ struct DecodeReport {
     errors: Vec<i32>,
 }
 
+/// Works out where the host is: the address given, or the one the rendezvous server reports.
+///
+/// The lookup happens on the session socket, because the address the server observes is only
+/// reachable at the port that created it.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] if neither an address nor a server was given,
+/// [`io::ErrorKind::NotFound`] if the server knows no such host, and the underlying
+/// [`io::Error`] for a socket failure.
+fn locate(transport: &UdpTransport, config: &ClientConfig) -> io::Result<SocketAddr> {
+    if let Some(host) = config.host {
+        return Ok(host);
+    }
+
+    let Some(server) = config.rendezvous else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "give either --host or --rendezvous so the host can be found",
+        ));
+    };
+
+    let address = crate::rendezvous::lookup(
+        transport,
+        server,
+        config.peer_key,
+        *config.identity.public(),
+    )?;
+    println!("client: the host is at {address}");
+
+    // Both sides punch. The handshake message this side is about to send repeatedly is its
+    // own punch, but the host's router will only pass it once the host has sent outward here
+    // — which the server has just told it to do.
+    crate::rendezvous::punch(transport, address)?;
+
+    Ok(address)
+}
+
 /// Receives packets until the frame budget or the idle timeout is reached.
 ///
 /// # Errors
@@ -213,11 +255,11 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     } = hooks;
     let offset = offset.unwrap_or_else(|| Arc::new(AtomicI64::new(OFFSET_UNKNOWN)));
     let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
-    transport.connect(config.host)?;
+    let host = locate(&transport, &config)?;
+    transport.connect(host)?;
 
     println!(
-        "client: connecting to {} ({} frames in flight, decode {})",
-        config.host,
+        "client: connecting to {host} ({} frames in flight, decode {})",
         config.in_flight,
         if config.decode { "on" } else { "off" }
     );
@@ -227,7 +269,6 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let established = crate::session::dial(&transport, &config.identity, &config.peer_key)?;
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
-    let host = config.host;
     println!(
         "client: session established with {host} ({})",
         crate::identity::to_hex(&established.session.peer_static)

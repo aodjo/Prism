@@ -11,6 +11,7 @@ pub mod packet;
 pub mod packetize;
 pub mod pairing;
 pub mod reassemble;
+pub mod rendezvous;
 pub mod seal;
 pub mod secure;
 pub mod sendpace;

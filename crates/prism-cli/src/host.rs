@@ -11,8 +11,50 @@ use std::time::{Duration, Instant};
 
 use prism_core::clock::now_us;
 use prism_core::net::handshake::{Identity, KEY_LEN};
+use prism_core::net::transport::UdpTransport;
 
 use crate::wire::SliceSender;
+
+/// Binds the session socket and, if a rendezvous server was named, becomes reachable through
+/// it before waiting for a client.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::TimedOut`] if no client arrives within the configured patience,
+/// and the underlying [`io::Error`] for a socket or server failure.
+fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
+    let transport = UdpTransport::bind(config.bind)?;
+
+    if let Some(server) = config.rendezvous {
+        let observed = crate::rendezvous::register(&transport, server, &keys.identity)?;
+        println!("host: registered with {server}, reachable at {observed}");
+
+        // Held for the life of the process. The registration and the router mapping both
+        // lapse in well under a minute of silence, so this keeps running even during a
+        // session — a host that went quiet on the server would be unreachable for the next
+        // client without anything appearing to have failed.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::rendezvous::spawn_keepalive(
+            &transport,
+            server,
+            *keys.identity.public(),
+            std::sync::Arc::clone(&stop),
+        )?;
+        std::mem::forget(stop);
+
+        let (caller, address) =
+            crate::rendezvous::await_caller(&transport, server, config.patience)?;
+        println!("host: a client is calling from {address}");
+        let _ = caller;
+    }
+
+    SliceSender::serve_on(
+        transport,
+        &keys.identity,
+        keys.allowed.clone(),
+        config.patience,
+    )
+}
 
 /// The keys one host session runs under.
 ///
@@ -36,6 +78,12 @@ pub struct HostKeys {
 pub struct HostConfig {
     /// Address to listen on.
     pub bind: SocketAddr,
+    /// Rendezvous server to register with, or `None` to be reachable only directly.
+    ///
+    /// Without one a host is reachable only from a network the client can already address —
+    /// the same LAN, a VPN, or a forwarded port. With one it is reachable from anywhere the
+    /// server is, which is what a home connection behind NAT needs.
+    pub rendezvous: Option<SocketAddr>,
     /// How long to wait for a paired client before giving up.
     pub patience: Duration,
     /// Frames to send per second.
@@ -82,12 +130,7 @@ pub fn run(config: HostConfig, keys: &HostKeys) -> io::Result<()> {
         "every slice needs at least one byte"
     );
 
-    let mut sender = SliceSender::serve(
-        config.bind,
-        &keys.identity,
-        keys.allowed.clone(),
-        config.patience,
-    )?;
+    let mut sender = open(config, keys)?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -155,12 +198,7 @@ pub fn run_encoded(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
 
-    let mut sender = SliceSender::serve(
-        config.bind,
-        &keys.identity,
-        keys.allowed.clone(),
-        config.patience,
-    )?;
+    let mut sender = open(config, keys)?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -271,12 +309,7 @@ pub fn run_captured(
     };
 
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
-    let mut sender = SliceSender::serve(
-        config.bind,
-        &keys.identity,
-        keys.allowed.clone(),
-        config.patience,
-    )?;
+    let mut sender = open(config, keys)?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
@@ -493,12 +526,7 @@ pub fn run_windows(
     let mut encoder =
         unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), encoder_config) }?;
 
-    let mut sender = SliceSender::serve(
-        config.bind,
-        &keys.identity,
-        keys.allowed.clone(),
-        config.patience,
-    )?;
+    let mut sender = open(config, keys)?;
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }

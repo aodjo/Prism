@@ -13,6 +13,7 @@ mod host;
 mod identity;
 mod pair;
 mod pattern;
+mod rendezvous;
 mod session;
 mod wire;
 
@@ -77,6 +78,13 @@ enum Command {
         /// Give up after this long with no client, in seconds.
         #[arg(long, default_value_t = 300)]
         wait_secs: u64,
+
+        /// Rendezvous server to register with, so clients can find this machine behind NAT.
+        ///
+        /// Without one the host is reachable only from a network the client can already
+        /// address: the same LAN, a VPN, or a forwarded port.
+        #[arg(long)]
+        rendezvous: Option<SocketAddr>,
 
         /// Frames per second.
         #[arg(long, default_value_t = 60)]
@@ -161,9 +169,13 @@ enum Command {
 
     /// Connect to a paired host, receive frames, and report latency.
     Client {
-        /// Address the host is listening on.
+        /// Address the host is listening on, when it is directly reachable.
         #[arg(long)]
-        host: SocketAddr,
+        host: Option<SocketAddr>,
+
+        /// Rendezvous server to find the host through, when it is not.
+        #[arg(long)]
+        rendezvous: Option<SocketAddr>,
 
         /// Stop after this many frames; runs until idle when omitted.
         #[arg(long)]
@@ -381,6 +393,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
         Command::Host {
             bind,
             wait_secs,
+            rendezvous,
             fps,
             frame_bytes,
             slices,
@@ -404,6 +417,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             };
             let config = host::HostConfig {
                 bind,
+                rendezvous,
                 patience: Duration::from_secs(wait_secs),
                 fps,
                 frame_bytes,
@@ -466,6 +480,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
 
         Command::Client {
             host,
+            rendezvous,
             frames,
             idle_timeout_ms,
             report_every,
@@ -484,6 +499,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             let pacing_us = pacing_ms.map_or_else(|| mode.ceiling_us(), |ms| ms * 1_000);
             let config = client::ClientConfig {
                 host,
+                rendezvous,
                 frames,
                 idle_timeout: Duration::from_millis(idle_timeout_ms),
                 report_every,

@@ -1,0 +1,22 @@
+[package]
+name = "prism-rendezvous"
+description = "Prism rendezvous server: registration, introduction, and address observation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No async runtime. The whole server is one socket and two maps, and a blocking receive loop
+# handles far more traffic than a registration every few minutes and a keepalive every fifteen
+# seconds will ever produce. Reaching for tokio here would add a dependency and a scheduler to
+# something that has neither concurrency nor blocking work to hide.
+[dependencies]
+prism-core.workspace = true
+clap = { version = "4", features = ["derive"] }
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

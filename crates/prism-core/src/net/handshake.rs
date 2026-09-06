@@ -157,7 +157,7 @@ impl Identity {
     pub fn from_private(private: &[u8; KEY_LEN]) -> Result<Self, HandshakeError> {
         // Deriving the public half rather than storing it means a truncated or edited key
         // file fails the handshake instead of half working.
-        let public = public_from_private(private)?;
+        let public = public_key(private)?;
 
         Ok(Self {
             private: *private,
@@ -422,7 +422,38 @@ fn to_key(bytes: &[u8]) -> Result<[u8; KEY_LEN], HandshakeError> {
 /// The public half is derived rather than stored alongside the private one so that a key file
 /// which was truncated or edited fails immediately instead of producing a handshake that
 /// half works.
-fn public_from_private(private: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], HandshakeError> {
+///
+/// # Errors
+///
+/// Returns [`HandshakeError::Misconfigured`] if the Curve25519 backend is unavailable.
+pub fn public_key(private: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], HandshakeError> {
+    to_key(curve25519(private)?.pubkey())
+}
+
+/// Computes the Diffie-Hellman shared secret between a private key and a peer's public one.
+///
+/// Exposed because the rendezvous server uses it to make a host prove it holds the key it
+/// claims, which needs a Diffie-Hellman and nothing else from Noise.
+///
+/// # Errors
+///
+/// Returns [`HandshakeError::Misconfigured`] if the exchange fails, which for Curve25519
+/// means the peer's key was a degenerate point.
+pub fn agree(
+    private: &[u8; KEY_LEN],
+    public: &[u8; KEY_LEN],
+) -> Result<[u8; KEY_LEN], HandshakeError> {
+    let mut shared = [0u8; KEY_LEN];
+
+    curve25519(private)?
+        .dh(public, &mut shared)
+        .map_err(|_| HandshakeError::Misconfigured)?;
+
+    Ok(shared)
+}
+
+/// Builds a Curve25519 context holding `private`.
+fn curve25519(private: &[u8; KEY_LEN]) -> Result<Box<dyn snow::types::Dh>, HandshakeError> {
     use snow::params::DHChoice;
     use snow::resolvers::{CryptoResolver, DefaultResolver};
 
@@ -432,7 +463,7 @@ fn public_from_private(private: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], Handsha
 
     dh.set(private);
 
-    to_key(dh.pubkey())
+    Ok(dh)
 }
 
 /// Renders bytes as hex, for `Debug` output that names a key without revealing a secret one.
