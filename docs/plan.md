@@ -135,6 +135,12 @@ Electron은 **UI 셸(설정·페어링·호스트 목록)만** 담당한다. 스
 
 2. **슬라이스 단위 스트리밍.** `sliceMode=3, sliceModeData=4`(프레임당 4슬라이스). `NV_ENC_LOCK_BITSTREAM`의 슬라이스 오프셋을 읽어 완성되는 즉시 송신. 프레임 시간의 절반가량을 절약한다.
 
+   > **측정 결과 제약:** Apple Silicon 하드웨어 H.264 인코더는 `kVTCompressionPropertyKey_MaxH264SliceBytes`를
+   > 지원하지 않는다 (`kVTPropertyNotSupportedErr`, -12900). 따라서 **macOS 호스트에서는 이 항목을 적용할 수 없고**,
+   > 프레임이 통째로 인코딩될 때까지 전송을 시작하지 못해 약 반 프레임(1440p120 기준 ~4ms)을 손해본다.
+   > 주 목표 경로인 Windows/NVENC 호스트는 슬라이싱을 지원하므로 영향이 없다.
+   > 코드에서는 세션을 실패시키지 않고 `VideoToolboxEncoder::slicing_supported()`로 능력을 노출한다.
+
 3. **Async 인코드 + 이벤트 핸들.** `enableEncodeAsync=1` + 완료 이벤트 대기. 폴링 금지.
 
 4. **IDR 대신 intra-refresh.** `enableIntraRefresh=1`, `intraRefreshPeriod=framerate`, `intraRefreshCnt=framerate/4`. 키프레임 비트레이트 스파이크를 없앤다.
@@ -200,6 +206,23 @@ flags u8 (idr / last-of-frame / ltr) | capture_ts_us u64 | payload
 
 인터넷은 여기에 RTT가 더해진다. 참고로 클릭→광자 전체(게임 렌더 + 모니터 포함)는 45–70ms대가 되며, 로컬 네이티브가 25–40ms다.
 
+macOS 호스트(M9)는 슬라이싱 불가로 인코드 항목이 "첫 슬라이스 ~1ms"가 아니라 "프레임 완료 2–4ms"가 되어
+합계가 그만큼 늘어난다.
+
+## 실측 기록
+
+M1 진행 중 이 Mac(M시리즈, macOS 26.6)에서 측정한 값. 마일스톤 통과 판정의 근거가 되므로 갱신하며 유지한다.
+
+| 항목 | 조건 | p50 | p99 | max | 비고 |
+|---|---|---|---|---|---|
+| 전송 + 재조립 | 루프백, 60fps, 40KB/frame, 19.6 Mbps | 0.20 ms | 0.34 ms | 1.36 ms | 300/300 프레임, 손실 0 |
+| 전송 + 재조립 | 루프백, 120fps, 42KB/frame, 41.1 Mbps | 0.20 ms | 0.49 ms | 8.17 ms | 600/600 프레임, 손실 0 |
+| VideoToolbox 인코드 | 1080p60, 24 Mbps 목표 | 4.72 ms | 7.76 ms | 52.55 ms | 실측 21.3 Mbps, max는 세션 워밍업 |
+
+- 전송 계층은 1440p120 목표 레이트에서도 예산의 1% 미만을 쓴다. 최적화 우선순위가 아니다.
+- 120fps에서 max 8.17ms는 정확히 한 프레임 주기라 프로세스 스케줄링 지연으로 읽힌다. M2 표시 페이싱에서 다룬다.
+- 인코더 출력은 ffmpeg으로 교차 검증했다: High profile 1080p, 120프레임 전량 디코드, I 1개 + P 119개(B-프레임 0).
+
 ---
 
 ## 계측 (M1부터 필수, 나중에 붙이면 늦다)
@@ -243,6 +266,7 @@ M1~M4는 `prism-cli`(헤드리스)로 진행한다. Electron은 M5부터 붙인�
 - **게임패드 주입은 v1에서 Windows(ViGEmBus, 드라이버 설치 필요)와 Linux(uinput)만.** macOS는 가상 게임패드 API가 없어 DriverKit 드라이버를 직접 써야 하므로 범위 밖.
 - **AV1 인코딩은 하드웨어 게이트**(NVIDIA Ada+ / AMD RDNA3+ / Intel Arc+). 반드시 협상하고 H.264로 폴백.
 - **HEVC는 상용 배포 시 라이선스 이슈**가 있다. 개인/오픈소스면 무관하나 상용화 계획이 있으면 확인 필요.
+- **Apple Silicon 인코더는 슬라이스 크기 제한을 지원하지 않는다.** 위 지연 항목 2 참조. macOS 호스트 한정 제약이며 Windows/NVENC에는 영향이 없다.
 - **네이티브 SDK 직접**을 택했으므로 인코더 5종 × 디코더 4종을 각각 구현해야 한다. M8이 가장 무거운 단계이며, 여기서 일정이 밀릴 가능성이 가장 크다. 리스크가 크면 M8을 "NVENC + VideoToolbox만"으로 잠시 좁히고 나머지를 M10 이후로 미루는 것이 가장 안전한 조정 지점이다.
 - **GPU 핸들·SDK 호출은 전부 `unsafe`.** Rust의 소유권이 FFI 너머까지 보호해주지는 않는다. 각 SDK 래퍼를 안전한 타입으로 감싸는 얇은 계층(`encode/nvenc.rs` 안에서만 `unsafe`)을 두고 나머지 코드는 safe로 유지한다.
 
