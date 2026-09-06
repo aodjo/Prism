@@ -24,5 +24,7 @@ undocumented_unsafe_blocks = "warn"
 objc2 = "0.6"
 objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFDictionary", "CFString", "CFNumber", "CFArray"] }
 objc2-core-media = { version = "0.3", features = ["CMBase", "CMTime", "CMSampleBuffer", "CMFormatDescription", "CMBlockBuffer", "CMAttachment"] }
-objc2-core-video = { version = "0.3", features = ["CVBase", "CVReturn", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool"] }
+objc2-core-video = { version = "0.3", features = ["CVBase", "CVReturn", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVMetalTexture", "CVMetalTextureCache", "objc2-metal"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
+objc2-metal = { version = "0.3", features = ["MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLResource", "MTLRenderPass", "MTLRenderCommandEncoder", "MTLPixelFormat", "MTLTypes", "MTLDrawable", "MTLBlitCommandEncoder"] }
 objc2-video-toolbox = { version = "0.3", features = ["VTBase", "VTErrors", "VTSession", "VTCompressionSession", "VTCompressionProperties", "VTDecompressionSession", "VTDecompressionProperties", "objc2-core-media", "objc2-core-video", "objc2"] }

@@ -12,4 +12,5 @@ pub mod clock;
 pub mod decode;
 pub mod encode;
 pub mod net;
+pub mod render;
 pub mod stats;
