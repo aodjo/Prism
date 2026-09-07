@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use prism_core::net::handshake::KEY_LEN;
 use prism_core::net::rendezvous::RELAY_TOKEN_LEN;
 
 /// How long a relay session survives with nothing flowing.
@@ -94,6 +95,13 @@ pub struct Relays {
     /// relayed session, tens of thousands a second, and a linear search over sessions would
     /// make the server's cost quadratic in how many it is carrying.
     routes: HashMap<SocketAddr, [u8; RELAY_TOKEN_LEN]>,
+    /// The token a pair of peers has already been given.
+    ///
+    /// Both peers ask for a relay — each discovers on its own that punching failed — and both
+    /// asks are about the same relay. Without this each would be handed a different token and
+    /// the two would wait at the relay for a partner that was never coming, which is precisely
+    /// what the first end to end run did.
+    pairs: HashMap<([u8; KEY_LEN], [u8; KEY_LEN]), [u8; RELAY_TOKEN_LEN]>,
 }
 
 impl Relays {
@@ -101,6 +109,32 @@ impl Relays {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns the token for a pair of peers, allocating one the first time.
+    ///
+    /// Both peers ask, and both asks are about the same relay. `fresh` is used only when there
+    /// is nothing allocated yet, so a second ask returns what the first was given.
+    ///
+    /// `None` means the server is full.
+    pub fn token_for(
+        &mut self,
+        host: [u8; KEY_LEN],
+        client: [u8; KEY_LEN],
+        fresh: [u8; RELAY_TOKEN_LEN],
+        now: Instant,
+    ) -> Option<[u8; RELAY_TOKEN_LEN]> {
+        if let Some(token) = self.pairs.get(&(host, client)) {
+            return Some(*token);
+        }
+
+        if !self.allocate(fresh, now) {
+            return None;
+        }
+
+        self.pairs.insert((host, client), fresh);
+
+        Some(fresh)
     }
 
     /// Allocates a session for a token, ready for both sides to present it.
@@ -253,6 +287,8 @@ impl Relays {
         // an address left behind here would silently forward a later session's packets to a
         // peer that is gone.
         self.routes
+            .retain(|_, token| self.sessions.contains_key(token));
+        self.pairs
             .retain(|_, token| self.sessions.contains_key(token));
     }
 

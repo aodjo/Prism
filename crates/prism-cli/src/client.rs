@@ -179,6 +179,12 @@ pub struct ClientConfig {
     pub host: Option<SocketAddr>,
     /// Rendezvous server to find the host through.
     pub rendezvous: Option<SocketAddr>,
+    /// Go through the relay without trying a direct path first.
+    ///
+    /// For measuring what relaying costs, and for a person on a path where punching succeeds
+    /// and then stops working — which looks like a session that opens and dies rather than one
+    /// that never opens.
+    pub force_relay: bool,
     /// Stop after this many frames, or run until idle if `None`.
     pub frames: Option<u32>,
     /// Give up after this long with no packets.
@@ -272,22 +278,28 @@ fn open(
     // Both sides punch. The handshake message about to be sent repeatedly is this side's own
     // punch, but the host's router will only pass it once the host has sent outward here —
     // which the server has just told it to do.
-    rendezvous::punch(transport, found.address)?;
+    // Skipping the punch as well as the dial: a punch is only useful to a path that is about
+    // to be tried.
+    if config.force_relay {
+        println!("client: skipping the direct path because it was asked to");
+    } else {
+        rendezvous::punch(transport, found.address)?;
 
-    match dial(
-        transport,
-        found.address,
-        &config.identity,
-        &config.peer_key,
-        DIRECT_PATIENCE,
-    ) {
-        Ok(established) => {
-            println!("client: connected directly to {}", found.address);
+        match dial(
+            transport,
+            found.address,
+            &config.identity,
+            &config.peer_key,
+            DIRECT_PATIENCE,
+        ) {
+            Ok(established) => {
+                println!("client: connected directly to {}", found.address);
 
-            return Ok((established, found.address));
+                return Ok((established, found.address));
+            }
+            Err(err) if err.kind() != io::ErrorKind::TimedOut => return Err(err),
+            Err(_) => {}
         }
-        Err(err) if err.kind() != io::ErrorKind::TimedOut => return Err(err),
-        Err(_) => {}
     }
 
     // Punching failed, which means both routers hand out a different mapping for every

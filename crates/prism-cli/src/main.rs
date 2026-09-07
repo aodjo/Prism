@@ -176,6 +176,12 @@ enum Command {
         #[arg(long)]
         rendezvous: Option<SocketAddr>,
 
+        /// Go through the relay without trying a direct path first.
+        ///
+        /// For measuring what relaying costs against the same session run directly.
+        #[arg(long)]
+        force_relay: bool,
+
         /// Stop after this many frames; runs until idle when omitted.
         #[arg(long)]
         frames: Option<u32>,
@@ -414,34 +420,41 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 identity: open_identity(identity.as_deref())?,
                 allowed: admitted_clients(peer_key.as_deref())?,
             };
-            let config = host::HostConfig {
-                bind,
-                rendezvous,
-                patience: Duration::from_secs(wait_secs),
-                fps,
+            let run = host::HostRun {
+                session: host::HostConfig {
+                    bind,
+                    rendezvous,
+                    patience: Duration::from_secs(wait_secs),
+                    fps,
+                    bitrate_bps: bitrate,
+                    frames: Some(frames),
+                    parity_loss: parity.map(|percent| (percent.clamp(0.0, 100.0) / 100.0) as f32),
+                    pace_bps: pace.map(|mbps| (mbps.clamp(0.0, 10_000.0) * 1e6) as u32),
+                    adaptive,
+                    inject_input: true,
+                    // The command line measures the video path. Audio would add a second
+                    // stream to every number without being what any of them are about.
+                    audio_bitrate_bps: None,
+                },
                 frame_bytes,
                 slices,
-                frames,
                 loss_ppm: percent_to_ppm(loss),
                 loss_seed,
-                parity_loss: parity.map(|percent| (percent.clamp(0.0, 100.0) / 100.0) as f32),
-                pace_bps: pace.map(|mbps| (mbps.clamp(0.0, 10_000.0) * 1e6) as u32),
-                adaptive,
             };
 
             if !encode && !capture {
-                return Ok(host::run(config, &keys)?);
+                return Ok(host::run(run, &keys)?);
             }
 
             #[cfg(target_os = "macos")]
             if capture {
-                return host::run_captured(config, &keys, bitrate, width, height);
+                return host::run_captured(run, &keys, bitrate, width, height);
             }
 
             #[cfg(target_os = "macos")]
             {
                 host::run_encoded(
-                    config,
+                    run,
                     &keys,
                     prism_core::encode::EncoderConfig {
                         width,
@@ -469,7 +482,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         // differently.
                         max_slice_bytes: slices as u32,
                     };
-                    host::run_windows(config, &keys, encoder_config, capture)
+                    host::run_windows(run, &keys, encoder_config, capture)
                 }
 
                 #[cfg(not(target_os = "windows"))]
@@ -480,6 +493,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
         Command::Client {
             host,
             rendezvous,
+            force_relay,
             frames,
             idle_timeout_ms,
             report_every,
@@ -499,6 +513,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             let config = client::ClientConfig {
                 host,
                 rendezvous,
+                force_relay,
                 frames,
                 idle_timeout: Duration::from_millis(idle_timeout_ms),
                 report_every,

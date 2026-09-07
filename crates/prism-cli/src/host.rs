@@ -10,104 +10,77 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use prism_core::clock::now_us;
-use prism_core::net::handshake::{Identity, KEY_LEN};
-use prism_core::net::transport::UdpTransport;
-
+use prism_core::net::handshake::KEY_LEN;
 use prism_core::net::sender::SliceSender;
 
-/// Binds the session socket and, if a rendezvous server was named, becomes reachable through
-/// it before waiting for a client.
+// The core owns what a host session is. The command line and the tray application configure
+// the same thing and open it the same way; two descriptions of it would drift, which is how
+// this file's own copy came to have no relay fallback until a test caught it.
+pub use prism_core::control::host::{HostConfig, HostKeys};
+
+/// What the command line adds to a session, on top of what a session is.
 ///
-/// # Errors
-///
-/// Returns [`io::ErrorKind::TimedOut`] if no client arrives within the configured patience,
-/// and the underlying [`io::Error`] for a socket or server failure.
-fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
-    let transport = UdpTransport::bind(config.bind)?;
-
-    if let Some(server) = config.rendezvous {
-        let observed =
-            prism_core::control::rendezvous::register(&transport, server, &keys.identity)?;
-        println!("host: registered with {server}, reachable at {observed}");
-
-        // Held for the life of the process. The registration and the router mapping both
-        // lapse in well under a minute of silence, so this keeps running even during a
-        // session — a host that went quiet on the server would be unreachable for the next
-        // client without anything appearing to have failed.
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        prism_core::control::rendezvous::spawn_keepalive(
-            &transport,
-            server,
-            *keys.identity.public(),
-            std::sync::Arc::clone(&stop),
-        )?;
-        std::mem::forget(stop);
-
-        let (caller, address) =
-            prism_core::control::rendezvous::await_caller(&transport, server, config.patience)?;
-        println!("host: a client is calling from {address}");
-        let _ = caller;
-    }
-
-    SliceSender::serve_on(
-        transport,
-        &keys.identity,
-        keys.allowed.clone(),
-        config.patience,
-    )
-}
-
-/// The keys one host session runs under.
-///
-/// Separate from [`HostConfig`] because a key is not a tuning parameter: the config is
-/// copied around freely and describes how the stream should look, while these decide who is
-/// allowed to see it.
+/// Every field here exists to measure something rather than to stream anything: a synthetic
+/// source that produces bytes shaped like video without an encoder, and a seeded loss injector
+/// so a recovery run reproduces exactly. None of it belongs in the core's idea of a session,
+/// because none of it is something a person would ever ask for.
 #[derive(Debug, Clone)]
-pub struct HostKeys {
-    /// This machine's long-term key.
-    pub identity: Identity,
-    /// Every client key pairing has recorded.
-    ///
-    /// A list rather than one key because a host serves whichever of its paired machines
-    /// connects. It cannot pick in advance: over the internet it does not learn who is
-    /// calling until they call.
-    pub allowed: Vec<[u8; KEY_LEN]>,
-}
-
-/// How the host should shape its traffic.
-#[derive(Debug, Clone, Copy)]
-pub struct HostConfig {
-    /// Address to listen on.
-    pub bind: SocketAddr,
-    /// Rendezvous server to register with, or `None` to be reachable only directly.
-    ///
-    /// Without one a host is reachable only from a network the client can already address —
-    /// the same LAN, a VPN, or a forwarded port. With one it is reachable from anywhere the
-    /// server is, which is what a home connection behind NAT needs.
-    pub rendezvous: Option<SocketAddr>,
-    /// How long to wait for a paired client before giving up.
-    pub patience: Duration,
-    /// Frames to send per second.
-    pub fps: u32,
-    /// Encoded bytes per frame, for the synthetic source only.
+pub struct HostRun {
+    /// The session itself.
+    pub session: HostConfig,
+    /// Encoded bytes per frame, for the synthetic source.
     pub frame_bytes: usize,
-    /// Slices per frame, for the synthetic source only.
+    /// Slices per frame, for the synthetic source.
     pub slices: usize,
-    /// Frames to send before stopping.
-    pub frames: u32,
     /// Video packets to drop on the way out, in parts per million.
     ///
-    /// Zero sends everything. This is how a run is made lossy without an operating system
-    /// traffic shaper, so the recovery machinery can be judged reproducibly and in CI.
+    /// How a run is made lossy without an operating system traffic shaper, so the recovery
+    /// machinery can be judged reproducibly and in a test.
     pub loss_ppm: u32,
     /// Seed for the loss injector, so a failing run repeats exactly.
     pub loss_seed: u64,
-    /// Loss estimate to size Reed-Solomon parity against, or `None` to send none.
-    pub parity_loss: Option<f32>,
-    /// Bitrate to pace outgoing packets at, or `None` to send them at line rate.
-    pub pace_bps: Option<u32>,
-    /// Whether the congestion controller may drive the pacing rate from feedback.
-    pub adaptive: bool,
+}
+
+/// Opens a session, printing what the core learned along the way.
+///
+/// The connecting itself lives in the core, because the tray application does exactly the same
+/// thing and two copies of "find a peer, punch, fall back to the relay" would drift apart —
+/// which is how this one came to have no relay fallback at all until a test caught it.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::TimedOut`] if no paired client connects, and the underlying
+/// [`io::Error`] for a socket or server failure.
+fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
+    // Never set. The command line runs one session and exits, so there is nothing to cancel;
+    // the flag exists for the application, which has a person who can click stop.
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+
+    let mut waiting = |observed: Option<SocketAddr>| {
+        if let Some(observed) = observed {
+            println!("host: registered, reachable at {observed}");
+        }
+        println!("host: waiting for a paired client");
+    };
+
+    let opened = prism_core::control::host::connect(&config, keys, &cancelled, &mut waiting)?;
+
+    println!(
+        "host: session opened by {} {}",
+        hex(&opened.sender.peer()),
+        if opened.relayed {
+            "through the rendezvous relay"
+        } else {
+            "directly"
+        }
+    );
+
+    Ok(opened.sender)
+}
+
+/// Renders a key as hex, for the line that names who connected.
+fn hex(key: &[u8; KEY_LEN]) -> String {
+    key.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Sends `config.frames` synthetic frames and reports what was transmitted.
@@ -122,37 +95,37 @@ pub struct HostConfig {
 ///
 /// # Panics
 ///
-/// Panics if `config.slices` is zero or `config.frame_bytes` is smaller than
-/// `config.slices`, since neither describes a frame an encoder could produce.
-pub fn run(config: HostConfig, keys: &HostKeys) -> io::Result<()> {
-    assert!(config.slices > 0, "a frame needs at least one slice");
+/// Panics if `run.slices` is zero or `run.frame_bytes` is smaller than
+/// `run.slices`, since neither describes a frame an encoder could produce.
+pub fn run(run: HostRun, keys: &HostKeys) -> io::Result<()> {
+    let config = &run.session;
+    // A measurement run always has a budget; the command line supplies one by default. A
+    // session with none runs until it is stopped, which on the command line means until the
+    // process is.
+    let budget = config.frames.unwrap_or(u32::MAX);
+    assert!(run.slices > 0, "a frame needs at least one slice");
     assert!(
-        config.frame_bytes >= config.slices,
+        run.frame_bytes >= run.slices,
         "every slice needs at least one byte"
     );
 
-    let mut sender = open(config, keys)?;
-    if let Some(bitrate) = config.pace_bps {
-        sender.enable_pacing(bitrate, config.adaptive);
+    let mut sender = open(run.session.clone(), keys)?;
+    // Pacing, the return path and parity are set up by the core when the session opens.
+    // Loss injection is not: it exists only to make a measurement reproducible.
+    if run.loss_ppm > 0 {
+        sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
-    sender.serve_return_path(true)?;
-    if let Some(loss) = config.parity_loss {
-        sender.enable_parity(loss);
-    }
-    if config.loss_ppm > 0 {
-        sender.inject_loss(config.loss_ppm, config.loss_seed);
-    }
-    let slices = build_slices(config.frame_bytes, config.slices);
+    let slices = build_slices(run.frame_bytes, run.slices);
     let interval = frame_interval(config.fps);
 
     println!(
         "host: sending {} synthetic frames of {} bytes in {} slices at {} fps",
-        config.frames, config.frame_bytes, config.slices, config.fps
+        budget, run.frame_bytes, run.slices, config.fps
     );
 
     let start = Instant::now();
 
-    for frame_id in 0..config.frames {
+    for frame_id in 0..budget {
         pace(start, interval, frame_id);
         // Ahead of the frame's own packets, so eighteen bytes the cursor depends on are
         // not queued behind a whole frame of video.
@@ -163,7 +136,7 @@ pub fn run(config: HostConfig, keys: &HostKeys) -> io::Result<()> {
         // The synthetic source follows the controller the way a real encoder would, by
         // producing less. Sending a shorter prefix of each slice rather than rebuilding it
         // keeps the frame path free of allocation.
-        let budget = frame_budget(sender.target_bps(), config.fps, config.frame_bytes);
+        let budget = frame_budget(sender.target_bps(), config.fps, run.frame_bytes);
 
         for (slice_id, slice) in slices.iter().enumerate() {
             let bytes = slice_prefix(slice, slice_id, slices.len(), budget);
@@ -193,22 +166,22 @@ pub fn run(config: HostConfig, keys: &HostKeys) -> io::Result<()> {
 /// socket cannot be written to.
 #[cfg(target_os = "macos")]
 pub fn run_encoded(
-    config: HostConfig,
+    run: HostRun,
     keys: &HostKeys,
     encoder_config: prism_core::encode::EncoderConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let config = &run.session;
+    // A measurement run always has a budget; the command line supplies one by default. A
+    // session with none runs until it is stopped, which on the command line means until the
+    // process is.
+    let budget = config.frames.unwrap_or(u32::MAX);
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
 
-    let mut sender = open(config, keys)?;
-    if let Some(bitrate) = config.pace_bps {
-        sender.enable_pacing(bitrate, config.adaptive);
-    }
-    sender.serve_return_path(true)?;
-    if let Some(loss) = config.parity_loss {
-        sender.enable_parity(loss);
-    }
-    if config.loss_ppm > 0 {
-        sender.inject_loss(config.loss_ppm, config.loss_seed);
+    let mut sender = open(run.session.clone(), keys)?;
+    // Pacing, the return path and parity are set up by the core when the session opens.
+    // Loss injection is not: it exists only to make a measurement reproducible.
+    if run.loss_ppm > 0 {
+        sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     let mut picture = Nv12Frame::new(encoder_config.width, encoder_config.height)?;
@@ -216,7 +189,7 @@ pub fn run_encoded(
 
     println!(
         "host: encoding {} frames at {}x{} {} fps, {} kbps",
-        config.frames,
+        budget,
         encoder_config.width,
         encoder_config.height,
         config.fps,
@@ -231,7 +204,7 @@ pub fn run_encoded(
     let start = Instant::now();
     let mut dropped = 0u32;
 
-    for frame_id in 0..config.frames {
+    for frame_id in 0..budget {
         pace(start, interval, frame_id);
         sender.send_cursor()?;
 
@@ -283,12 +256,17 @@ pub fn run_encoded(
 /// been granted — or if the encoder or socket fails.
 #[cfg(target_os = "macos")]
 pub fn run_captured(
-    config: HostConfig,
+    run: HostRun,
     keys: &HostKeys,
     bitrate_bps: u32,
     width: u32,
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let config = &run.session;
+    // A measurement run always has a budget; the command line supplies one by default. A
+    // session with none runs until it is stopped, which on the command line means until the
+    // process is.
+    let budget = config.frames.unwrap_or(u32::MAX);
     use prism_core::capture::CaptureConfig;
     use prism_core::capture::screencapturekit::ScreenCapture;
     use prism_core::encode::videotoolbox::VideoToolboxEncoder;
@@ -310,16 +288,11 @@ pub fn run_captured(
     };
 
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
-    let mut sender = open(config, keys)?;
-    if let Some(bitrate) = config.pace_bps {
-        sender.enable_pacing(bitrate, config.adaptive);
-    }
-    sender.serve_return_path(true)?;
-    if let Some(loss) = config.parity_loss {
-        sender.enable_parity(loss);
-    }
-    if config.loss_ppm > 0 {
-        sender.inject_loss(config.loss_ppm, config.loss_seed);
+    let mut sender = open(run.session.clone(), keys)?;
+    // Pacing, the return path and parity are set up by the core when the session opens.
+    // Loss injection is not: it exists only to make a measurement reproducible.
+    if run.loss_ppm > 0 {
+        sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
 
     println!(
@@ -332,7 +305,7 @@ pub fn run_captured(
     let mut sent_frames = 0u32;
     let mut idle = 0u32;
 
-    while sent_frames < config.frames {
+    while sent_frames < budget {
         let Some(captured) = capture.poll(Duration::from_millis(500)) else {
             idle += 1;
             if idle > 20 {
@@ -498,11 +471,16 @@ fn build_slices(frame_bytes: usize, slices: usize) -> Vec<Vec<u8>> {
 /// or if a frame cannot be encoded or sent.
 #[cfg(target_os = "windows")]
 pub fn run_windows(
-    config: HostConfig,
+    run: HostRun,
     keys: &HostKeys,
     encoder_config: prism_core::encode::EncoderConfig,
     capture: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let config = &run.session;
+    // A measurement run always has a budget; the command line supplies one by default. A
+    // session with none runs until it is stopped, which on the command line means until the
+    // process is.
+    let budget = config.frames.unwrap_or(u32::MAX);
     use prism_core::encode::nv12::{Bgra2Nv12, Nv12Texture};
     use prism_core::encode::nvenc::NvencEncoder;
     use windows::core::Interface;
@@ -527,16 +505,11 @@ pub fn run_windows(
     let mut encoder =
         unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), encoder_config) }?;
 
-    let mut sender = open(config, keys)?;
-    if let Some(bitrate) = config.pace_bps {
-        sender.enable_pacing(bitrate, config.adaptive);
-    }
-    sender.serve_return_path(true)?;
-    if let Some(loss) = config.parity_loss {
-        sender.enable_parity(loss);
-    }
-    if config.loss_ppm > 0 {
-        sender.inject_loss(config.loss_ppm, config.loss_seed);
+    let mut sender = open(run.session.clone(), keys)?;
+    // Pacing, the return path and parity are set up by the core when the session opens.
+    // Loss injection is not: it exists only to make a measurement reproducible.
+    if run.loss_ppm > 0 {
+        sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
 
     println!(
@@ -550,7 +523,7 @@ pub fn run_windows(
     let mut sent = 0u32;
     let mut idle = 0u32;
 
-    while sent < config.frames {
+    while sent < budget {
         let Some(bgra) = source.next_frame(interval) else {
             idle += 1;
             if idle > 200 {

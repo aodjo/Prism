@@ -285,8 +285,25 @@ impl core::fmt::Debug for HostService {
 fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<AtomicBool>) {
     shared.set_phase(Phase::Opening);
 
-    let sender = match open(&config, &keys, shared, stop) {
-        Ok(sender) => sender,
+    let opened = {
+        let shared = Arc::clone(shared);
+        let mut waiting = move |observed: Option<SocketAddr>| {
+            if let Ok(mut slot) = shared.observed.lock() {
+                *slot = observed;
+            }
+            shared.set_phase(Phase::Waiting);
+        };
+
+        connect(&config, &keys, stop, &mut waiting)
+    };
+
+    let sender = match opened {
+        Ok(opened) => {
+            if let Ok(mut slot) = shared.peer.lock() {
+                *slot = Some(opened.sender.peer());
+            }
+            opened.sender
+        }
         Err(err) => {
             shared.fail(err);
             return;
@@ -316,18 +333,42 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<Atom
     shared.set_phase(Phase::Stopped);
 }
 
+/// What opening a session produced.
+#[derive(Debug)]
+pub struct Opened {
+    /// The session, ready to send.
+    pub sender: SliceSender,
+    /// Where the rendezvous server sees this machine, when there was one.
+    pub observed: Option<SocketAddr>,
+    /// Whether the session is going through the server rather than directly.
+    ///
+    /// Worth surfacing: a relayed session has the server's distance added to every round trip,
+    /// and a person wondering why the picture feels heavy deserves to know the answer is the
+    /// path and not the encoder.
+    pub relayed: bool,
+}
+
 /// Binds, becomes reachable, and waits for a paired client to open a session.
 ///
 /// Direct first, then through the relay. Punching either works within a couple of round trips
 /// or does not work at all — both routers have already been told to send, and one that will
 /// pass a packet has already passed one — so waiting longer before falling back would only
 /// lengthen a pause somebody is sitting through.
-fn open(
+///
+/// `waiting` is called once the machine is reachable and is doing nothing but waiting, which
+/// is the moment an interface stops saying "starting" and starts saying "ready".
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::TimedOut`] if no paired client connects, [`io::ErrorKind::
+/// Interrupted`] if `cancelled` is set before one does, and the underlying [`io::Error`] for a
+/// socket or server failure.
+pub fn connect(
     config: &HostConfig,
     keys: &HostKeys,
-    shared: &Shared,
-    stop: &AtomicBool,
-) -> io::Result<SliceSender> {
+    cancelled: &AtomicBool,
+    waiting: &mut dyn FnMut(Option<SocketAddr>),
+) -> io::Result<Opened> {
     use crate::control::session::{DIRECT_PATIENCE, RELAYED_PATIENCE};
     use crate::net::transport::UdpTransport;
 
@@ -336,25 +377,25 @@ fn open(
     let Some(server) = config.rendezvous else {
         // Reachable only where a client can already address this machine: the same network, a
         // virtual one, or a forwarded port. Nothing to punch and nothing to fall back to.
-        shared.set_phase(Phase::Waiting);
-        stopped(stop)?;
+        waiting(None);
+        stopped(cancelled)?;
 
-        return ready(
-            SliceSender::serve_on(
-                transport,
-                &keys.identity,
-                keys.allowed.clone(),
-                config.patience,
+        return Ok(Opened {
+            sender: ready(
+                SliceSender::serve_on(
+                    transport,
+                    &keys.identity,
+                    keys.allowed.clone(),
+                    config.patience,
+                )?,
+                config,
             )?,
-            config,
-            shared,
-        );
+            observed: None,
+            relayed: false,
+        });
     };
 
     let observed = crate::control::rendezvous::register(&transport, server, &keys.identity)?;
-    if let Ok(mut slot) = shared.observed.lock() {
-        *slot = Some(observed);
-    }
 
     // Held for the life of the session. Both the registration and the router's mapping lapse
     // in well under a minute of silence, so a host that went quiet would be unreachable for
@@ -368,11 +409,11 @@ fn open(
     )?;
     std::mem::forget(keepalive_stop);
 
-    shared.set_phase(Phase::Waiting);
+    waiting(Some(observed));
 
     let (caller, _) =
         crate::control::rendezvous::await_caller(&transport, server, config.patience)?;
-    stopped(stop)?;
+    stopped(cancelled)?;
 
     let direct = SliceSender::serve_on(
         transport.try_clone()?,
@@ -381,9 +422,13 @@ fn open(
         DIRECT_PATIENCE,
     );
 
+    let mut relayed = false;
+
     let sender = match direct {
         Ok(sender) => sender,
         Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+            relayed = true;
+
             // Both routers give every destination a different mapping, so there is no address
             // at which the two can reach each other. The server carries it instead — at the
             // cost of its bandwidth and its distance added to every round trip.
@@ -410,7 +455,11 @@ fn open(
         Err(err) => return Err(err),
     };
 
-    ready(sender, config, shared)
+    Ok(Opened {
+        sender: ready(sender, config)?,
+        observed: Some(observed),
+        relayed,
+    })
 }
 
 /// Fails if the session was stopped before it opened.
@@ -426,11 +475,7 @@ fn stopped(stop: &AtomicBool) -> io::Result<()> {
 }
 
 /// Configures a sender whose handshake has completed, and starts its return path.
-fn ready(mut sender: SliceSender, config: &HostConfig, shared: &Shared) -> io::Result<SliceSender> {
-    if let Ok(mut slot) = shared.peer.lock() {
-        *slot = Some(sender.peer());
-    }
-
+fn ready(mut sender: SliceSender, config: &HostConfig) -> io::Result<SliceSender> {
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }

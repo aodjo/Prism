@@ -272,3 +272,74 @@ fn a_datagram_the_size_of_a_token_is_never_confused_with_traffic() {
         Forward::To(client())
     );
 }
+
+#[test]
+fn both_asks_about_one_pair_get_the_same_token() {
+    // The bug the first end to end run found. Each peer discovers on its own that punching
+    // failed and asks separately; two tokens leave each waiting at the relay for a partner
+    // that was never coming, and nothing anywhere says why.
+    let mut relays = Relays::new();
+    let now = Instant::now();
+
+    let host_key = [0xa1; 32];
+    let client_key = [0xb2; 32];
+
+    let first = relays
+        .token_for(host_key, client_key, TOKEN, now)
+        .expect("a token");
+    let second = relays
+        .token_for(host_key, client_key, OTHER, now)
+        .expect("a token");
+
+    assert_eq!(first, second, "the two asks were given different tokens");
+    assert_eq!(
+        relays.waiting(),
+        1,
+        "a second ask allocated a second session"
+    );
+}
+
+#[test]
+fn a_different_pair_gets_a_different_token() {
+    let mut relays = Relays::new();
+    let now = Instant::now();
+
+    let first = relays
+        .token_for([0xa1; 32], [0xb2; 32], TOKEN, now)
+        .expect("a token");
+    let second = relays
+        .token_for([0xa1; 32], [0xc3; 32], OTHER, now)
+        .expect("a token");
+
+    assert_ne!(first, second);
+    assert_eq!(relays.waiting(), 2);
+}
+
+#[test]
+fn a_pair_can_relay_again_after_its_session_ended() {
+    // Otherwise the second session of the day between two machines would be handed a token
+    // whose relay had already been swept away, and would wait at a port with nothing behind
+    // it.
+    let mut relays = Relays::new();
+    let now = Instant::now();
+
+    let host_key = [0xa1; 32];
+    let client_key = [0xb2; 32];
+
+    let first = relays
+        .token_for(host_key, client_key, TOKEN, now)
+        .expect("a token");
+
+    relays.expire(now + PAIRING_TTL + Duration::from_secs(1));
+
+    let second = relays
+        .token_for(
+            host_key,
+            client_key,
+            OTHER,
+            now + PAIRING_TTL + Duration::from_secs(2),
+        )
+        .expect("a token");
+
+    assert_ne!(first, second, "a swept-away token was handed out again");
+}

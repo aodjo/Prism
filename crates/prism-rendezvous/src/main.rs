@@ -105,7 +105,7 @@ fn serve(cli: &Cli) -> io::Result<()> {
         );
         None
     } else {
-        let port = spawn_relay(cli.bind, Arc::clone(&relays))?;
+        let port = spawn_relay(cli.bind, Arc::clone(&relays), cli.verbose)?;
         println!("prism-rendezvous: relaying on port {port}");
         Some(port)
     };
@@ -261,17 +261,20 @@ fn handle(
                 return;
             };
 
-            let Ok(token) = relay_token() else {
+            let Ok(fresh) = relay_token() else {
                 return;
             };
 
-            let allocated = relays
+            // The same token for both asks about the same pair. Each peer discovers on its own
+            // that punching failed and asks separately; two tokens would leave each waiting at
+            // the relay for a partner that was never coming.
+            let Some(token) = relays
                 .lock()
-                .is_ok_and(|mut relays| relays.allocate(token, now));
-
-            if !allocated {
+                .ok()
+                .and_then(|mut relays| relays.token_for(host, client, fresh, now))
+            else {
                 return;
-            }
+            };
 
             // Both sides are told at once. They present the token at the relay port and the
             // first two addresses to do so are paired, which is why the token has to be
@@ -279,11 +282,6 @@ fn handle(
             let offer = Message::Relaying { port, token };
             send(socket, reply, &offer, from);
             send(socket, reply, &offer, address);
-
-            // The caller's key is carried so a log line can name who asked. The server cannot
-            // check it — it holds no keys — and does not need to: the session's own handshake
-            // is what decides who is at each end, relayed or not.
-            let _ = client;
         }
 
         // Messages the server sends rather than receives. Arriving here means a peer is
@@ -306,7 +304,7 @@ fn handle(
 ///
 /// Returns the underlying [`io::Error`] if the port cannot be bound, which usually means
 /// something else already has it.
-fn spawn_relay(bind: SocketAddr, relays: Arc<Mutex<Relays>>) -> io::Result<u16> {
+fn spawn_relay(bind: SocketAddr, relays: Arc<Mutex<Relays>>, verbose: bool) -> io::Result<u16> {
     let mut relay_bind = bind;
     relay_bind.set_port(bind.port().wrapping_add(1));
 
@@ -331,7 +329,16 @@ fn spawn_relay(bind: SocketAddr, relays: Arc<Mutex<Relays>>) -> io::Result<u16> 
                     return;
                 };
 
-                match held.accept(from, &buf[..len], now) {
+                let outcome = held.accept(from, &buf[..len], now);
+
+                if verbose && len < 64 {
+                    // Only the short datagrams, which are token presentations. Logging a line
+                    // per forwarded packet would print tens of thousands a second and be the
+                    // slowest thing the relay does.
+                    println!("prism-relay: {from} presented {len} bytes -> {outcome:?}");
+                }
+
+                match outcome {
                     // Forwarded byte for byte. No header, no rewriting, no length change: a
                     // relayed session and a direct one are the same session.
                     Forward::To(peer) => {
