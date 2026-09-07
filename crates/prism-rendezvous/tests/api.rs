@@ -13,6 +13,7 @@ use prism_core::account::totp;
 use prism_core::net::handshake::KEY_LEN;
 use prism_rendezvous::accounts::Accounts;
 use prism_rendezvous::api::{Service, routes};
+use prism_rendezvous::sessions::Sessions;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -27,7 +28,15 @@ fn service(label: &str) -> (axum::Router, std::path::PathBuf) {
 
     let accounts = Accounts::open(&path).expect("opens");
 
-    (routes(Service::new(accounts)), path)
+    // Beside the accounts, the way the server puts it, and cleared first so that a session
+    // left by an earlier run of the suite cannot be mistaken for one this test issued.
+    let sessions_path = path.with_file_name(format!("sessions-{label}.json"));
+    let _ = std::fs::remove_file(&sessions_path);
+
+    let accounts_path = path.clone();
+    let sessions = Sessions::open(sessions_path, 0);
+
+    (routes(Service::new(accounts, sessions)), accounts_path)
 }
 
 /// Sends one request and returns the status and the parsed body.
@@ -335,6 +344,10 @@ async fn every_signed_in_endpoint_refuses_without_a_token() {
 
     let attempts = [
         Request::builder()
+            .uri("/v1/session")
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
             .uri("/v1/devices")
             .body(Body::empty())
             .unwrap(),
@@ -373,6 +386,59 @@ async fn every_signed_in_endpoint_refuses_without_a_token() {
             "{method} {uri} answered without a token"
         );
     }
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn a_token_kept_from_a_previous_run_still_says_who_it_belongs_to() {
+    // What lets an application start signed in rather than asking for a password every time it
+    // is opened. It has to hand back the same picture signing in did, or the window would show
+    // less after a restart than it did before one.
+    let (router, path) = service("resume");
+    let secret = register(&router, "someone").await;
+    let token = sign_in(&router, "someone", &secret).await;
+
+    let key = hex(&[5u8; KEY_LEN]);
+    send(
+        &router,
+        authed(
+            "POST",
+            "/v1/devices",
+            &token,
+            json!({ "public_key": key, "label": "a laptop" }),
+        ),
+    )
+    .await;
+
+    let (status, body) = send(&router, authed("GET", "/v1/session", &token, Value::Null)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "someone");
+    assert_eq!(body["relay_allowed"], false);
+    assert_eq!(body["devices"][0]["public_key"], key);
+    assert_eq!(body["devices"][0]["label"], "a laptop");
+    assert!(
+        body.get("token").is_none(),
+        "resuming sent the token back for no reason"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn signing_out_stops_the_token_working() {
+    let (router, path) = service("signout");
+    let secret = register(&router, "someone").await;
+    let token = sign_in(&router, "someone", &secret).await;
+
+    let (status, _) = send(
+        &router,
+        authed("DELETE", "/v1/session", &token, Value::Null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = send(&router, authed("GET", "/v1/session", &token, Value::Null)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     let _ = std::fs::remove_file(path);
 }
 

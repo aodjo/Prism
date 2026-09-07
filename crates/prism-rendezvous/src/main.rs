@@ -453,6 +453,7 @@ fn is_timeout(err: &io::Error) -> bool {
 fn spawn_accounts(path: PathBuf, bind: SocketAddr, insecure: bool) -> io::Result<()> {
     use prism_rendezvous::accounts::Accounts;
     use prism_rendezvous::api::{Service, routes};
+    use prism_rendezvous::sessions::Sessions;
 
     if !bind.ip().is_loopback() && !insecure {
         return Err(io::Error::new(
@@ -481,7 +482,17 @@ fn spawn_accounts(path: PathBuf, bind: SocketAddr, insecure: bool) -> io::Result
         println!("prism-rendezvous: accounts on http://{bind} IN THE CLEAR, as asked");
     }
 
-    let service = Service::new(accounts);
+    // Beside the accounts rather than under a flag of its own: it is the same deployment's
+    // state, and a server whose sessions and accounts could be pointed at different places
+    // would have one more way to be configured into signing everybody out.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let sessions = Sessions::open(path.with_file_name("sessions.json"), now);
+    println!("prism-rendezvous: {} session(s) still good", sessions.len());
+
+    let service = Service::new(accounts, sessions);
 
     std::thread::Builder::new()
         .name("prism-accounts".into())

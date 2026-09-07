@@ -23,7 +23,6 @@
 //! process that issued them, which means a stolen token outlives everything anybody could do
 //! about it.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,6 +37,7 @@ use prism_core::net::handshake::KEY_LEN;
 use serde::{Deserialize, Serialize};
 
 use crate::accounts::{AccountError, Accounts, Device, Registration};
+use crate::sessions::Sessions;
 
 /// How long a session lasts without being used.
 ///
@@ -49,47 +49,26 @@ const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 /// Bytes in a session token.
 const TOKEN_LEN: usize = 32;
 
-/// A signed-in session.
-#[derive(Debug, Clone)]
-struct Session {
-    name: String,
-    expires_unix: u64,
-}
-
 /// Everything the API needs to answer a request.
 #[derive(Debug)]
 pub struct Service {
     accounts: Mutex<Accounts>,
-    sessions: Mutex<HashMap<String, Session>>,
+    sessions: Mutex<Sessions>,
 }
 
 impl Service {
-    /// Builds the service over an account store.
+    /// Builds the service over an account store and a session store.
     #[must_use]
-    pub fn new(accounts: Accounts) -> Arc<Self> {
+    pub fn new(accounts: Accounts, sessions: Sessions) -> Arc<Self> {
         Arc::new(Self {
             accounts: Mutex::new(accounts),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(sessions),
         })
     }
 
     /// Returns the name a token belongs to, if it is still good.
-    ///
-    /// Expired tokens are dropped as they are found rather than swept on a timer. A map that
-    /// only grows while somebody is signing in repeatedly is not a map worth a background
-    /// thread.
     fn whose(&self, token: &str) -> Option<String> {
-        let now = now_unix();
-        let mut sessions = self.sessions.lock().ok()?;
-
-        match sessions.get(token) {
-            Some(session) if session.expires_unix > now => Some(session.name.clone()),
-            Some(_) => {
-                sessions.remove(token);
-                None
-            }
-            None => None,
-        }
+        self.sessions.lock().ok()?.whose(token, now_unix())
     }
 
     /// Issues a token for a name.
@@ -102,15 +81,19 @@ impl Service {
         self.sessions
             .lock()
             .map_err(|_| ApiError::Unavailable)?
-            .insert(
-                token.clone(),
-                Session {
-                    name: name.to_owned(),
-                    expires_unix: now_unix() + SESSION_LIFETIME.as_secs(),
-                },
-            );
+            .insert(&token, name, now_unix() + SESSION_LIFETIME.as_secs())
+            .map_err(|_| ApiError::Unavailable)?;
 
         Ok(token)
+    }
+
+    /// Forgets a token, so signing out on one machine cannot be undone by keeping the value.
+    fn revoke(&self, token: &str) -> Result<(), ApiError> {
+        self.sessions
+            .lock()
+            .map_err(|_| ApiError::Unavailable)?
+            .remove(token)
+            .map_err(|_| ApiError::Unavailable)
     }
 }
 
@@ -224,6 +207,18 @@ struct SessionBody {
     relay_allowed: bool,
 }
 
+/// What a token turns out to be worth, when a client already has one.
+///
+/// The same picture signing in draws, minus the token itself: the caller is holding it, and
+/// sending it back would put a credential in one more reply for no reason.
+#[derive(Debug, Serialize)]
+struct ResumedBody {
+    name: String,
+    sealed_key: String,
+    devices: Vec<Device>,
+    relay_allowed: bool,
+}
+
 /// What adding a machine needs.
 #[derive(Debug, Deserialize)]
 struct DeviceBody {
@@ -255,6 +250,7 @@ pub fn routes(service: Arc<Service>) -> Router {
         .route("/v1/salt", get(salt))
         .route("/v1/accounts", post(register))
         .route("/v1/sessions", post(sign_in))
+        .route("/v1/session", get(resume).delete(sign_out))
         .route("/v1/devices", get(list_devices).post(add_device))
         .route("/v1/devices/{public_key}", delete(remove_device))
         .route("/v1/account/key", put(replace_key))
@@ -333,6 +329,43 @@ async fn sign_in(
         devices,
         relay_allowed,
     }))
+}
+
+/// Says who a token belongs to, so an application that kept one can start signed in.
+///
+/// A session outlives the application that asked for it. Without this, an application that
+/// stored a token would have no way to find out whether it is still good except by using it
+/// for something, and the first thing it would use it for would fail in a way that looks like
+/// a different problem.
+async fn resume(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+) -> Result<Json<ResumedBody>, ApiError> {
+    let name = bearer(&service, &headers)?;
+    let accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
+    let account = accounts.get(&name).ok_or(ApiError::Refused)?;
+
+    Ok(Json(ResumedBody {
+        name: name.clone(),
+        sealed_key: account.sealed_key.clone(),
+        devices: account.devices.clone(),
+        relay_allowed: account.relay_allowed,
+    }))
+}
+
+/// Ends a session, so the token that named it stops working everywhere.
+///
+/// A client that only forgot its own copy would leave a working credential behind for as long
+/// as its lifetime lasted. Signing out is a thing somebody does because they want it to stop
+/// being possible to sign in, and it has to reach the server for that to be true.
+async fn sign_out(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let token = token_of(&headers).ok_or(ApiError::Refused)?;
+    service.revoke(&token)?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Returns the machines on the signed-in account.
@@ -414,13 +447,18 @@ async fn replace_key(
 
 /// Reads the bearer token and says whose session it is.
 fn bearer(service: &Service, headers: &HeaderMap) -> Result<String, ApiError> {
-    let token = headers
+    let token = token_of(headers).ok_or(ApiError::Refused)?;
+
+    service.whose(&token).ok_or(ApiError::Refused)
+}
+
+/// Pulls the token out of the headers without saying whether it is any good.
+fn token_of(headers: &HeaderMap) -> Option<String> {
+    headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or(ApiError::Refused)?;
-
-    service.whose(token).ok_or(ApiError::Refused)
+        .map(str::to_owned)
 }
 
 /// Seconds since the epoch.

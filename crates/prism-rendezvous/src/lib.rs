@@ -10,3 +10,4 @@ pub mod accounts;
 pub mod api;
 pub mod registry;
 pub mod relay;
+pub mod sessions;
