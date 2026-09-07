@@ -1,112 +1,21 @@
-//! The screen's path from the compositor to the wire, in one place.
+//! The macOS half of the pipeline: ScreenCaptureKit into VideoToolbox.
 //!
-//! Capture a frame, encode it, send the slices. Three lines to describe and five copies of it
-//! had grown across this repository — one per host mode in the command line, one per platform
-//! in the session service — which is how the window application came to be missing both of
-//! M6's fixes while the command line had them. It was capped at the frame rate a serial
-//! encoder gives, and it could not recover from a single lost frame, and nothing said so
-//! because each copy looked correct on its own.
-//!
-//! This is that loop, once. What callers still differ about is what to do around it: how long
-//! to run, what to count, what to print. So this owns the pipeline and hands back one frame at
-//! a time, rather than owning the loop as well.
+//! What is peculiar to this platform: frames arrive as IOSurface-backed pixel buffers the
+//! encoder takes directly, and VideoToolbox is asynchronous, so the pipeline is genuinely two
+//! frames deep and the second one is worth a great deal.
 
 #![cfg(target_os = "macos")]
 
 use std::collections::VecDeque;
-use std::time::Duration;
 
 use crate::capture::screencapturekit::{CapturedFrame, ScreenCapture};
 use crate::capture::{CaptureConfig, CaptureError};
 use crate::encode::EncoderConfig;
+use crate::encode::pump::{
+    CAPTURE_TIMEOUT, ENCODE_TIMEOUT, IN_FLIGHT, PumpConfig, Pumped, after_send,
+};
 use crate::encode::videotoolbox::VideoToolboxEncoder;
 use crate::net::sender::SliceSender;
-
-/// How many frames may be inside the encoder at once.
-///
-/// Two, and the second one is worth a great deal. Submitting a frame and waiting for it before
-/// handling the next leaves the hardware idle through everything else the loop does, so the
-/// achievable rate is the sum rather than the larger of the two. Measured at 1440p with HEVC
-/// on Apple Silicon: one in flight encodes 600 frames in 9.05 s (66 fps), two in 3.05 s
-/// (197 fps), and the per-frame latency does not move (p50 6.14 → 6.17 ms).
-///
-/// It stops at two because frames beyond that are queued rather than overlapped, and a queue
-/// inside the encoder is latency with nobody's name on it: three in flight costs 3.83 ms of
-/// p50, and six costs 15 ms. That is the trade the one-frame VBV exists to refuse.
-pub const IN_FLIGHT: usize = 2;
-
-/// How long to wait for the compositor before counting the frame as missing.
-const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// How long to wait for the encoder before giving up on a frame.
-///
-/// Thirty times the measured encode latency at 1440p. Reaching it means the encoder has
-/// stopped rather than fallen behind.
-const ENCODE_TIMEOUT: Duration = Duration::from_millis(200);
-
-/// What one turn of the pipeline produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pumped {
-    /// A frame was captured, encoded and sent.
-    Sent,
-    /// A frame went in and the pipeline is still filling, so none came out yet.
-    Filling,
-    /// The compositor delivered nothing within the timeout.
-    ///
-    /// Ordinary on a still screen, which ScreenCaptureKit does not send frames for. A caller
-    /// that sees many in a row is looking at a compositor that has stopped.
-    Idle,
-    /// A frame went in and nothing came out of the encoder in time.
-    Dropped,
-    /// The client is no longer there.
-    ///
-    /// A connected UDP socket learns this from the port-unreachable the far machine's kernel
-    /// sends when nothing is listening any more, which arrives as a refused connection on the
-    /// next write. It is how an ordinary disconnection looks from here, so it ends the session
-    /// rather than failing it — a host that showed an error every time somebody closed their
-    /// client would be showing an error after most sessions.
-    PeerGone,
-}
-
-/// Whether a socket error means the client has gone rather than that something broke.
-fn peer_gone(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
-    )
-}
-
-/// Turns a failed send into either an ordinary ending or a real error.
-fn after_send(err: &std::io::Error) -> Result<Pumped, String> {
-    if peer_gone(err) {
-        Ok(Pumped::PeerGone)
-    } else {
-        Err(err.to_string())
-    }
-}
-
-/// What a pipeline is being asked to produce.
-#[derive(Debug, Clone, Copy)]
-pub struct PumpConfig {
-    /// Frames per second to capture at.
-    pub fps: u32,
-    /// Target bitrate in bits per second.
-    pub bitrate_bps: u32,
-    /// Width to scale frames to, or zero for the display's native width.
-    ///
-    /// A Retina display is far larger than anything worth streaming at frame rate, and the
-    /// compositor scales for free while it is already touching the pixels.
-    pub width: u32,
-    /// Height to scale frames to, or zero for the display's native height.
-    pub height: u32,
-    /// The codec the two machines agreed on.
-    ///
-    /// Taken from [`SliceSender::agreed`] rather than from anything decided earlier: a host
-    /// that encodes one thing having agreed another produces a client that decodes nothing
-    /// and reports no error, because a decoder waiting for parameter sets it will never see
-    /// has nothing to complain about.
-    pub codec: crate::net::negotiate::Codec,
-}
 
 /// The screen, encoded, ready to send.
 ///
