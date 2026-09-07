@@ -13,7 +13,7 @@ import { StrictMode, useEffect, useRef, useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import type { HostPermissions, HostSnapshot, PrismApi, Settings } from './api.js';
+import type { AccountView, HostPermissions, HostSnapshot, PrismApi, Settings } from './api.js';
 
 declare global {
   interface Window {
@@ -159,22 +159,31 @@ function Panel(): JSX.Element {
 
   const [trouble, setTrouble] = useState<string | null>(null);
 
+  const [account, setAccount] = useState<AccountView | null>(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
+  const [working, setWorking] = useState(false);
+  const [accountTrouble, setAccountTrouble] = useState<string | null>(null);
+
   const [open, setOpen] = useState(false);
   const body = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     void (async () => {
-      const [who, stored, grants, first] = await Promise.all([
+      const [who, stored, grants, first, signedIn] = await Promise.all([
         prism.identity(),
         prism.getSettings(),
         prism.permissions(),
         prism.snapshot(),
+        prism.accountState(),
       ]);
 
       setIdentity({ publicKey: who.publicKey, peers: who.peers });
       setSettings(stored);
       setHeld(grants);
       setSnapshot(first);
+      setAccount(signedIn);
     })();
   }, []);
 
@@ -234,6 +243,23 @@ function Panel(): JSX.Element {
         setSnapshot(running ? await prism.stopHosting() : await prism.startHosting());
       } catch (error) {
         setTrouble(reason(error));
+      }
+    })();
+  };
+
+  const signIn = (): void => {
+    void (async () => {
+      setWorking(true);
+      setAccountTrouble(null);
+
+      try {
+        setAccount(await prism.accountSignIn(email.trim(), password, code.trim()));
+        setPassword('');
+        setCode('');
+      } catch (error) {
+        setAccountTrouble(reason(error));
+      } finally {
+        setWorking(false);
       }
     })();
   };
@@ -394,13 +420,121 @@ function Panel(): JSX.Element {
 
       {/* Who this machine is shared with. Not a list of pairings any more — the account is the
           list, and everything signed in to it can reach this machine while sharing is on. */}
-      <Band title="Your machines">
-        <Row label={peers}>
-          <span className="text-tiny text-dim">on this account</span>
-        </Row>
+      <Band title="Account">
+        {account?.email ? (
+          <>
+            <Row label={account.email}>
+              <button
+                type="button"
+                className="btn-secondary no-drag"
+                onClick={() => {
+                  void (async () => {
+                    setAccount(await prism.accountSignOut());
+                  })();
+                }}
+              >
+                Sign out
+              </button>
+            </Row>
+            <Row label={peers}>
+              <span className="text-tiny text-dim">on this account</span>
+            </Row>
+          </>
+        ) : account && account.server.trim() === '' ? (
+          <p className="text-tiny leading-normal text-dim">
+            Set an account server below, then sign in. Until then this machine can only be
+            reached by somebody who already knows its address.
+          </p>
+        ) : (
+          <>
+            <p className="mb-2 text-tiny leading-normal text-dim">
+              Sign in and every machine on your account can reach this one while it is shared.
+            </p>
+            <Row label="Email">
+              <input
+                type="email"
+                autoComplete="username"
+                spellCheck={false}
+                placeholder="you@example.com"
+                className={FIELD}
+                value={email}
+                onChange={(event) => {
+                  setEmail(event.target.value);
+                }}
+              />
+            </Row>
+            <Row label="Password">
+              <input
+                type="password"
+                autoComplete="current-password"
+                placeholder="••••••••"
+                className={FIELD}
+                value={password}
+                onChange={(event) => {
+                  setPassword(event.target.value);
+                }}
+              />
+            </Row>
+            <Row label="Code">
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                autoComplete="one-time-code"
+                placeholder="123456"
+                className={FIELD}
+                value={code}
+                onChange={(event) => {
+                  setCode(event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    signIn();
+                  }
+                }}
+              />
+            </Row>
+            <div className="mt-2 flex justify-end">
+              <button
+                type="button"
+                className="btn-primary-sm no-drag"
+                disabled={working}
+                onClick={signIn}
+              >
+                Sign in
+              </button>
+            </div>
+          </>
+        )}
+
+        {(accountTrouble ?? account?.error) !== null &&
+          (accountTrouble ?? account?.error) !== undefined && (
+            <p className="mt-2 whitespace-pre-wrap text-fine-2 text-danger-ink">
+              {accountTrouble ?? account?.error}
+            </p>
+          )}
       </Band>
 
       <Band title="Settings">
+        <Row label="Account server">
+          <input
+            type="text"
+            spellCheck={false}
+            placeholder="https://rv.example.com"
+            className={FIELD}
+            value={settings?.accountServer ?? ''}
+            onChange={(event) => {
+              setSettings((was) => (was ? { ...was, accountServer: event.target.value } : was));
+            }}
+            onBlur={(event) => {
+              void (async () => {
+                save({ accountServer: event.target.value.trim() });
+                setAccount(await prism.accountState());
+              })();
+            }}
+          />
+        </Row>
+        {/* Filled in by the account when there is one, and typed by hand when there is not. */}
         <Row label="Rendezvous">
           <input
             type="text"

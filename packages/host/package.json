@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit"
   },
   "dependencies": {
+    "@prism/account": "workspace:*",
     "@prism/native": "workspace:*",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

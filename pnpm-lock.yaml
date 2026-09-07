@@ -80,6 +80,9 @@ importers:
 
   packages/host:
     dependencies:
+      '@prism/account':
+        specifier: workspace:*
+        version: link:../account
       '@prism/native':
         specifier: workspace:*
         version: link:../native

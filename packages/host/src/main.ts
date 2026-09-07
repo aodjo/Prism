@@ -1,8 +1,11 @@
 import { app, BrowserWindow, ipcMain, Menu, screen, shell } from 'electron';
 import { fileURLToPath } from 'node:url';
+import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { readFileSync, writeFileSync } from 'node:fs';
+
+import { Holder } from '@prism/account/holder';
 
 import type { Settings } from './api.js';
 import { DEFAULTS, loadSettings, saveSettings } from './settings.js';
@@ -57,6 +60,22 @@ let ticker: NodeJS.Timeout | null = null;
 
 /** What this machine is configured to do. */
 let settings: Settings = { ...DEFAULTS };
+
+/**
+ * The account, held exactly the way the client holds it.
+ *
+ * Sharing is what this application is for, and an account is what makes sharing possible: it
+ * is how the machines that may watch this one are named, and how this one is told where the
+ * signalling is. Without it a host is reachable only by somebody who already knows its address.
+ */
+const account = new Holder(prism, {
+  server: () => settings.accountServer,
+  rendezvous: () => settings.rendezvous,
+  setRendezvous: (address: string) => {
+    settings = { ...settings, rendezvous: address };
+    saveSettings(settings);
+  },
+});
 
 /**
  * Builds the shelf.
@@ -297,6 +316,18 @@ function registerHandlers(): void {
     peers: prism.pairedPeers(),
   }));
 
+  ipcMain.handle('account:state', () => account.view());
+
+  ipcMain.handle(
+    'account:signIn',
+    (_event, email: string, password: string, code: string) =>
+      // The label is what this machine is called in everyone else's list, so it says what the
+      // machine is rather than what the person typed.
+      account.signIn(email, password, code, hostname()),
+  );
+
+  ipcMain.handle('account:signOut', () => account.signOut());
+
   ipcMain.handle('settings:get', () => settings);
 
   ipcMain.handle('settings:set', (_event, next: Partial<Settings>) => {
@@ -341,11 +372,13 @@ function registerHandlers(): void {
 void app.whenReady().then(() => {
   settings = loadSettings();
 
-  // No dock icon: this is a menu bar application, and a dock icon for something with no
-  // window of its own is a second place to click that does nothing different.
+  // No dock icon: this is a shelf against the edge of the screen, and a dock icon for
+  // something with no window of its own is a second place to click that does nothing
+  // different.
   app.dock?.hide();
 
   registerHandlers();
+  account.start();
 
   panel = createShelf();
   placeShelf(MIN_PANEL_HEIGHT);

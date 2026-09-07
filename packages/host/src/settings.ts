@@ -13,6 +13,7 @@ import type { Settings } from './api.js';
  * a number nothing told it. The same port the headless host uses, so the two agree.
  */
 export const DEFAULTS: Settings = {
+  accountServer: '',
   rendezvous: '',
   bind: '0.0.0.0:47200',
   fps: 60,

@@ -82,14 +82,24 @@ export interface Identity {
   readonly peers: readonly string[];
 }
 
+/** What is known about the account, as the panel shows it. */
+export type { AccountView } from '@prism/account/holder';
+
 /**
  * What this machine is configured to do.
  *
- * Deliberately small. Anything that can be derived — the identity, the list of paired
- * machines — is derived, because two copies of one fact drift apart and the copy a person is
+ * Deliberately small. Anything that can be derived — the identity, the list of machines on the
+ * account — is derived, because two copies of one fact drift apart and the copy a person is
  * looking at is then the wrong one.
  */
 export interface Settings {
+  /**
+   * Where the account server is.
+   *
+   * Signing in is what makes this machine reachable: it is how the machines on one account
+   * learn each other's keys, and how this one is told where the signalling is.
+   */
+  accountServer: string;
   /** Rendezvous server to register with, or empty to be reachable only directly. */
   rendezvous: string;
   /** Address to listen on. Port zero lets the operating system choose. */
@@ -156,6 +166,34 @@ export interface PrismApi {
    * @returns {Promise<Settings>} The settings as they now stand.
    */
   setSettings(next: Partial<Settings>): Promise<Settings>;
+
+  /**
+   * Returns what is known about the account.
+   *
+   * @async
+   * @returns {Promise<AccountView>} The current state, signed in or not.
+   */
+  accountState(): Promise<AccountView>;
+
+  /**
+   * Signs in, and trusts every machine on the account.
+   *
+   * @async
+   * @param {string} email - The address the account is under.
+   * @param {string} password - The password, which is never sent.
+   * @param {string} code - The six digits from an authenticator app.
+   * @returns {Promise<AccountView>} The state afterwards.
+   * @throws {Error} If any of the three is wrong, reported as one failure.
+   */
+  accountSignIn(email: string, password: string, code: string): Promise<AccountView>;
+
+  /**
+   * Signs out, here and on the server.
+   *
+   * @async
+   * @returns {Promise<AccountView>} The state afterwards.
+   */
+  accountSignOut(): Promise<AccountView>;
 
   /**
    * Starts hosting with the stored settings.
