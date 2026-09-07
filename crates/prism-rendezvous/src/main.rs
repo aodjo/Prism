@@ -84,6 +84,16 @@ struct Cli {
     #[arg(long)]
     api_insecure: bool,
 
+    /// Where signed-in machines should look for this server's signalling, as `host:port`.
+    ///
+    /// Handed out when somebody signs in, so that neither end has to be told by hand where to
+    /// register. It cannot be worked out from `--bind`: a server behind a forwarded port or a
+    /// name knows neither, and the address that matters is the one a machine somewhere else
+    /// can reach. Omitted means machines are on their own to find each other, which on a
+    /// single network they can.
+    #[arg(long)]
+    advertise: Option<String>,
+
     /// Refuse to carry traffic for peers that could not reach each other directly.
     ///
     /// Relaying costs this machine's bandwidth and adds its distance to every round trip, so
@@ -127,7 +137,12 @@ fn serve(cli: &Cli) -> io::Result<()> {
     // because it is the only part of this server that is asynchronous and the loop below is
     // the only part that must never wait on anything.
     if let Some(path) = cli.accounts.clone() {
-        spawn_accounts(path, cli.api_bind, cli.api_insecure)?;
+        spawn_accounts(
+            path,
+            cli.api_bind,
+            cli.api_insecure,
+            cli.advertise.clone().unwrap_or_default(),
+        )?;
     }
 
     let relays = Arc::new(Mutex::new(Relays::new()));
@@ -450,7 +465,12 @@ fn is_timeout(err: &io::Error) -> bool {
 ///
 /// Returns an error if the account store cannot be opened, if the address would put the API
 /// in the clear on the network, or if the thread cannot be spawned.
-fn spawn_accounts(path: PathBuf, bind: SocketAddr, insecure: bool) -> io::Result<()> {
+fn spawn_accounts(
+    path: PathBuf,
+    bind: SocketAddr,
+    insecure: bool,
+    advertise: String,
+) -> io::Result<()> {
     use prism_rendezvous::accounts::Accounts;
     use prism_rendezvous::api::{Service, routes};
     use prism_rendezvous::sessions::Sessions;
@@ -492,7 +512,16 @@ fn spawn_accounts(path: PathBuf, bind: SocketAddr, insecure: bool) -> io::Result
     let sessions = Sessions::open(path.with_file_name("sessions.json"), now);
     println!("prism-rendezvous: {} session(s) still good", sessions.len());
 
-    let service = Service::new(accounts, sessions);
+    if advertise.is_empty() {
+        println!(
+            "prism-rendezvous: no --advertise, so signed-in machines are not told where to \
+             register and can only reach each other directly"
+        );
+    } else {
+        println!("prism-rendezvous: telling signed-in machines to register at {advertise}");
+    }
+
+    let service = Service::new(accounts, sessions, advertise);
 
     std::thread::Builder::new()
         .name("prism-accounts".into())

@@ -4,11 +4,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { AccountClient, AccountError } from '@prism/account';
-import { forgetSession, keepSession, storedSession } from '@prism/account/stored-session';
+import { Holder } from '@prism/account/holder';
 import { toDataURL } from 'qrcode';
 
-import type { AccountDeviceView, AccountEnrolmentView, AccountState, Settings, StreamState } from './api.js';
+import type { AccountEnrolmentView, Settings, StreamState } from './api.js';
 import { DEFAULTS, loadSettings, saveSettings } from './settings.js';
 import { Stream } from './stream.js';
 
@@ -59,152 +58,21 @@ let stream: Stream | null = null;
 /** What this machine is configured to do. */
 let settings: Settings = { ...DEFAULTS };
 
-/** The account server, rebuilt whenever its address changes. */
-let account: AccountClient | null = null;
-
-/** The address signed in as, or `null`. */
-let accountEmail: string | null = null;
-
-/** Every machine the account knows, as of the last time it said. */
-let accountDevices: readonly AccountDeviceView[] = [];
-
-/** Whether the account may use the relay. */
-let relayAllowed = false;
-
-/** What went wrong the last time the account was asked something. */
-let accountError: string | null = null;
-
 /**
- * The attempt to reuse a token kept from a previous run.
+ * The account, which both applications hold the same way.
  *
- * Held so that the window can wait for it. Without that, the first thing drawn after opening
- * the application is a sign-in form, replaced a moment later by the account that was signed in
- * all along — which reads as having been signed out.
+ * It reads the server address out of these settings and writes the signalling address back
+ * into them, because where to register is something the account knows and this machine does
+ * not until it has asked.
  */
-let resuming: Promise<void> | null = null;
-
-/**
- * Returns a client for the configured account server, building one if the address has changed.
- *
- * Rebuilt rather than reconfigured, because a client holds a session and a session belongs to
- * the server that issued it. Carrying one across a change of address would send somebody's
- * token to a machine that never gave it to them.
- *
- * @returns {AccountClient | null} The client, or `null` when no server is configured.
- */
-function accountClient(): AccountClient | null {
-  const server = settings.accountServer.trim();
-
-  if (server === '') {
-    account = null;
-    accountEmail = null;
-    return null;
-  }
-
-  if (!account || account.base !== server) {
-    // A token is only worth anything to the server that issued it, so pointing this machine at
-    // a different one throws it away rather than offering it to a stranger. Building the first
-    // client of a run is not that: there is nothing to point away from, and the token waiting
-    // on disk is the one this client is about to use.
-    if (account) {
-      forgetSession();
-    }
-
-    account = new AccountClient(server, prism.accountAuth);
-    accountEmail = null;
-  }
-
-  return account;
-}
-
-/**
- * Describes the account for the window.
- *
- * @returns {AccountState} What is known right now.
- */
-function accountState(): AccountState {
-  return {
-    server: settings.accountServer,
-    email: accountEmail,
-    publicKey: prism.identityPublicKey(),
-    devices: accountDevices,
-    relayAllowed,
-    error: accountError,
-  };
-}
-
-/**
- * Turns a failure into the sentence a person should read.
- *
- * @param {unknown} error - Whatever was thrown.
- * @returns {string} The message.
- */
-function accountMessage(error: unknown): string {
-  if (error instanceof AccountError) {
-    return error.message;
-  }
-
-  return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * Signs in with the token an earlier run kept, if there is one and it is still good.
- *
- * A server that cannot be reached is not the same as a token that has expired: the first is
- * temporary and the token stays, the second is permanent and it goes. Treating them alike
- * would sign somebody out of their own account because their network was down for a minute.
- *
- * @async
- * @returns {Promise<void>}
- */
-async function resumeAccount(): Promise<void> {
-  const stored = storedSession();
-  if (!stored) {
-    return;
-  }
-
-  const client = accountClient();
-  if (!client) {
-    return;
-  }
-
-  try {
-    const session = await client.resume(stored.token);
-
-    if (!session) {
-      forgetSession();
-      return;
-    }
-
-    accountEmail = session.email;
-    relayAllowed = session.relayAllowed;
-    adoptDevices(session.devices);
-    accountError = null;
-  } catch (error) {
-    accountError = accountMessage(error);
-  }
-}
-
-/**
- * Records what the account said, and trusts every machine it named.
- *
- * Trusting is the point of the whole arrangement: two machines signed in to the same account
- * are told about each other, which is what a six digit code used to do.
- *
- * @param {readonly {publicKey: string, label: string}[]} devices - What the account listed.
- * @returns {void}
- */
-function adoptDevices(devices: readonly { publicKey: string; label: string }[]): void {
-  const mine = prism.identityPublicKey();
-
-  prism.accountTrustDevices(devices.map((device) => device.publicKey));
-
-  accountDevices = devices.map((device) => ({
-    publicKey: device.publicKey,
-    label: device.label,
-    isThisMachine: device.publicKey === mine,
-  }));
-}
+const account = new Holder(prism, {
+  server: () => settings.accountServer,
+  rendezvous: () => settings.rendezvous,
+  setRendezvous: (address: string) => {
+    settings = { ...settings, rendezvous: address };
+    saveSettings(settings);
+  },
+});
 
 /**
  * Sends the stream's state to the window.
@@ -370,19 +238,10 @@ function registerHandlers(): void {
     window = createWindow();
   });
 
-  ipcMain.handle('account:state', async () => {
-    await resuming;
-    return accountState();
-  });
+  ipcMain.handle('account:state', () => account.view());
 
   ipcMain.handle('account:register', async (_event, email: string, password: string) => {
-    const client = accountClient();
-    if (!client) {
-      throw new Error('set an account server first');
-    }
-
-    accountError = null;
-    const enrolment = await client.register(email, password);
+    const enrolment = await account.register(email, password);
 
     // Drawn here rather than in the window, because the window may not load anything and this
     // process may. What crosses is a picture of a link the account server already sent.
@@ -393,67 +252,15 @@ function registerHandlers(): void {
 
   ipcMain.handle(
     'account:signIn',
-    async (_event, email: string, password: string, code: string, label: string) => {
-      const client = accountClient();
-      if (!client) {
-        throw new Error('set an account server first');
-      }
-
-      try {
-        const session = await client.signIn(email, password, code);
-        accountEmail = email;
-        relayAllowed = session.relayAllowed;
-
-        // This machine tells the account about itself before reading the list, so that the
-        // list it reads already has it in — otherwise the first sign-in on a machine shows
-        // every computer except the one in front of you.
-        const devices = await client.registerDevice(prism.identityPublicKey(), label);
-
-        adoptDevices(devices);
-        accountError = null;
-
-        // Kept only once both halves have worked. A token stored before this machine had been
-        // registered would come back to a list that does not have it in.
-        keepSession({ email, token: session.token });
-      } catch (error) {
-        accountEmail = null;
-        accountError = accountMessage(error);
-        throw new Error(accountError);
-      }
-
-      return accountState();
-    },
+    (_event, email: string, password: string, code: string, label: string) =>
+      account.signIn(email, password, code, label),
   );
 
-  ipcMain.handle('account:signOut', async () => {
-    await account?.signOut();
-    forgetSession();
-    accountEmail = null;
-    accountError = null;
+  ipcMain.handle('account:signOut', () => account.signOut());
 
-    // The machines stay trusted. They were paired, and signing out is not a statement that
-    // they are not yours.
-    accountDevices = [];
-
-    return accountState();
-  });
-
-  ipcMain.handle('account:forgetDevice', async (_event, publicKey: string) => {
-    const client = accountClient();
-    if (!client) {
-      throw new Error('set an account server first');
-    }
-
-    try {
-      adoptDevices(await client.forgetDevice(publicKey));
-      accountError = null;
-    } catch (error) {
-      accountError = accountMessage(error);
-      throw new Error(accountError);
-    }
-
-    return accountState();
-  });
+  ipcMain.handle('account:forgetDevice', (_event, publicKey: string) =>
+    account.forget(publicKey),
+  );
 
   ipcMain.handle('settings:get', () => settings);
 
@@ -574,12 +381,13 @@ async function captureWindow(path: string): Promise<void> {
 void app.whenReady().then(() => {
   settings = loadSettings();
   registerHandlers();
-  resuming = resumeAccount();
+  account.start();
 
   // A machine that has been through setup goes straight to the thing setup was for. One that
   // has not is asked the questions setup asks, once.
-  // A developer affordance: the page to open, so that a screenshot can be taken of a window
-  // this machine's own state would not otherwise show.
+  //
+  // A developer affordance too: the page to open, so that a screenshot can be taken of a
+  // window this machine's own state would not otherwise show.
   const forced = process.env['PRISM_WINDOW_PAGE'];
 
   if (forced === 'setup.html' || (!settings.setupDone && forced !== 'home.html')) {

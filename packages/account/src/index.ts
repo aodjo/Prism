@@ -29,6 +29,13 @@ export interface AccountSession {
   readonly devices: readonly AccountDevice[];
   /** Whether the relay may be used, which costs bandwidth somebody pays for. */
   readonly relayAllowed: boolean;
+  /**
+   * Where this account's machines should register for signalling, as `host:port`.
+   *
+   * Empty when the server does not say, which leaves machines to reach each other directly —
+   * possible on one network and not much use anywhere else.
+   */
+  readonly rendezvous: string;
 }
 
 /** What creating an account produced, and will not produce again. */
@@ -179,6 +186,7 @@ export class AccountClient {
       token: string;
       devices: { public_key: string; label: string; added_unix: number }[];
       relay_allowed: boolean;
+      rendezvous?: string;
     }>('POST', '/v1/sessions', { email, auth, code: Number(code) });
 
     this.token = body.token;
@@ -187,6 +195,7 @@ export class AccountClient {
       token: body.token,
       devices: body.devices.map(toDevice),
       relayAllowed: body.relay_allowed,
+      rendezvous: body.rendezvous ?? '',
     };
   }
 
@@ -213,6 +222,7 @@ export class AccountClient {
         email: string;
         devices: { public_key: string; label: string; added_unix: number }[];
         relay_allowed: boolean;
+        rendezvous?: string;
       }>('GET', '/v1/session');
 
       return {
@@ -220,6 +230,7 @@ export class AccountClient {
         token,
         devices: body.devices.map(toDevice),
         relayAllowed: body.relay_allowed,
+        rendezvous: body.rendezvous ?? '',
       };
     } catch (error) {
       if (error instanceof AccountError && error.status === 401) {

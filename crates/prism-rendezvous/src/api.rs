@@ -54,15 +54,22 @@ const TOKEN_LEN: usize = 32;
 pub struct Service {
     accounts: Mutex<Accounts>,
     sessions: Mutex<Sessions>,
+    /// Where signed-in machines should register, or empty when this server does not say.
+    advertise: String,
 }
 
 impl Service {
     /// Builds the service over an account store and a session store.
+    ///
+    /// `advertise` is handed to whoever signs in, so that neither end of a session has to be
+    /// told by hand where the signalling is. It is a string rather than an address because it
+    /// is a name as often as a number, and this server never resolves it — it only repeats it.
     #[must_use]
-    pub fn new(accounts: Accounts, sessions: Sessions) -> Arc<Self> {
+    pub fn new(accounts: Accounts, sessions: Sessions, advertise: String) -> Arc<Self> {
         Arc::new(Self {
             accounts: Mutex::new(accounts),
             sessions: Mutex::new(sessions),
+            advertise,
         })
     }
 
@@ -205,6 +212,7 @@ struct SessionBody {
     sealed_key: String,
     devices: Vec<Device>,
     relay_allowed: bool,
+    rendezvous: String,
 }
 
 /// What a token turns out to be worth, when a client already has one.
@@ -217,6 +225,7 @@ struct ResumedBody {
     sealed_key: String,
     devices: Vec<Device>,
     relay_allowed: bool,
+    rendezvous: String,
 }
 
 /// What adding a machine needs.
@@ -328,6 +337,7 @@ async fn sign_in(
         sealed_key,
         devices,
         relay_allowed,
+        rendezvous: service.advertise.clone(),
     }))
 }
 
@@ -350,6 +360,7 @@ async fn resume(
         sealed_key: account.sealed_key.clone(),
         devices: account.devices.clone(),
         relay_allowed: account.relay_allowed,
+        rendezvous: service.advertise.clone(),
     }))
 }
 

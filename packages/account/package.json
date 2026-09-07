@@ -7,6 +7,7 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
+    "./holder": "./dist/holder.js",
     "./stored-session": "./dist/stored-session.js"
   },
   "files": [

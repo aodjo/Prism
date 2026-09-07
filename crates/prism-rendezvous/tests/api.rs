@@ -36,7 +36,14 @@ fn service(label: &str) -> (axum::Router, std::path::PathBuf) {
     let accounts_path = path.clone();
     let sessions = Sessions::open(sessions_path, 0);
 
-    (routes(Service::new(accounts, sessions)), accounts_path)
+    (
+        routes(Service::new(
+            accounts,
+            sessions,
+            "rv.example.com:47300".to_owned(),
+        )),
+        accounts_path,
+    )
 }
 
 /// Sends one request and returns the status and the parsed body.
@@ -416,6 +423,9 @@ async fn a_token_kept_from_a_previous_run_still_says_who_it_belongs_to() {
     let (status, body) = send(&router, authed("GET", "/v1/session", &token, Value::Null)).await;
 
     assert_eq!(status, StatusCode::OK);
+    // Where to register comes back with the session, so that neither end of a stream has to be
+    // told by hand where the signalling is.
+    assert_eq!(body["rendezvous"], "rv.example.com:47300");
     assert_eq!(body["email"], "someone@example.com");
     assert_eq!(body["relay_allowed"], false);
     assert_eq!(body["devices"][0]["public_key"], key);
