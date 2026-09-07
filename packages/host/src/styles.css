@@ -1,0 +1,13 @@
+@import 'tailwindcss';
+@import '@prism/design/theme.css';
+
+/* Geist, subset to latin, as one variable file covering every weight the design uses. The
+   client bundles its own copy: a packaged application carries the font it loads rather than a
+   path into a sibling that will not be there. */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: block;
+  src: url('../renderer/fonts/geist-latin.woff2') format('woff2');
+}

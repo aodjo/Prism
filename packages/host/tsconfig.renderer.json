@@ -1,9 +1,12 @@
 {
   "compilerOptions": {
     // The panel runs in a browser, not in Node: no module system to speak of, no Node types,
-    // and a DOM. Compiling it with the main process's settings would let a Node import through
+    // and a DOM. Checking it with the main process's settings would let a Node import through
     // that fails only at run time, in a window with no console anybody is watching.
+    //
+    // Nothing is emitted here. esbuild bundles the panel; this is the type check alone.
     "target": "ES2023",
+    "jsx": "react-jsx",
     "module": "ES2022",
     "moduleResolution": "Bundler",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
@@ -13,10 +16,8 @@
     "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
-    "outDir": "renderer",
-    "rootDir": "src",
-    "sourceMap": true,
+    "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/panel.ts", "src/api.d.ts"]
+  "include": ["src/panel.tsx", "src/api.d.ts"]
 }
