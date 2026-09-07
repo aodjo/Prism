@@ -13,7 +13,9 @@ import {
   MAX_FIELD_SHARDS,
   Channel,
   ControlType,
+  FEEDBACK_FLAGS_RESERVED_MASK,
   FEEDBACK_PACKET_LEN,
+  FEEDBACK_WANTS_KEYFRAME,
   MAX_VIDEO_PAYLOAD,
   VIDEO_FLAGS_RESERVED_MASK,
   VIDEO_HEADER_LEN,
@@ -52,11 +54,15 @@ export interface VideoPacket {
  * `recvBitmap` drives long-term-reference invalidation on the encoder: the host encodes
  * against the newest frame the client has confirmed, so packet loss never forces an IDR
  * and never produces a visible hitch. `clientTsUs` doubles as a clock-sync sample.
+ *
+ * `flags` is how the client asks for the one thing it cannot recover on its own; see
+ * `FEEDBACK_WANTS_KEYFRAME`.
  */
 export interface FeedbackPacket {
   lastFrameId: number;
   recvBitmap: number;
   clientTsUs: bigint;
+  flags: number;
 }
 
 /**
@@ -184,7 +190,7 @@ export function decodeVideoPacket(bytes: Uint8Array): VideoPacket {
 }
 
 /**
- * Serialises a feedback packet into its fixed 17-byte layout.
+ * Serialises a feedback packet into its fixed 18-byte layout.
  *
  * Feedback is sent on every received frame and is the highest-priority traffic on the
  * return path; it is never batched, because a late ACK stalls the encoder's long-term
@@ -192,18 +198,26 @@ export function decodeVideoPacket(bytes: Uint8Array): VideoPacket {
  *
  * @param {FeedbackPacket} packet - Packet fields to encode.
  * @returns {Uint8Array} A freshly allocated buffer of exactly `FEEDBACK_PACKET_LEN` bytes.
- * @throws {PrismProtocolError} If any field is out of range for its wire type.
+ * @throws {PrismProtocolError} If any field is out of range for its wire type, or if
+ * `flags` sets a reserved bit.
  *
  * @example
  * const bytes = encodeFeedbackPacket({
- *   lastFrameId: 256, recvBitmap: 0xfffffff0, clientTsUs: 1_000_000n,
+ *   lastFrameId: 256, recvBitmap: 0xfffffff0, clientTsUs: 1_000_000n, flags: 0,
  * });
- * console.log(bytes.length); // 17
+ * console.log(bytes.length); // 18
  */
 export function encodeFeedbackPacket(packet: FeedbackPacket): Uint8Array {
   assertU32('lastFrameId', packet.lastFrameId);
   assertU32('recvBitmap', packet.recvBitmap);
   assertU64('clientTsUs', packet.clientTsUs);
+  assertU8('flags', packet.flags);
+
+  if ((packet.flags & FEEDBACK_FLAGS_RESERVED_MASK) !== 0) {
+    throw new PrismProtocolError(
+      `feedback flags ${packet.flags} set a reserved bit; only ${FEEDBACK_WANTS_KEYFRAME} is defined`,
+    );
+  }
 
   const bytes = new Uint8Array(FEEDBACK_PACKET_LEN);
   const view = new DataView(bytes.buffer);
@@ -212,6 +226,7 @@ export function encodeFeedbackPacket(packet: FeedbackPacket): Uint8Array {
   view.setUint32(1, packet.lastFrameId, true);
   view.setUint32(5, packet.recvBitmap, true);
   view.setBigUint64(9, packet.clientTsUs, true);
+  view.setUint8(17, packet.flags);
 
   return bytes;
 }
@@ -225,7 +240,8 @@ export function encodeFeedbackPacket(packet: FeedbackPacket): Uint8Array {
  *
  * @param {Uint8Array} bytes - Raw packet, already decrypted.
  * @returns {FeedbackPacket} The decoded receive report.
- * @throws {PrismProtocolError} If the channel tag is wrong or the length is not exactly `FEEDBACK_PACKET_LEN`.
+ * @throws {PrismProtocolError} If the channel tag is wrong, the length is not exactly
+ * `FEEDBACK_PACKET_LEN`, or a reserved flag bit is set.
  *
  * @example
  * const report = decodeFeedbackPacket(datagram);
@@ -243,11 +259,19 @@ export function decodeFeedbackPacket(bytes: Uint8Array): FeedbackPacket {
   }
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const flags = view.getUint8(17);
+
+  if ((flags & FEEDBACK_FLAGS_RESERVED_MASK) !== 0) {
+    throw new PrismProtocolError(
+      `feedback flags ${flags} set a reserved bit; only ${FEEDBACK_WANTS_KEYFRAME} is defined`,
+    );
+  }
 
   return {
     lastFrameId: view.getUint32(1, true),
     recvBitmap: view.getUint32(5, true),
     clientTsUs: view.getBigUint64(9, true),
+    flags,
   };
 }
 

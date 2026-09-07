@@ -6,10 +6,12 @@
 //! encoder.
 
 use prism_core::encode::{EncodedFrame, EncoderConfig};
+use prism_core::net::negotiate::Codec;
 
 #[test]
 fn a_frame_byte_budget_is_one_frame_at_the_target_rate() {
     let config = EncoderConfig {
+        codec: Codec::H264,
         width: 2560,
         height: 1440,
         fps: 120,
@@ -23,6 +25,7 @@ fn a_frame_byte_budget_is_one_frame_at_the_target_rate() {
 #[test]
 fn a_zero_frame_rate_has_no_budget_rather_than_dividing_by_zero() {
     let config = EncoderConfig {
+        codec: Codec::H264,
         width: 1920,
         height: 1080,
         fps: 0,
@@ -85,10 +88,12 @@ mod videotoolbox {
 
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
     use prism_core::encode::{EncoderConfig, START_CODE};
+    use prism_core::net::negotiate::Codec;
 
     /// A small session, kept modest so the test runs quickly on a shared CI machine.
     fn config() -> EncoderConfig {
         EncoderConfig {
+            codec: Codec::H264,
             width: 640,
             height: 360,
             fps: 30,

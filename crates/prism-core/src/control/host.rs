@@ -32,6 +32,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::net::handshake::{Identity, KEY_LEN};
+use crate::net::negotiate::{Codecs, H264, HostAbility};
 use crate::net::sender::SliceSender;
 
 /// How the host should behave.
@@ -61,6 +62,12 @@ pub struct HostConfig {
     pub parity_loss: Option<f32>,
     /// Whether to inject the client's input events into this machine.
     pub inject_input: bool,
+    /// Codecs this machine can encode.
+    ///
+    /// What the client offers is intersected with this and the best of what remains is used.
+    /// A host that names a codec it cannot actually produce agrees to a stream it then fails
+    /// to send, so this is a statement about the hardware rather than a wish.
+    pub codecs: Codecs,
     /// Send the machine's audio, or `None` to stream picture only.
     ///
     /// The value is the bitrate. A hundred and twenty-eight kilobits is transparent for
@@ -84,7 +91,53 @@ impl Default for HostConfig {
             parity_loss: Some(0.05),
             inject_input: true,
             audio_bitrate_bps: Some(128_000),
+            codecs: host_codecs(),
         }
+    }
+}
+
+/// Returns what this machine can encode.
+///
+/// A statement about the hardware, not a wish: a host that named a codec its encoder refuses
+/// would agree a session it then fails to send.
+///
+/// Public because the command line builds its configuration field by field rather than from
+/// the default, and a second answer to "what can this machine encode" is a second answer that
+/// drifts.
+#[must_use]
+pub fn host_codecs() -> Codecs {
+    #[cfg(target_os = "macos")]
+    {
+        // VideoToolbox encodes both in hardware on every Mac this runs on.
+        Codecs::none().with(H264).with(crate::net::negotiate::HEVC)
+    }
+
+    // NVENC reports HEVC and this project has measured that it offers it, but the encoder
+    // here is still configured through the H.264 half of NVENC's union — different offsets
+    // and a different structure. Advertising it before that is written would agree a session
+    // whose first frame fails.
+    #[cfg(not(target_os = "macos"))]
+    {
+        Codecs::none().with(H264)
+    }
+}
+
+/// What this machine is able and willing to send, as the negotiation sees it.
+///
+/// The codec is a real statement about this machine's hardware and is what the agreement turns
+/// on. The picture is not, yet: a host sends its screen at the size the screen is, and that
+/// size is not known until capture starts — which is after the handshake. So it claims no
+/// ceiling of its own and the agreement records the client's, which becomes binding the day
+/// there is a scaler to honour it with. Claiming a size here that capture then contradicted
+/// would be worse than claiming none.
+fn ability(config: &HostConfig) -> HostAbility {
+    HostAbility {
+        codecs: config.codecs,
+        width: u16::MAX,
+        height: u16::MAX,
+        fps: u16::try_from(config.fps).unwrap_or(u16::MAX),
+        bitrate_bps: config.bitrate_bps,
+        audio: config.audio_bitrate_bps.is_some(),
     }
 }
 
@@ -386,6 +439,7 @@ pub fn connect(
                     transport,
                     &keys.identity,
                     keys.allowed.clone(),
+                    ability(config),
                     config.patience,
                 )?,
                 config,
@@ -419,6 +473,7 @@ pub fn connect(
         transport.try_clone()?,
         &keys.identity,
         keys.allowed.clone(),
+        ability(config),
         DIRECT_PATIENCE,
     );
 
@@ -443,6 +498,7 @@ pub fn connect(
                 transport,
                 &keys.identity,
                 keys.allowed.clone(),
+                ability(config),
                 RELAYED_PATIENCE,
             )
             .map_err(|err| {
@@ -571,6 +627,17 @@ fn spawn_audio(
     Ok(None)
 }
 
+/// Returns the codec the two machines agreed on.
+///
+/// A session opened without negotiating — which the measurement paths do — falls back to
+/// H.264, the one codec every machine here can do.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn agreed_codec(sender: &SliceSender) -> crate::net::negotiate::Codec {
+    sender
+        .agreed()
+        .map_or(crate::net::negotiate::Codec::H264, |agreed| agreed.codec)
+}
+
 /// Records the counters a watcher reads, once per frame.
 ///
 /// Only compiled where there is a capture loop to call it. A helper left behind a platform
@@ -619,6 +686,9 @@ fn stream(
     .map_err(|err| err.to_string())?;
 
     let encoder_config = crate::encode::EncoderConfig {
+        // Whatever the two machines agreed. A host that encoded something else would send a
+        // stream the client cannot decode, and the symptom is a black window with no error.
+        codec: agreed_codec(&sender),
         width: capture.width(),
         height: capture.height(),
         fps: config.fps,
@@ -726,6 +796,7 @@ fn stream(
     let converter = Bgra2Nv12::new(device).map_err(|err| err.to_string())?;
 
     let encoder_config = crate::encode::EncoderConfig {
+        codec: agreed_codec(&sender),
         width,
         height,
         fps: config.fps,

@@ -37,7 +37,26 @@ pub const MAX_PLAINTEXT_SIZE: usize = MAX_PACKET_SIZE - SEAL_OVERHEAD;
 pub const MAX_VIDEO_PAYLOAD: usize = MAX_PLAINTEXT_SIZE - VIDEO_HEADER_LEN;
 
 /// Exact byte length of a feedback packet; it carries no variable-length payload.
-pub const FEEDBACK_PACKET_LEN: usize = 17;
+pub const FEEDBACK_PACKET_LEN: usize = 18;
+
+/// Feedback flag asking the host to send a keyframe.
+///
+/// Every frame this pipeline sends is a reference for the ones after it — no B-frames, nothing
+/// disposable — so a client that loses one decodes nothing until a keyframe arrives. Where the
+/// encoder supports long-term references the host can repair that without one; where it does
+/// not, and Apple's encoder does not, this is the only way back.
+///
+/// Set by the client when it has lost a frame or the decoder has refused one. The host rate
+/// limits its response, because a keyframe is a bitrate spike and a client that asked on every
+/// frame would turn the stream into a sequence of them.
+pub const FEEDBACK_WANTS_KEYFRAME: u8 = 1 << 0;
+
+/// Feedback flag bits this version does not define.
+///
+/// Refused rather than ignored: a peer setting one means it is asking for something this build
+/// does not know how to give, and pretending otherwise is how two versions come to disagree
+/// about what a session is doing.
+pub const FEEDBACK_FLAGS_RESERVED_MASK: u8 = !FEEDBACK_WANTS_KEYFRAME;
 
 /// Byte length of a control packet header: the channel tag and the message type.
 pub const CONTROL_HEADER_LEN: usize = 2;
@@ -443,6 +462,10 @@ pub struct FeedbackPacket {
     pub recv_bitmap: u32,
     /// Client clock when the report was produced, in microseconds.
     pub client_ts_us: u64,
+    /// What the client is asking for, if anything.
+    ///
+    /// See [`FEEDBACK_WANTS_KEYFRAME`].
+    pub flags: u8,
 }
 
 impl FeedbackPacket {
@@ -461,7 +484,12 @@ impl FeedbackPacket {
     ///
     /// ```
     /// # use prism_core::net::packet::{FeedbackPacket, FEEDBACK_PACKET_LEN};
-    /// let report = FeedbackPacket { last_frame_id: 256, recv_bitmap: 0xffff_fff0, client_ts_us: 1_000_000 };
+    /// let report = FeedbackPacket {
+    ///     last_frame_id: 256,
+    ///     recv_bitmap: 0xffff_fff0,
+    ///     client_ts_us: 1_000_000,
+    ///     flags: 0,
+    /// };
     /// let mut buf = [0u8; FEEDBACK_PACKET_LEN];
     /// assert_eq!(report.encode_into(&mut buf).unwrap(), FEEDBACK_PACKET_LEN);
     /// ```
@@ -477,6 +505,7 @@ impl FeedbackPacket {
         buf[1..5].copy_from_slice(&self.last_frame_id.to_le_bytes());
         buf[5..9].copy_from_slice(&self.recv_bitmap.to_le_bytes());
         buf[9..17].copy_from_slice(&self.client_ts_us.to_le_bytes());
+        buf[17] = self.flags;
 
         Ok(FEEDBACK_PACKET_LEN)
     }
@@ -498,9 +527,11 @@ impl FeedbackPacket {
     ///
     /// ```
     /// # use prism_core::net::packet::FeedbackPacket;
-    /// let bytes = [4, 0, 1, 0, 0, 0xf0, 0xff, 0xff, 0xff, 0x40, 0x42, 0x0f, 0, 0, 0, 0, 0];
+    /// # use prism_core::net::packet::FEEDBACK_WANTS_KEYFRAME;
+    /// let bytes = [4, 0, 1, 0, 0, 0xf0, 0xff, 0xff, 0xff, 0x40, 0x42, 0x0f, 0, 0, 0, 0, 0, 1];
     /// let report = FeedbackPacket::decode(&bytes).unwrap();
     /// assert_eq!(report.last_frame_id, 256);
+    /// assert_eq!(report.flags, FEEDBACK_WANTS_KEYFRAME);
     /// ```
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let channel = channel_of(bytes)?;
@@ -518,6 +549,11 @@ impl FeedbackPacket {
             });
         }
 
+        let flags = bytes[17];
+        if flags & FEEDBACK_FLAGS_RESERVED_MASK != 0 {
+            return Err(ProtocolError::ReservedFlags(flags));
+        }
+
         Ok(Self {
             last_frame_id: u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
             recv_bitmap: u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
@@ -525,6 +561,7 @@ impl FeedbackPacket {
                 bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
                 bytes[16],
             ]),
+            flags,
         })
     }
 }

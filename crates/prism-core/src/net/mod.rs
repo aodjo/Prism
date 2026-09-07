@@ -7,6 +7,7 @@ pub mod clocksync;
 pub mod fec;
 pub mod handshake;
 pub mod loss;
+pub mod negotiate;
 pub mod packet;
 pub mod packetize;
 pub mod pairing;

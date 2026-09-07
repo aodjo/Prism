@@ -23,6 +23,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use prism_core::identity;
 use prism_core::net::handshake::Identity;
+use prism_core::net::negotiate::{Codecs, H264, Offer};
 use prism_core::net::pairing::Pin;
 
 /// How the client trades latency against even presentation.
@@ -293,6 +294,30 @@ enum Command {
         /// Soft ceiling on bytes per slice; zero leaves slicing to the encoder.
         #[arg(long, default_value_t = 12_000)]
         slice_bytes: u32,
+
+        /// Also write the frames that went in, as raw NV12.
+        ///
+        /// What makes a quality comparison possible: two codecs at one bitrate can only be
+        /// told apart against the thing they were both trying to reproduce.
+        #[arg(long)]
+        source_out: Option<PathBuf>,
+
+        /// Encode HEVC rather than H.264.
+        ///
+        /// Worth about half the bitrate for the same picture, which is what makes it the
+        /// codec to want over the internet. This is how the claim gets checked against a
+        /// file rather than asserted.
+        #[arg(long)]
+        hevc: bool,
+
+        /// How many frames may be inside the encoder at once.
+        ///
+        /// One waits for each frame before painting the next, so the rate it measures is
+        /// paint and encode added together rather than overlapped. Raising it is what the
+        /// plan means by encoding asynchronously, and is how to tell a frame rate bounded by
+        /// the encoder's latency from one bounded by its throughput.
+        #[arg(long, default_value_t = 1)]
+        in_flight: usize,
     },
 }
 
@@ -338,6 +363,39 @@ fn main() -> ExitCode {
             eprintln!("prism-cli: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Returns what this machine can decode.
+///
+/// A statement about the hardware, not a wish: naming a codec that is not implemented would
+/// agree a session that never shows a frame, and the symptom is a black window with nothing
+/// reporting an error.
+fn client_codecs() -> Codecs {
+    #[cfg(target_os = "macos")]
+    {
+        Codecs::none()
+            .with(H264)
+            .with(prism_core::net::negotiate::HEVC)
+    }
+
+    // Every other platform decodes nothing yet, so it offers the floor and gets a session it
+    // can at least reassemble and measure.
+    #[cfg(not(target_os = "macos"))]
+    {
+        Codecs::none().with(H264)
+    }
+}
+
+/// Turns the encoder probe's flag into a codec.
+///
+/// Only the platform with an encoder to probe has a caller for it.
+#[cfg(target_os = "macos")]
+fn codec_of(hevc: bool) -> prism_core::net::negotiate::Codec {
+    if hevc {
+        prism_core::net::negotiate::Codec::Hevc
+    } else {
+        prism_core::net::negotiate::Codec::H264
     }
 }
 
@@ -435,6 +493,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     // The command line measures the video path. Audio would add a second
                     // stream to every number without being what any of them are about.
                     audio_bitrate_bps: None,
+                    // What this machine's encoder can actually produce, from the core rather
+                    // than restated here — a second answer to that question is a second answer
+                    // that drifts.
+                    codecs: prism_core::control::host::host_codecs(),
                 },
                 frame_bytes,
                 slices,
@@ -457,6 +519,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     run,
                     &keys,
                     prism_core::encode::EncoderConfig {
+                        // The measurement paths configure the encoder before a session
+                        // exists, so there is nothing agreed yet. H.264 is what both sides
+                        // advertise anyway.
+                        codec: prism_core::net::negotiate::Codec::H264,
                         width,
                         height,
                         fps,
@@ -472,6 +538,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 #[cfg(target_os = "windows")]
                 {
                     let encoder_config = prism_core::encode::EncoderConfig {
+                        // Replaced with whatever the session agreed, once it has opened.
+                        codec: prism_core::net::negotiate::Codec::H264,
                         width,
                         height,
                         fps,
@@ -519,6 +587,30 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 report_every,
                 in_flight,
                 decode: decode || display,
+                // What this machine can decode. H.264 alone until the VideoToolbox path is
+                // taught the others; naming a codec that is not implemented would agree a
+                // session that never shows a frame.
+                offer: Offer {
+                    // Both, on macOS: VideoToolbox decodes each in hardware, and the codec
+                    // that ends up being used is whichever the host can also produce.
+                    codecs: client_codecs(),
+                    // The window the stream will be shown in, when there is one. A host
+                    // sending more pixels than that is spending bitrate on pixels thrown
+                    // away before anybody sees them. A run with no window is measuring the
+                    // pipeline rather than watching it, and constrains nothing.
+                    max_width: if display {
+                        u16::try_from(window_width).unwrap_or(u16::MAX)
+                    } else {
+                        u16::MAX
+                    },
+                    max_height: if display {
+                        u16::try_from(window_height).unwrap_or(u16::MAX)
+                    } else {
+                        u16::MAX
+                    },
+                    max_fps: u16::MAX,
+                    audio: display,
+                },
                 identity: open_identity(identity.as_deref())?,
                 peer_key: identity::resolve_peer(
                     peer_key.as_deref(),
@@ -620,13 +712,19 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             fps,
             bitrate,
             slice_bytes,
+            source_out,
+            hevc,
+            in_flight,
         } => {
             #[cfg(target_os = "macos")]
             {
                 encode::run(encode::EncodeConfig {
                     out,
+                    source_out,
                     frames,
+                    in_flight,
                     encoder: prism_core::encode::EncoderConfig {
+                        codec: codec_of(hevc),
                         width,
                         height,
                         fps,
@@ -638,7 +736,18 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
 
             #[cfg(not(target_os = "macos"))]
             {
-                let _ = (out, frames, width, height, fps, bitrate, slice_bytes);
+                let _ = (
+                    out,
+                    frames,
+                    width,
+                    height,
+                    fps,
+                    bitrate,
+                    slice_bytes,
+                    source_out,
+                    hevc,
+                    in_flight,
+                );
                 Err("encoding is not implemented on this platform yet".into())
             }
         }

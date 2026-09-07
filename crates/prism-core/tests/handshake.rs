@@ -436,6 +436,23 @@ fn an_identity_does_not_print_its_private_key() {
 
 use prism_core::net::handshake::{Answer, Initiator, PeerPolicy, Responder};
 
+/// An answering callback that always replies with `payload`.
+///
+/// The real one decides what to answer from what the peer asked for. These tests are about the
+/// handshake rather than the decision, so they answer the same thing regardless.
+fn always(payload: &'static [u8]) -> impl FnMut(&[u8], &mut [u8]) -> Option<usize> {
+    move |_asked, out| {
+        out.get_mut(..payload.len())?.copy_from_slice(payload);
+
+        Some(payload.len())
+    }
+}
+
+/// An answering callback that refuses every peer.
+fn refuse() -> impl FnMut(&[u8], &mut [u8]) -> Option<usize> {
+    |_asked, _out| None
+}
+
 /// A reply buffer large enough for any handshake answer.
 const REPLY: usize = RESPONSE_OVERHEAD + MAX_HANDSHAKE_PAYLOAD;
 
@@ -453,7 +470,7 @@ fn the_drivers_complete_a_handshake_and_carry_their_payloads() {
     let mut reply = [0u8; REPLY];
     let Answer::Reply(len) = responder.accept(
         initiator.first_message(),
-        b"hello from the host",
+        &mut always(b"hello from the host"),
         &mut reply,
     ) else {
         panic!("the responder did not answer a genuine first message");
@@ -484,18 +501,22 @@ fn a_lost_answer_is_recovered_by_resending_the_same_first_message() {
     let mut responder = Responder::new(host, PeerPolicy::Any);
 
     let mut first_reply = [0u8; REPLY];
-    let Answer::Reply(first_len) =
-        responder.accept(initiator.first_message(), &[], &mut first_reply)
-    else {
+    let Answer::Reply(first_len) = responder.accept(
+        initiator.first_message(),
+        &mut always(b""),
+        &mut first_reply,
+    ) else {
         panic!("no answer");
     };
     let established = responder.take().expect("a session");
 
     // That answer is lost on the way back, so the initiator sends the same bytes again.
     let mut second_reply = [0u8; REPLY];
-    let Answer::Reply(second_len) =
-        responder.accept(initiator.first_message(), &[], &mut second_reply)
-    else {
+    let Answer::Reply(second_len) = responder.accept(
+        initiator.first_message(),
+        &mut always(b""),
+        &mut second_reply,
+    ) else {
         panic!("the retransmission went unanswered");
     };
 
@@ -539,7 +560,7 @@ fn a_peer_the_policy_does_not_admit_gets_silence() {
 
     let mut reply = [0u8; REPLY];
     assert_eq!(
-        responder.accept(initiator.first_message(), &[], &mut reply),
+        responder.accept(initiator.first_message(), &mut always(b""), &mut reply),
         Answer::Ignored
     );
     assert!(responder.take().is_none(), "an unpaired peer got a session");
@@ -561,7 +582,7 @@ fn one_paired_key_among_several_is_admitted() {
 
     let mut reply = [0u8; REPLY];
     assert!(matches!(
-        responder.accept(initiator.first_message(), &[], &mut reply),
+        responder.accept(initiator.first_message(), &mut always(b""), &mut reply),
         Answer::Reply(_)
     ));
 }
@@ -577,7 +598,7 @@ fn junk_never_gets_an_answer() {
 
     for length in [0usize, 1, 32, 95, 96, 400, 1200] {
         assert_eq!(
-            responder.accept(&vec![0x7fu8; length], &[], &mut reply),
+            responder.accept(&vec![0x7fu8; length], &mut always(b""), &mut reply),
             Answer::Ignored,
             "junk of {length} bytes drew a reply"
         );
@@ -597,7 +618,9 @@ fn a_second_different_handshake_does_not_displace_a_live_session() {
     let mut responder = Responder::new(host.clone(), PeerPolicy::Any);
 
     let mut reply = [0u8; REPLY];
-    let Answer::Reply(len) = responder.accept(initiator.first_message(), &[], &mut reply) else {
+    let Answer::Reply(len) =
+        responder.accept(initiator.first_message(), &mut always(b""), &mut reply)
+    else {
         panic!("no answer");
     };
     assert!(initiator.accept(&reply[..len]));
@@ -605,7 +628,7 @@ fn a_second_different_handshake_does_not_displace_a_live_session() {
 
     let second = Initiator::new(&intruder, host.public(), &[]).expect("starts");
     assert_eq!(
-        responder.accept(second.first_message(), &[], &mut reply),
+        responder.accept(second.first_message(), &mut always(b""), &mut reply),
         Answer::Ignored
     );
     assert!(responder.take().is_none());
@@ -650,7 +673,9 @@ fn an_answer_arriving_twice_does_not_produce_a_second_session() {
     let mut responder = Responder::new(host, PeerPolicy::Any);
 
     let mut reply = [0u8; REPLY];
-    let Answer::Reply(len) = responder.accept(initiator.first_message(), &[], &mut reply) else {
+    let Answer::Reply(len) =
+        responder.accept(initiator.first_message(), &mut always(b""), &mut reply)
+    else {
         panic!("no answer");
     };
 
@@ -661,4 +686,53 @@ fn an_answer_arriving_twice_does_not_produce_a_second_session() {
     );
     assert!(initiator.take().is_some());
     assert!(initiator.take().is_none());
+}
+
+#[test]
+fn a_peer_the_answer_refuses_gets_no_session() {
+    // What happens when the two machines share no codec: the handshake itself is fine, and the
+    // side that has to decide what the session would be decides there is not one. No reply, no
+    // session, and nothing said about why — the caller learns it timed out, which is what a
+    // scan would have learned anyway.
+    let client = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+
+    let initiator = Initiator::new(&client, host.public(), &[]).expect("starts");
+    let mut responder = Responder::new(host, PeerPolicy::Any);
+
+    let mut reply = [0u8; REPLY];
+
+    assert_eq!(
+        responder.accept(initiator.first_message(), &mut refuse(), &mut reply),
+        Answer::Ignored
+    );
+    assert!(responder.take().is_none(), "a refused peer got a session");
+}
+
+#[test]
+fn what_the_peer_asked_for_reaches_the_answer() {
+    // The whole reason the answer is a callback rather than a value. A responder that decided
+    // what to send before reading what was asked could not negotiate anything.
+    let client = Identity::generate().expect("generates");
+    let host = Identity::generate().expect("generates");
+
+    let initiator =
+        Initiator::new(&client, host.public(), b"the client can decode hevc").expect("starts");
+    let mut responder = Responder::new(host, PeerPolicy::Any);
+
+    let mut seen: Option<Vec<u8>> = None;
+    let mut answer = |asked: &[u8], out: &mut [u8]| {
+        seen = Some(asked.to_vec());
+        out[..4].copy_from_slice(b"hevc");
+
+        Some(4)
+    };
+
+    let mut reply = [0u8; REPLY];
+    assert!(matches!(
+        responder.accept(initiator.first_message(), &mut answer, &mut reply),
+        Answer::Reply(_)
+    ));
+
+    assert_eq!(seen.as_deref(), Some(&b"the client can decode hevc"[..]));
 }

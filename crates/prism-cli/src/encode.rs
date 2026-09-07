@@ -22,6 +22,22 @@ pub struct EncodeConfig {
     pub frames: u32,
     /// Encoder settings.
     pub encoder: EncoderConfig,
+    /// Where to also write the frames that went in, as raw NV12.
+    ///
+    /// The pattern is deterministic, so this is what makes a quality comparison possible at
+    /// all: two codecs at the same bitrate can only be told apart against the thing they were
+    /// both trying to reproduce.
+    pub source_out: Option<PathBuf>,
+    /// How many frames may be inside the encoder at once.
+    ///
+    /// One submits a frame and waits for it before painting the next, so the measured rate is
+    /// paint plus encode latency added together and the hardware idles through both. Anything
+    /// more overlaps them, which is what the plan means by encoding asynchronously, and is the
+    /// difference between a frame rate bounded by latency and one bounded by throughput.
+    ///
+    /// Each frame in flight is a source picture the encoder may still be reading, so this is
+    /// also how many of them have to exist.
+    pub in_flight: usize,
 }
 
 /// Encodes `config.frames` synthetic frames and writes the result to disk.
@@ -35,9 +51,20 @@ pub struct EncodeConfig {
 /// Returns an error if the encoder cannot be created, a frame cannot be encoded, or the
 /// output file cannot be written.
 pub fn run(config: EncodeConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let in_flight = config.in_flight.max(1);
     let mut encoder = VideoToolboxEncoder::new(config.encoder)?;
-    let mut source = Nv12Frame::new(config.encoder.width, config.encoder.height)?;
+    // One picture per frame that may be in flight. Reusing a single one would have the painter
+    // overwriting pixels the encoder has not finished reading, which does not fail — it
+    // produces a stream that decodes into frames nobody drew.
+    let mut sources = (0..in_flight)
+        .map(|_| Nv12Frame::new(config.encoder.width, config.encoder.height))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut out = BufWriter::new(File::create(&config.out)?);
+    let mut source_out = config
+        .source_out
+        .as_ref()
+        .map(|path| File::create(path).map(BufWriter::new))
+        .transpose()?;
 
     let mut latency = LatencyRecorder::new(4096);
     let mut bytes_written = 0u64;
@@ -66,15 +93,47 @@ pub fn run(config: EncodeConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     let frame_interval_us = 1_000_000 / u64::from(config.encoder.fps.max(1));
 
-    for frame_id in 0..config.frames {
-        crate::pattern::paint(&mut source, frame_id as usize)?;
+    // When each frame was submitted, so latency stays per-frame once several are in flight.
+    // The session forbids frame reordering and emits no B-frames, so what comes out is what
+    // went in, in order — which is the only reason a queue of start times lines up at all.
+    let mut submitted_at = std::collections::VecDeque::with_capacity(in_flight);
+    let mut submitted = 0u32;
 
-        let started = Instant::now();
-        encoder.encode(
-            source.pixel_buffer(),
-            u64::from(frame_id) * frame_interval_us,
-            frame_id == 0,
-        )?;
+    for frame_id in 0..config.frames {
+        while submitted < config.frames && (submitted - frame_id) < in_flight as u32 {
+            let source = &mut sources[submitted as usize % in_flight];
+            crate::pattern::paint(source, submitted as usize)?;
+
+            if let Some(writer) = source_out.as_mut() {
+                // Planar, exactly as the encoder will see it, and with the row padding removed
+                // so the file is what every tool means by NV12 at this size.
+                source.read(|luma, luma_stride, chroma, chroma_stride| {
+                    let width = config.encoder.width as usize;
+                    let height = config.encoder.height as usize;
+
+                    for y in 0..height {
+                        writer.write_all(&luma[y * luma_stride..y * luma_stride + width])?;
+                    }
+                    for y in 0..height / 2 {
+                        writer.write_all(&chroma[y * chroma_stride..y * chroma_stride + width])?;
+                    }
+
+                    Ok::<(), std::io::Error>(())
+                })??;
+            }
+
+            submitted_at.push_back(Instant::now());
+            encoder.encode(
+                source.pixel_buffer(),
+                u64::from(submitted) * frame_interval_us,
+                submitted == 0,
+            )?;
+            submitted += 1;
+        }
+
+        let started = submitted_at
+            .pop_front()
+            .expect("a frame was submitted for every one awaited");
 
         let Some(frame) = encoder.poll(Duration::from_secs(2)) else {
             return Err(format!("encoder produced nothing for frame {frame_id}").into());

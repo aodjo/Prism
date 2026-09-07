@@ -309,6 +309,7 @@ describe('feedback packet', () => {
         lastFrameId: vector.fields.lastFrameId,
         recvBitmap: vector.fields.recvBitmap,
         clientTsUs: BigInt(vector.fields.clientTsUs),
+        flags: vector.fields.flags,
       });
 
       expect(bytesToHex(bytes)).toBe(vector.hex);
@@ -321,6 +322,7 @@ describe('feedback packet', () => {
       expect(packet.lastFrameId).toBe(vector.fields.lastFrameId);
       expect(packet.recvBitmap).toBe(vector.fields.recvBitmap);
       expect(packet.clientTsUs).toBe(BigInt(vector.fields.clientTsUs));
+      expect(packet.flags).toBe(vector.fields.flags);
     });
   }
 });

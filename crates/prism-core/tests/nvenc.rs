@@ -238,6 +238,7 @@ fn the_whole_windows_path_produces_a_decodable_stream() {
     use prism_core::encode::EncoderConfig;
     use prism_core::encode::nv12::{Bgra2Nv12, Nv12Texture};
     use prism_core::encode::nvenc::NvencEncoder;
+    use prism_core::net::negotiate::Codec;
 
     const WIDTH: u32 = 1280;
     const HEIGHT: u32 = 720;
@@ -249,6 +250,7 @@ fn the_whole_windows_path_produces_a_decodable_stream() {
     let converter = Bgra2Nv12::new(&device).expect("the conversion shaders compile");
 
     let config = EncoderConfig {
+        codec: Codec::H264,
         width: WIDTH,
         height: HEIGHT,
         fps: 60,
@@ -317,6 +319,7 @@ fn the_first_frame_carries_the_parameter_sets_a_decoder_needs_to_start() {
     use prism_core::encode::EncoderConfig;
     use prism_core::encode::nv12::{Bgra2Nv12, Nv12Texture};
     use prism_core::encode::nvenc::NvencEncoder;
+    use prism_core::net::negotiate::Codec;
 
     const WIDTH: u32 = 1280;
     const HEIGHT: u32 = 720;
@@ -327,6 +330,7 @@ fn the_first_frame_carries_the_parameter_sets_a_decoder_needs_to_start() {
     let converter = Bgra2Nv12::new(&device).expect("the conversion shaders compile");
 
     let config = EncoderConfig {
+        codec: Codec::H264,
         width: WIDTH,
         height: HEIGHT,
         fps: 60,

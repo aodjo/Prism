@@ -28,6 +28,7 @@ use crate::net::handshake::{
     Answer, Established, Identity, Initiator, KEY_LEN, MAX_HANDSHAKE_PAYLOAD, PeerPolicy,
     RESPONSE_OVERHEAD, Responder,
 };
+use crate::net::negotiate::{Accept, HostAbility, OFFER_LEN, Offer, decide};
 use crate::net::packet::MAX_PACKET_SIZE;
 use crate::net::transport::UdpTransport;
 
@@ -53,6 +54,17 @@ pub const RELAYED_PATIENCE: Duration = Duration::from_secs(10);
 /// Largest reply the answering side will write.
 const REPLY_CAPACITY: usize = RESPONSE_OVERHEAD + MAX_HANDSHAKE_PAYLOAD;
 
+/// Reads what the host decided out of a finished handshake.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidData`] if the host answered with something this build
+/// cannot read, which means it is running a version this one cannot talk to.
+pub fn agreed(established: &Established) -> io::Result<Accept> {
+    Accept::decode(&established.peer_payload)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
 /// Runs the dialling side of a handshake against `peer`.
 ///
 /// The socket is left unconnected. That matters: if the handshake times out the caller may
@@ -72,10 +84,19 @@ pub fn dial(
     peer: SocketAddr,
     identity: &Identity,
     peer_key: &[u8; KEY_LEN],
+    offer: Offer,
     patience: Duration,
 ) -> io::Result<Established> {
-    let mut initiator =
-        Initiator::new(identity, peer_key, &[]).map_err(|err| io::Error::other(err.to_string()))?;
+    // What this machine can decode rides in the message that opens the session, so by the time
+    // the session is live it is already configured. Negotiating separately would put a second
+    // round trip in front of every connection to move twelve bytes.
+    let mut payload = [0u8; OFFER_LEN];
+    offer
+        .encode_into(&mut payload)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
+    let mut initiator = Initiator::new(identity, peer_key, &payload)
+        .map_err(|err| io::Error::other(err.to_string()))?;
 
     transport.set_read_timeout(Some(RETRY_INTERVAL))?;
 
@@ -108,6 +129,13 @@ pub fn dial(
                 .take()
                 .ok_or_else(|| io::Error::other("the handshake completed without keys"))?;
 
+            // The host's decision came back in the message that completed the handshake, so
+            // the session is configured before it carries anything. A host that answered with
+            // something this build cannot read is a host running a version this one cannot
+            // talk to, which is a refusal rather than a stream to attempt.
+            Accept::decode(&established.peer_payload)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
             // The answer proves the peer holds the key that was dialled, because only that
             // key could have read the first message. Checking it again here is cheap and
             // makes the guarantee local to the code that depends on it.
@@ -136,16 +164,28 @@ pub fn dial(
 pub struct Listener {
     responder: Responder,
     reply: Box<[u8; REPLY_CAPACITY]>,
+    /// What this machine is able and willing to send.
+    ability: HostAbility,
+    /// What was agreed, once a client has said what it can do.
+    agreed: Option<Accept>,
 }
 
 impl Listener {
     /// Creates a listener that will answer only the peers `policy` names.
     #[must_use]
-    pub fn new(identity: Identity, policy: PeerPolicy) -> Self {
+    pub fn new(identity: Identity, policy: PeerPolicy, ability: HostAbility) -> Self {
         Self {
             responder: Responder::new(identity, policy),
             reply: Box::new([0; REPLY_CAPACITY]),
+            ability,
+            agreed: None,
         }
+    }
+
+    /// Returns what was agreed, once a session has opened.
+    #[must_use]
+    pub fn agreed(&self) -> Option<Accept> {
+        self.agreed
     }
 
     /// Offers a datagram that did not open as a sealed packet.
@@ -163,16 +203,43 @@ impl Listener {
         datagram: &[u8],
         from: SocketAddr,
     ) -> io::Result<Option<Established>> {
-        let Answer::Reply(len) = self
+        // What the session will be is decided from what the client said it can do, and the
+        // decision travels in the same message that completes the handshake.
+        let ability = self.ability;
+        let mut decided = None;
+
+        let mut answer = |offered: &[u8], out: &mut [u8]| {
+            // A client this build cannot agree with gets silence, as any other message that
+            // cannot be acted on does: an explanation would tell a scan it found a host.
+            let agreed = Offer::decode(offered)
+                .and_then(|offer| decide(ability, offer))
+                .ok()?;
+
+            let written = agreed.encode_into(out).ok()?;
+            decided = Some(agreed);
+
+            Some(written)
+        };
+
+        let outcome = self
             .responder
-            .accept(datagram, &[], self.reply.as_mut_slice())
-        else {
+            .accept(datagram, &mut answer, self.reply.as_mut_slice());
+
+        let Answer::Reply(len) = outcome else {
             return Ok(None);
         };
 
         transport.send_to(&self.reply[..len], from)?;
 
-        Ok(self.responder.take())
+        let established = self.responder.take();
+        if established.is_some() {
+            // Recorded only once a session actually opened. A repeat of an already answered
+            // message replays the cached bytes without running the decision again, so this
+            // holds what those bytes said.
+            self.agreed = decided.or(self.agreed);
+        }
+
+        Ok(established)
     }
 }
 
@@ -210,9 +277,10 @@ pub fn serve(
     transport: &UdpTransport,
     identity: Identity,
     policy: PeerPolicy,
+    ability: HostAbility,
     patience: Duration,
 ) -> io::Result<(Established, SocketAddr, Listener)> {
-    let mut listener = Listener::new(identity, policy);
+    let mut listener = Listener::new(identity, policy, ability);
     let mut buf = [0u8; MAX_PACKET_SIZE];
 
     transport.set_read_timeout(Some(RETRY_INTERVAL))?;

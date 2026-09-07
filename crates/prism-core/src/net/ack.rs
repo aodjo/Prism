@@ -74,11 +74,12 @@ impl AckTracker {
     /// meaningful to say before then and a report claiming frame zero would be a lie the
     /// encoder would act on.
     #[must_use]
-    pub fn report(&self, client_ts_us: u64) -> Option<FeedbackPacket> {
+    pub fn report(&self, client_ts_us: u64, flags: u8) -> Option<FeedbackPacket> {
         Some(FeedbackPacket {
             last_frame_id: self.newest?,
             recv_bitmap: self.bitmap,
             client_ts_us,
+            flags,
         })
     }
 

@@ -22,10 +22,11 @@ use prism_core::clock::now_us;
 use prism_core::net::ack::AckTracker;
 use prism_core::net::clocksync::ClockSync;
 use prism_core::net::handshake::{Identity, KEY_LEN};
+use prism_core::net::negotiate::Offer;
 use prism_core::net::packet::{
     AudioPacket, CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
-    FEEDBACK_PACKET_LEN, FecPacket, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE,
-    VideoPacket, channel_of, control_type_of,
+    FEEDBACK_PACKET_LEN, FEEDBACK_WANTS_KEYFRAME, FecPacket, INPUT_PACKET_LEN, InputEvent,
+    InputPacket, MAX_PACKET_SIZE, VideoPacket, channel_of, control_type_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::secure::{SecureReceiver, SecureSender};
@@ -63,8 +64,12 @@ pub type PictureSink = SyncSender<()>;
 
 /// How many frames may wait for the decoder before the newest is dropped.
 ///
-/// Two, because a frame that has queued behind another has already missed its moment.
-const DECODE_QUEUE_DEPTH: usize = 2;
+/// Deeper than it looks like it needs to be, and deliberately. Every frame this pipeline
+/// sends is a reference for the ones after it, so a frame dropped here is not one late
+/// picture — it is every picture until the next keyframe. Eight covers a decoder that stalls
+/// for a hundred milliseconds, which is far longer than any stall measured here, and costs
+/// nothing when it does not.
+const DECODE_QUEUE_DEPTH: usize = 8;
 
 /// How often to ask the host for a clock synchronisation exchange.
 ///
@@ -179,6 +184,11 @@ pub struct ClientConfig {
     pub host: Option<SocketAddr>,
     /// Rendezvous server to find the host through.
     pub rendezvous: Option<SocketAddr>,
+    /// What this machine can decode and present.
+    ///
+    /// Sent in the message that opens the session, so the host has chosen a codec by the time
+    /// the session is live.
+    pub offer: Offer,
     /// Go through the relay without trying a direct path first.
     ///
     /// For measuring what relaying costs, and for a person on a path where punching succeeds
@@ -230,6 +240,18 @@ struct DecodeReport {
     errors: Vec<i32>,
 }
 
+/// Describes an agreed picture size for a person to read.
+///
+/// A size at the ceiling means neither side constrained the other, which reads as a number in
+/// the sixty-thousands and means nothing. Saying so is more use than printing it.
+fn describe_size(width: u16, height: u16) -> String {
+    if width >= u16::MAX - 1 && height >= u16::MAX - 1 {
+        return "whatever the host's screen is".to_string();
+    }
+
+    format!("up to {width}x{height}")
+}
+
 /// Works out where the host is: the address given, or the one the rendezvous server reports.
 ///
 /// The lookup happens on the session socket, because the address the server observes is only
@@ -255,6 +277,7 @@ fn open(
             host,
             &config.identity,
             &config.peer_key,
+            config.offer,
             RELAYED_PATIENCE,
         )?;
 
@@ -290,6 +313,7 @@ fn open(
             found.address,
             &config.identity,
             &config.peer_key,
+            config.offer,
             DIRECT_PATIENCE,
         ) {
             Ok(established) => {
@@ -314,6 +338,7 @@ fn open(
         relayed.address,
         &config.identity,
         &config.peer_key,
+        config.offer,
         RELAYED_PATIENCE,
     )?;
 
@@ -348,6 +373,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     // Nothing is read as a packet until the handshake completes, and it only completes with
     // the host pairing recorded: the first message is encrypted to that key and no other.
     let (established, host) = open(&transport, &config)?;
+    let agreed = prism_core::control::session::agreed(&established)?;
 
     // Connected only now that it is settled where the session runs. Doing it earlier would
     // have made the fallback to a relay impossible: a connected socket refuses to send
@@ -359,12 +385,26 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         "client: session established with {host} ({})",
         prism_core::identity::to_hex(&established.session.peer_static)
     );
+    println!(
+        "client: agreed {:?}, {}, {} fps, {:.1} Mbps, audio {}",
+        agreed.codec,
+        describe_size(agreed.width, agreed.height),
+        agreed.fps,
+        f64::from(agreed.bitrate_bps) / 1e6,
+        if agreed.audio { "on" } else { "off" },
+    );
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
     let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
-    let decoder = config
-        .decode
-        .then(|| spawn_decoder(frames_rx, recycle_tx, pictures, Arc::clone(&offset)));
+    let decoder = config.decode.then(|| {
+        spawn_decoder(
+            frames_rx,
+            recycle_tx,
+            pictures,
+            Arc::clone(&offset),
+            agreed.codec,
+        )
+    });
 
     let mut reassembler = FrameReassembler::new(config.in_flight);
     let mut arrival = LatencyRecorder::new(4096);
@@ -381,6 +421,12 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut acks = AckTracker::new();
     let mut reports_sent = 0u64;
     let mut reports_failed = 0u64;
+    // Set when this side has lost a frame, and cleared once the host has answered with a
+    // keyframe. Until then every report carries the request, because a single one can be lost
+    // and the stream stays black until one arrives.
+    let mut wants_keyframe = false;
+    let mut lost_frames = 0u64;
+    let mut queued_behind = 0u32;
 
     let mut sender = SecureSender::new(transport.try_clone()?, established.session.sealer);
     let mut receiver = SecureReceiver::new(transport.try_clone()?, established.session.opener);
@@ -478,6 +524,12 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             continue;
         }
 
+        if reassembler.stats().dropped_incomplete > lost_frames || behind > queued_behind {
+            lost_frames = reassembler.stats().dropped_incomplete;
+            queued_behind = behind;
+            wants_keyframe = true;
+        }
+
         let Some(frame) = reassembler.take_completed() else {
             continue;
         };
@@ -487,7 +539,20 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         // lost, and every microsecond it waits is a microsecond the encoder spends choosing
         // a reference it did not have to.
         acks.received(frame.frame_id);
-        if let Some(report) = acks.report(now_us()) {
+        // A frame that never completed is a frame every later one refers to. Nothing decodes
+        // again until a keyframe arrives, so this is where it is asked for. Read before the
+        // completed frame is taken, because taking it borrows the reassembler.
+        if frame.is_idr {
+            wants_keyframe = false;
+        }
+
+        let flags = if wants_keyframe {
+            FEEDBACK_WANTS_KEYFRAME
+        } else {
+            0
+        };
+
+        if let Some(report) = acks.report(now_us(), flags) {
             let mut buf = [0u8; FEEDBACK_PACKET_LEN];
             if report.encode_into(&mut buf).is_ok() {
                 match sender.send(&buf) {
@@ -591,6 +656,7 @@ fn spawn_decoder(
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
     offset: Arc<AtomicI64>,
+    codec: prism_core::net::negotiate::Codec,
 ) -> thread::JoinHandle<DecodeReport> {
     use prism_core::decode::DecodeError;
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
@@ -603,8 +669,15 @@ fn spawn_decoder(
     /// short enough that a stall cannot cascade.
     const POLL_TIMEOUT: Duration = Duration::from_millis(8);
 
+    // A developer affordance: writes exactly what is handed to the decoder, so a stream the
+    // decoder refuses can be put in front of an independent one. A bitstream that ffmpeg reads
+    // and this decoder does not is a different bug from one neither will touch, and there is no
+    // way to tell them apart without the bytes.
+    let mut dump =
+        std::env::var_os("PRISM_DUMP_BITSTREAM").and_then(|path| std::fs::File::create(path).ok());
+
     thread::spawn(move || {
-        let mut decoder = VideoToolboxDecoder::new();
+        let mut decoder = VideoToolboxDecoder::new(codec);
         let mut latency = LatencyRecorder::new(4096);
         let mut stage = LatencyRecorder::new(4096);
         let mut decoded = 0u32;
@@ -613,6 +686,11 @@ fn spawn_decoder(
 
         while let Ok(buf) = frames.recv() {
             let started = std::time::Instant::now();
+
+            if let Some(file) = dump.as_mut() {
+                use std::io::Write;
+                let _ = file.write_all(&buf.data);
+            }
 
             match decoder.decode(&buf.data, buf.capture_ts_us) {
                 Ok(()) | Err(DecodeError::NoParameterSets) => {}
@@ -663,8 +741,9 @@ fn spawn_decoder(
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
     offset: Arc<AtomicI64>,
+    codec: prism_core::net::negotiate::Codec,
 ) -> thread::JoinHandle<DecodeReport> {
-    let _ = (pictures, offset);
+    let _ = (pictures, offset, codec);
     thread::spawn(move || {
         while let Ok(buf) = frames.recv() {
             let _ = recycle.send(buf);

@@ -401,6 +401,7 @@ fn feedback_packets_round_trip_through_the_vectors() {
             last_frame_id: fields["lastFrameId"].as_u64().unwrap() as u32,
             recv_bitmap: fields["recvBitmap"].as_u64().unwrap() as u32,
             client_ts_us: u64_field(fields, "clientTsUs"),
+            flags: fields["flags"].as_u64().unwrap() as u8,
         };
 
         let mut buf = [0u8; FEEDBACK_PACKET_LEN];

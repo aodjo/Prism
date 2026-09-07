@@ -75,6 +75,21 @@ fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
         }
     );
 
+    if let Some(agreed) = opened.sender.agreed() {
+        println!(
+            "host: agreed {:?}, client shows {}, {} fps, {:.1} Mbps, audio {}",
+            agreed.codec,
+            if agreed.width >= u16::MAX - 1 {
+                "any size".to_string()
+            } else {
+                format!("up to {}x{}", agreed.width, agreed.height)
+            },
+            agreed.fps,
+            f64::from(agreed.bitrate_bps) / 1e6,
+            if agreed.audio { "on" } else { "off" },
+        );
+    }
+
     Ok(opened.sender)
 }
 
@@ -137,6 +152,10 @@ pub fn run(run: HostRun, keys: &HostKeys) -> io::Result<()> {
         // producing less. Sending a shorter prefix of each slice rather than rebuilding it
         // keeps the frame path free of allocation.
         let budget = frame_budget(sender.target_bps(), config.fps, run.frame_bytes);
+        // No encoder here, so nothing actually changes about the bytes. The flag is still
+        // answered, because this is the path the loss gate runs on and a request that goes
+        // unanswered here would look like the client asking into the void.
+        let is_idr = frame_id == 0 || sender.take_keyframe_request();
 
         for (slice_id, slice) in slices.iter().enumerate() {
             let bytes = slice_prefix(slice, slice_id, slices.len(), budget);
@@ -145,7 +164,7 @@ pub fn run(run: HostRun, keys: &HostKeys) -> io::Result<()> {
                 slice_id as u16,
                 bytes,
                 capture_ts_us,
-                frame_id == 0,
+                is_idr,
                 slice_id + 1 == slices.len(),
             )?;
         }
@@ -183,8 +202,25 @@ pub fn run_encoded(
     if run.loss_ppm > 0 {
         sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
+    // Built for the codec the session agreed, not the one the command line guessed. A host
+    // that encodes one thing and says another produces a client that decodes nothing and
+    // reports no error, because a decoder looking for parameter sets it will never see has
+    // nothing to complain about.
+    let encoder_config = prism_core::encode::EncoderConfig {
+        codec: sender
+            .agreed()
+            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+                agreed.codec
+            }),
+        ..encoder_config
+    };
+
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
-    let mut picture = Nv12Frame::new(encoder_config.width, encoder_config.height)?;
+    // One picture per frame that may be in flight. Painting into a buffer the encoder has not
+    // finished reading does not fail; it produces a stream of frames nobody drew.
+    let mut pictures = (0..ENCODE_IN_FLIGHT)
+        .map(|_| Nv12Frame::new(encoder_config.width, encoder_config.height))
+        .collect::<Result<Vec<_>, _>>()?;
     let interval = frame_interval(config.fps);
 
     println!(
@@ -203,6 +239,13 @@ pub fn run_encoded(
 
     let start = Instant::now();
     let mut dropped = 0u32;
+    let mut emitted = 0u32;
+
+    // The first picture is painted before the loop, so that inside it a frame is always
+    // submitted before anything else happens. A frame painted in the same breath as it is
+    // submitted holds the previous one — already encoded, already waiting — behind a paint
+    // it has nothing to do with, and that shows up as latency in every frame of the run.
+    crate::pattern::paint(&mut pictures[0], 0)?;
 
     for frame_id in 0..budget {
         pace(start, interval, frame_id);
@@ -210,31 +253,42 @@ pub fn run_encoded(
 
         follow_target(&mut encoder, &sender);
 
-        crate::pattern::paint(&mut picture, frame_id as usize)?;
+        // Taken here rather than at the paint, because the paint happened an interval ago and
+        // the wait since was this harness pacing itself, not a camera holding a picture. What
+        // the number has to describe is everything from the encoder onwards.
         let capture_ts_us = now_us();
-        encoder.encode(picture.pixel_buffer(), capture_ts_us, frame_id == 0)?;
+        let force_idr = frame_id == 0 || sender.take_keyframe_request();
+        encoder.encode(
+            pictures[frame_id as usize % ENCODE_IN_FLIGHT].pixel_buffer(),
+            capture_ts_us,
+            force_idr,
+        )?;
 
-        let Some(frame) = encoder.poll(Duration::from_millis(200)) else {
-            dropped += 1;
-            continue;
-        };
+        // Whatever finished while this frame was waiting its turn goes out now, immediately
+        // after the submission that keeps the encoder busy through it.
+        if frame_id + 1 >= ENCODE_IN_FLIGHT as u32 {
+            if !drain_one(&mut encoder, &mut sender, emitted)? {
+                dropped += 1;
+            }
+            emitted += 1;
+        }
 
-        let capture_ts_us = frame.pts_us;
-        sender.note_capture(frame_id, capture_ts_us);
-        let is_idr = frame.is_idr;
-        let last = frame.slices.len() - 1;
-
-        for slice_id in 0..frame.slices.len() {
-            let data = frame.slice(slice_id).expect("slice index is in range");
-            sender.send_slice(
-                frame_id,
-                slice_id as u16,
-                data,
-                capture_ts_us,
-                is_idr,
-                slice_id == last,
+        // The next picture, painted while the encoder works on this one. Its buffer is the
+        // one the frame just drained was using, which is why the drain comes first.
+        let next = frame_id + 1;
+        if next < budget {
+            crate::pattern::paint(
+                &mut pictures[next as usize % ENCODE_IN_FLIGHT],
+                next as usize,
             )?;
         }
+    }
+
+    for _ in 1..ENCODE_IN_FLIGHT {
+        if !drain_one(&mut encoder, &mut sender, emitted)? {
+            dropped += 1;
+        }
+        emitted += 1;
     }
 
     report(&sender, start.elapsed());
@@ -243,6 +297,66 @@ pub fn run_encoded(
     }
 
     Ok(())
+}
+
+/// How many frames may be inside the encoder at once.
+///
+/// Two, and the second one is worth a great deal. Submitting a frame and waiting for it
+/// before painting the next leaves the hardware idle through the paint and the paint idle
+/// through the encode, so the achievable rate is the two added together. Measured at 1440p
+/// with HEVC on Apple Silicon: one in flight encodes 600 frames in 9.05 s (66 fps), two in
+/// 3.05 s (197 fps), and the per-frame latency does not move (p50 6.14 → 6.17 ms).
+///
+/// It stops at two because the frames beyond that are queued rather than overlapped, and a
+/// queue inside the encoder is latency with no name on it: three in flight costs 3.83 ms of
+/// p50 for 6 fps, and six costs 15 ms for 59. That is the same trade the one-frame VBV
+/// exists to refuse.
+#[cfg(target_os = "macos")]
+const ENCODE_IN_FLIGHT: usize = 2;
+
+/// Sends one finished frame, and says whether there was one.
+///
+/// Split out because the loop drains one frame per iteration and then drains what is still
+/// inside the encoder after the last submission, and those must send identically — a tail
+/// that packetised differently from the body would be a bug visible only in the last frames
+/// of a run.
+///
+/// # Errors
+///
+/// Returns an error if the socket cannot be written to.
+#[cfg(target_os = "macos")]
+fn drain_one(
+    encoder: &mut prism_core::encode::videotoolbox::VideoToolboxEncoder,
+    sender: &mut SliceSender,
+    frame_id: u32,
+) -> io::Result<bool> {
+    // The session forbids frame reordering and emits no B-frames, so the nth frame out is the
+    // nth frame in and the caller's counter is the right identifier for it. A poll that times
+    // out means the encoder has stopped rather than fallen behind — two hundred milliseconds
+    // is thirty times the measured latency — so the count moves on rather than waiting.
+    let Some(frame) = encoder.poll(Duration::from_millis(200)) else {
+        return Ok(false);
+    };
+
+    let capture_ts_us = frame.pts_us;
+    let is_idr = frame.is_idr;
+    let last = frame.slices.len() - 1;
+
+    sender.note_capture(frame_id, capture_ts_us);
+
+    for slice_id in 0..frame.slices.len() {
+        let data = frame.slice(slice_id).expect("slice index is in range");
+        sender.send_slice(
+            frame_id,
+            slice_id as u16,
+            data,
+            capture_ts_us,
+            is_idr,
+            slice_id == last,
+        )?;
+    }
+
+    Ok(true)
 }
 
 /// Captures the screen, encodes it, and sends the result.
@@ -279,7 +393,19 @@ pub fn run_captured(
     })?;
 
     let (width, height) = (capture.width(), capture.height());
+
+    // The session opens before the encoder is built, because what the encoder is built for is
+    // what the two machines agreed. Building it first and hoping would mean sending a stream
+    // the client cannot decode, whose symptom is a black window with nothing reporting an
+    // error anywhere.
+    let mut sender = open(run.session.clone(), keys)?;
+
     let encoder_config = prism_core::encode::EncoderConfig {
+        codec: sender
+            .agreed()
+            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+                agreed.codec
+            }),
         width,
         height,
         fps: config.fps,
@@ -287,8 +413,20 @@ pub fn run_captured(
         max_slice_bytes: bitrate_bps / 8 / config.fps.max(1) / 4,
     };
 
+    // Built for the codec the session agreed, not the one the command line guessed. A host
+    // that encodes one thing and says another produces a client that decodes nothing and
+    // reports no error, because a decoder looking for parameter sets it will never see has
+    // nothing to complain about.
+    let encoder_config = prism_core::encode::EncoderConfig {
+        codec: sender
+            .agreed()
+            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+                agreed.codec
+            }),
+        ..encoder_config
+    };
+
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
-    let mut sender = open(run.session.clone(), keys)?;
     // Pacing, the return path and parity are set up by the core when the session opens.
     // Loss injection is not: it exists only to make a measurement reproducible.
     if run.loss_ppm > 0 {
@@ -303,7 +441,13 @@ pub fn run_captured(
 
     let start = Instant::now();
     let mut sent_frames = 0u32;
+    let mut submitted = 0u32;
+    let mut dropped = 0u32;
     let mut idle = 0u32;
+    // Captured frames the encoder may still be reading. Holding them is the whole reason
+    // this is a queue: the compositor's buffer belongs to the frame it came with, and
+    // releasing it while the encoder is mid-frame is a use-after-free with a picture in it.
+    let mut in_flight = std::collections::VecDeque::with_capacity(ENCODE_IN_FLIGHT);
 
     while sent_frames < budget {
         let Some(captured) = capture.poll(Duration::from_millis(500)) else {
@@ -318,31 +462,28 @@ pub fn run_captured(
         follow_target(&mut encoder, &sender);
 
         let capture_ts_us = captured.capture_ts_us;
-        encoder.encode(captured.pixel_buffer(), capture_ts_us, sent_frames == 0)?;
+        let force_idr = submitted == 0 || sender.take_keyframe_request();
+        encoder.encode(captured.pixel_buffer(), capture_ts_us, force_idr)?;
+        in_flight.push_back(captured);
+        submitted += 1;
 
-        let Some(frame) = encoder.poll(Duration::from_millis(200)) else {
+        // Nothing has finished yet while the pipeline is still filling.
+        if in_flight.len() < ENCODE_IN_FLIGHT {
             continue;
-        };
-
-        sender.note_capture(sent_frames, capture_ts_us);
-        let is_idr = frame.is_idr;
-        let last = frame.slices.len() - 1;
-        for slice_id in 0..frame.slices.len() {
-            let data = frame.slice(slice_id).expect("slice index is in range");
-            sender.send_slice(
-                sent_frames,
-                slice_id as u16,
-                data,
-                frame.pts_us,
-                is_idr,
-                slice_id == last,
-            )?;
         }
 
+        if !drain_one(&mut encoder, &mut sender, sent_frames)? {
+            dropped += 1;
+        }
+        in_flight.pop_front();
         sent_frames += 1;
     }
 
     report(&sender, start.elapsed());
+    if dropped > 0 {
+        println!("host: {dropped} frames produced nothing within the encode deadline");
+    }
+
     Ok(())
 }
 
@@ -494,7 +635,16 @@ pub fn run_windows(
     let target = Nv12Texture::new(device, width, height)?;
     let converter = Bgra2Nv12::new(device)?;
 
+    // The session opens before the encoder is built, because what the encoder is built for is
+    // what the two machines agreed.
+    let mut sender = open(run.session.clone(), keys)?;
+
     let encoder_config = prism_core::encode::EncoderConfig {
+        codec: sender
+            .agreed()
+            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+                agreed.codec
+            }),
         width,
         height,
         ..encoder_config
@@ -504,8 +654,6 @@ pub fn run_windows(
     // end of this function.
     let mut encoder =
         unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), encoder_config) }?;
-
-    let mut sender = open(run.session.clone(), keys)?;
     // Pacing, the return path and parity are set up by the core when the session opens.
     // Loss injection is not: it exists only to make a measurement reproducible.
     if run.loss_ppm > 0 {
@@ -543,7 +691,8 @@ pub fn run_windows(
         follow_target_nvenc(&mut encoder, &sender);
 
         converter.convert(&bgra, &target)?;
-        let frame = encoder.encode(capture_ts_us, sent == 0)?;
+        let force_idr = sent == 0 || sender.take_keyframe_request();
+        let frame = encoder.encode(capture_ts_us, force_idr)?;
 
         let last = frame.slices.len().saturating_sub(1);
         for index in 0..frame.slices.len() {

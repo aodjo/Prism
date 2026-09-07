@@ -26,9 +26,30 @@ mod macos {
             Err(err) => panic!("could not create an injector: {err}"),
         };
 
-        // Park the pointer against the top left first. Movement is clamped to the display, so
-        // a test that starts wherever the pointer happens to be fails whenever it happens to
-        // be near an edge.
+        // Attempted several times because the pointer is shared with whoever is using the
+        // machine. A person moving the mouse mid-test is interference, not a failure of
+        // injection, and one clean observation is all the property needs.
+        let mut last = String::new();
+        for _ in 0..ATTEMPTS {
+            match attempt(&mut injector) {
+                Ok(()) => return,
+                Err(why) => last = why,
+            }
+        }
+
+        panic!("the pointer never followed an injected move: {last}");
+    }
+
+    /// How many times to try before calling it a failure.
+    const ATTEMPTS: u32 = 5;
+
+    /// Parks the pointer, moves it by a known amount, and checks it went there.
+    ///
+    /// Returns what went wrong rather than panicking, so the caller can try again: anything
+    /// else touching the pointer at the wrong moment fails this once and not twice.
+    fn attempt(injector: &mut MacInjector) -> Result<(), String> {
+        // Movement is clamped to the display, so a run that started wherever the pointer
+        // happened to be would fail whenever it happened to be near an edge.
         injector
             .inject(InputEvent::MouseMove {
                 dx: i16::MIN,
@@ -36,39 +57,53 @@ mod macos {
             })
             .expect("a plain move is always injectable");
 
+        if !wait_until_landed(injector) {
+            return Err("the pointer never reached the corner it was parked at".into());
+        }
+
         let (start_x, start_y) = injector.position();
 
         injector
             .inject(InputEvent::MouseMove { dx: 60, dy: 40 })
             .expect("a plain move is always injectable");
 
-        // Posting is asynchronous, so the pointer needs a moment to catch up before it is
-        // fair to ask where it is. How long is not knowable — under a loaded machine
-        // running every other test binary at once it is far longer than on an idle one —
-        // so this waits for the answer rather than guessing at a duration.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !injector.injection_is_landing() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        if !wait_until_landed(injector) {
+            return Err("the pointer did not follow the move".into());
         }
 
-        assert!(
-            injector.injection_is_landing(),
-            "the pointer did not follow the injected move"
-        );
-
         let (moved_x, moved_y) = injector.position();
-        assert!(
-            (moved_x - start_x - 60.0).abs() < 1.0,
-            "horizontal movement was applied"
-        );
-        assert!(
-            (moved_y - start_y - 40.0).abs() < 1.0,
-            "vertical movement was applied"
-        );
+
+        if (moved_x - start_x - 60.0).abs() >= 1.0 || (moved_y - start_y - 40.0).abs() >= 1.0 {
+            return Err(format!(
+                "the pointer went from ({start_x}, {start_y}) to ({moved_x}, {moved_y})"
+            ));
+        }
 
         injector
             .inject(InputEvent::MouseMove { dx: -60, dy: -40 })
             .expect("putting the pointer back is the same operation");
+
+        Ok(())
+    }
+
+    /// Waits until the system pointer agrees with where the injector thinks it put it.
+    ///
+    /// `CGEventPost` queues an event rather than applying it, so the two disagree for a while
+    /// after every injection — for longer on a machine running every test binary at once than
+    /// on an idle one. Waiting for them to agree is waiting for the outcome; waiting for a
+    /// duration is guessing at it, and the guess is what made this test flake.
+    fn wait_until_landed(injector: &MacInjector) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
+        while std::time::Instant::now() < deadline {
+            if injector.injection_is_landing() {
+                return true;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        injector.injection_is_landing()
     }
 
     #[test]

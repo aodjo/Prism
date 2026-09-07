@@ -18,7 +18,9 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
 use objc2_core_foundation::{CFRetained, CFString, CFType, kCFBooleanFalse, kCFBooleanTrue};
-use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags, kCMVideoCodecType_H264};
+use objc2_core_media::{
+    CMSampleBuffer, CMTime, CMTimeFlags, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
+};
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
     CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
@@ -32,9 +34,11 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
+    kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
 use crate::encode::{EncodeError, EncodedFrame, EncoderConfig};
+use crate::net::negotiate::Codec;
 
 /// Four character code for the NV12 pixel format VideoToolbox encodes natively.
 const NV12: u32 = u32::from_be_bytes(*b"420v");
@@ -168,6 +172,77 @@ impl Nv12Frame {
     ///
     /// Panics if CoreVideo reports a null plane address for a buffer it locked, which
     /// would mean the buffer is not the planar format it was created as.
+    /// Hands the frame's two planes to `read`, without changing them.
+    ///
+    /// The same locking and plane arithmetic as [`Nv12Frame::fill`], and used for the same
+    /// reason in reverse: writing the frames that went in alongside the stream that came out
+    /// is what makes two codecs comparable against the thing they were both reproducing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::InputBuffer`] if the buffer cannot be locked, and whatever
+    /// `read` returned otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if CoreVideo reports a null plane address for a buffer it locked.
+    pub fn read<T>(
+        &self,
+        read: impl FnOnce(&[u8], usize, &[u8], usize) -> T,
+    ) -> Result<T, EncodeError> {
+        // SAFETY: the buffer is alive for the duration of this call, and the lock is released
+        // before returning on every path.
+        let status =
+            unsafe { CVPixelBufferLockBaseAddress(&self.buffer, CVPixelBufferLockFlags::ReadOnly) };
+        if status != 0 {
+            return Err(EncodeError::InputBuffer {
+                reason: "could not lock the pixel buffer",
+            });
+        }
+
+        // SAFETY: the buffer is locked, so the plane pointers are valid until it is unlocked.
+        // NV12 has exactly two planes, the luma one covering `height` rows and the chroma one
+        // covering `height / 2`, so the lengths below are within the allocation.
+        let out = unsafe {
+            let y_ptr = CVPixelBufferGetBaseAddressOfPlane(&self.buffer, 0).cast::<u8>();
+            let y_stride = CVPixelBufferGetBytesPerRowOfPlane(&self.buffer, 0);
+            let uv_ptr = CVPixelBufferGetBaseAddressOfPlane(&self.buffer, 1).cast::<u8>();
+            let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(&self.buffer, 1);
+
+            assert!(
+                !y_ptr.is_null() && !uv_ptr.is_null(),
+                "CoreVideo locked a buffer and then reported a null plane"
+            );
+
+            let height = self.height as usize;
+            let luma = core::slice::from_raw_parts(y_ptr, y_stride * height);
+            let chroma = core::slice::from_raw_parts(uv_ptr, uv_stride * height / 2);
+
+            read(luma, y_stride, chroma, uv_stride)
+        };
+
+        // SAFETY: the buffer was locked above with the same flags.
+        unsafe {
+            let _ = CVPixelBufferUnlockBaseAddress(&self.buffer, CVPixelBufferLockFlags::ReadOnly);
+        }
+
+        Ok(out)
+    }
+
+    /// Locks the frame and hands its two planes to `fill`.
+    ///
+    /// `fill` receives the luma plane with its stride and the interleaved chroma plane
+    /// with its stride. Strides are usually larger than the width because CoreVideo
+    /// aligns rows, so writing row by row rather than as one block is required.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::InputBuffer`] if the buffer cannot be locked.
+    ///
+    /// # Panics
+    ///
+    /// Panics if CoreVideo reports a null plane address for a buffer it locked, which
+    /// would mean the buffer is not the planar format it was created as.
     pub fn fill(
         &mut self,
         fill: impl FnOnce(&mut [u8], usize, &mut [u8], usize),
@@ -215,6 +290,14 @@ impl Nv12Frame {
 /// State the encoder callback writes into, reached through the session's ref con.
 #[derive(Debug)]
 struct CallbackContext {
+    /// Which codec this session encodes.
+    ///
+    /// Held here because the callback runs on VideoToolbox's own thread, where the encoder is
+    /// not reachable — and it changes how a NAL unit is read: H.264 puts its type in the low
+    /// five bits of the first byte, HEVC in bits one to six, and its parameter sets are three
+    /// rather than two. A callback that assumed one and got the other produces a stream no
+    /// decoder will take.
+    codec: Codec,
     output: SyncSender<EncodedFrame>,
     spare: Mutex<Vec<EncodedFrame>>,
     /// Frames handed back so far, which is what decides when parameter sets are repeated.
@@ -247,6 +330,7 @@ impl VideoToolboxEncoder {
     pub fn new(config: EncoderConfig) -> Result<Self, EncodeError> {
         let (tx, rx) = sync_channel(OUTPUT_QUEUE_DEPTH);
         let context = Box::new(CallbackContext {
+            codec: config.codec,
             output: tx,
             spare: Mutex::new(Vec::new()),
             frames: AtomicU64::new(0),
@@ -263,7 +347,20 @@ impl VideoToolboxEncoder {
                 None,
                 config.width as i32,
                 config.height as i32,
-                kCMVideoCodecType_H264,
+                match config.codec {
+                    Codec::H264 => kCMVideoCodecType_H264,
+                    Codec::Hevc => kCMVideoCodecType_HEVC,
+                    // Apple encodes no AV1 in hardware on any machine this runs on, and the
+                    // negotiation should never have chosen it. Refusing here rather than
+                    // starting a session that produces nothing is what turns a silent black
+                    // window into a session that fails to open.
+                    Codec::Av1 => {
+                        return Err(EncodeError::SessionCreate {
+                            reason: "AV1 is not encodable by VideoToolbox",
+                            status: 0,
+                        });
+                    }
+                },
                 None,
                 None,
                 None,
@@ -426,10 +523,18 @@ impl VideoToolboxEncoder {
             self.set_property(
                 "ProfileLevel",
                 kVTCompressionPropertyKey_ProfileLevel,
-                Some(kVTProfileLevel_H264_High_AutoLevel.as_ref()),
+                Some(match self.config.codec {
+                    Codec::Hevc => kVTProfileLevel_HEVC_Main_AutoLevel.as_ref(),
+                    // High rather than Baseline: every decoder this streams to reads it, and
+                    // it is worth a few percent of bitrate for the same picture.
+                    _ => kVTProfileLevel_H264_High_AutoLevel.as_ref(),
+                }),
             )?;
 
-            if self.config.max_slice_bytes == 0 {
+            // There is no HEVC equivalent of the H.264 slice ceiling, and the H.264 one is
+            // refused on Apple Silicon anyway. Both mean the same thing here: this encoder
+            // emits whole frames, and transmission cannot start before one is finished.
+            if self.config.max_slice_bytes == 0 || self.config.codec != Codec::H264 {
                 return Ok(false);
             }
 
@@ -695,7 +800,8 @@ unsafe extern "C-unwind" fn output_callback(
     let keep_parameter_sets = nth % PARAMETER_SET_INTERVAL == 0;
 
     // SAFETY: reading the buffer's contents is valid for the lifetime of this call.
-    if unsafe { fill_from_sample(&mut frame, sample, keep_parameter_sets) }.is_none() {
+    if unsafe { fill_from_sample(&mut frame, sample, context.codec, keep_parameter_sets) }.is_none()
+    {
         return;
     }
 
@@ -717,6 +823,7 @@ unsafe extern "C-unwind" fn output_callback(
 unsafe fn fill_from_sample(
     frame: &mut EncodedFrame,
     sample: &CMSampleBuffer,
+    codec: Codec,
     keep_parameter_sets: bool,
 ) -> Option<()> {
     // SAFETY: the sample is live, so its timestamp and buffers are readable.
@@ -746,8 +853,9 @@ unsafe fn fill_from_sample(
 
     // SAFETY: the sample is live and carries a video format description.
     if let Some(description) = unsafe { sample.format_description() } {
-        // SAFETY: the description belongs to an H.264 sample produced by this session.
-        unsafe { push_parameter_sets(frame, &description) };
+        // SAFETY: the description belongs to a sample this session produced, in the codec it
+        // was created for.
+        unsafe { push_parameter_sets(frame, &description, codec) };
     }
 
     push_avcc_nals(frame, avcc);
@@ -755,45 +863,89 @@ unsafe fn fill_from_sample(
         frame
             .data
             .get(range.start + crate::encode::START_CODE.len())
-            .is_some_and(|&b| b & 0x1f == 5)
+            .is_some_and(|&byte| is_key_slice(codec, byte))
     });
 
     if !frame.is_idr && !keep_parameter_sets {
-        strip_parameter_sets(frame);
+        strip_parameter_sets(frame, codec);
     }
 
     Some(())
 }
 
-/// Prepends the SPS and PPS carried in a format description.
+/// Returns whether a NAL unit's first byte begins a parameter set.
 ///
-/// They are emitted ahead of every frame and removed again unless the frame turns out to
-/// be an IDR, because a decoder needs them before the first slice it can start from and
-/// nowhere else.
+/// H.264 has two, numbered 7 and 8. HEVC has three — a video parameter set at 32 ahead of the
+/// sequence and picture ones at 33 and 34 — and reads its type from a different place.
+fn is_parameter_set(codec: Codec, byte: u8) -> bool {
+    match codec {
+        Codec::Hevc => matches!((byte >> 1) & 0x3f, 32..=34),
+        _ => matches!(byte & 0x1f, 7 | 8),
+    }
+}
+
+/// Returns whether a NAL unit's first byte begins a slice a decoder can start from.
+///
+/// The two codecs put the type in different places. H.264 uses the low five bits, and type 5
+/// is an IDR slice. HEVC uses bits one to six, and types 16 to 21 are all slices a decoder can
+/// start from — an IDR is 19 or 20, and the others differ only in whether pictures before them
+/// may be discarded.
+fn is_key_slice(codec: Codec, byte: u8) -> bool {
+    match codec {
+        Codec::Hevc => (16..=21).contains(&((byte >> 1) & 0x3f)),
+        _ => byte & 0x1f == 5,
+    }
+}
+
+/// Prepends the parameter sets carried in a format description.
+///
+/// Two for H.264 and three for HEVC, which adds a video parameter set ahead of the other two.
+/// They are emitted ahead of every frame and removed again unless the frame turns out to be a
+/// keyframe, because a decoder needs them before the first slice it can start from and nowhere
+/// else.
 ///
 /// # Safety
 ///
-/// `description` must describe an H.264 stream.
+/// `description` must describe a stream in `codec`.
 unsafe fn push_parameter_sets(
     frame: &mut EncodedFrame,
     description: &objc2_core_media::CMFormatDescription,
+    codec: Codec,
 ) {
-    use objc2_core_media::CMVideoFormatDescriptionGetH264ParameterSetAtIndex;
+    use objc2_core_media::{
+        CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
+    };
+
+    let get = |index: usize, ptr: *mut *const u8, size: *mut usize, count: *mut usize| -> i32 {
+        // SAFETY: both calls read a description of their own codec, which is what the caller
+        // guarantees, and every pointer argument is null or a live local of the caller.
+        unsafe {
+            match codec {
+                Codec::Hevc => CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    description,
+                    index,
+                    ptr,
+                    size,
+                    count,
+                    core::ptr::null_mut(),
+                ),
+                _ => CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    description,
+                    index,
+                    ptr,
+                    size,
+                    count,
+                    core::ptr::null_mut(),
+                ),
+            }
+        }
+    };
 
     let mut count = 0usize;
 
-    // SAFETY: querying index zero is how the parameter set count is discovered.
-    let status = unsafe {
-        CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-            description,
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            &mut count,
-            core::ptr::null_mut(),
-        )
-    };
-    if status != 0 {
+    // Querying index zero is how the parameter set count is discovered.
+    if get(0, core::ptr::null_mut(), core::ptr::null_mut(), &mut count) != 0 {
         return;
     }
 
@@ -801,18 +953,8 @@ unsafe fn push_parameter_sets(
         let mut ptr: *const u8 = core::ptr::null();
         let mut size = 0usize;
 
-        // SAFETY: `index` is below the reported count and both out pointers are valid.
-        let status = unsafe {
-            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                description,
-                index,
-                &mut ptr,
-                &mut size,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            )
-        };
-        if status != 0 || ptr.is_null() || size == 0 {
+        if get(index, &mut ptr, &mut size, core::ptr::null_mut()) != 0 || ptr.is_null() || size == 0
+        {
             continue;
         }
 
@@ -847,7 +989,7 @@ fn push_avcc_nals(frame: &mut EncodedFrame, avcc: &[u8]) {
 }
 
 /// Removes leading parameter set NAL units from a non-IDR frame.
-fn strip_parameter_sets(frame: &mut EncodedFrame) {
+fn strip_parameter_sets(frame: &mut EncodedFrame, codec: Codec) {
     let keep_from = frame
         .slices
         .iter()
@@ -855,7 +997,7 @@ fn strip_parameter_sets(frame: &mut EncodedFrame) {
             frame
                 .data
                 .get(range.start + crate::encode::START_CODE.len())
-                .is_some_and(|&b| !matches!(b & 0x1f, 7 | 8))
+                .is_some_and(|&byte| !is_parameter_set(codec, byte))
         })
         .unwrap_or(frame.slices.len());
 
