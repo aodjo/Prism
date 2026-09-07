@@ -168,3 +168,58 @@ pub fn stopped_snapshot() -> crate::HostSnapshot {
         error: None,
     }
 }
+
+/// Derives the secret that signs somebody in, on the thread pool.
+///
+/// Deliberately slow — a memory-hard hash over a password takes a few hundred milliseconds —
+/// which is exactly why it may not run on the thread drawing the window.
+pub struct DeriveAuth {
+    /// What was typed.
+    pub password: String,
+    /// The account's salt, as hex.
+    pub salt: String,
+}
+
+impl Task for DeriveAuth {
+    type Output = String;
+    type JsValue = String;
+
+    /// Hashes the password and keeps only the half the server is told.
+    ///
+    /// The wrapping half is derived here too and dropped without leaving this function. It has
+    /// no business in JavaScript: nothing in the window needs it, and a value that never
+    /// crosses that boundary cannot be logged, serialised, or sent somewhere by mistake.
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        use prism_core::account::secret;
+
+        let salt = hex_array::<{ secret::SALT_LEN }>(&self.salt)
+            .ok_or_else(|| napi::Error::from_reason("the salt is not hex"))?;
+
+        let secrets = secret::derive(&self.password, &salt).map_err(reason)?;
+
+        Ok(secrets
+            .auth
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
+
+    /// Hands the secret back as hex.
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Reads hex into an array of a known size.
+fn hex_array<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2 {
+        return None;
+    }
+
+    let bytes: Option<Vec<u8>> = (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect();
+
+    bytes?.try_into().ok()
+}
