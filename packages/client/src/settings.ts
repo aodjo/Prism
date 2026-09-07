@@ -18,6 +18,7 @@ export const DEFAULTS: Settings = {
   control: true,
   smooth: false,
   addresses: {},
+  pinned: [],
   // The port is fixed rather than left to the operating system. With a rendezvous server it
   // makes no difference, since the port is discovered either way — but without one, a machine
   // on an operating-system-chosen port is a machine nobody can reach: the other end has no way

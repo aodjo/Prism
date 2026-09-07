@@ -133,6 +133,33 @@ export interface Settings {
    * is how the wrong one gets used.
    */
   addresses: Record<string, string>;
+  /**
+   * The machines somebody wants at the front of the list, by public key.
+   *
+   * A preference rather than a property of the machine, so it stays on this one: the desk
+   * somebody works from and the machine they reach for are different answers per desk.
+   */
+  pinned: readonly string[];
+}
+
+/**
+ * One stream that ran, kept after it ended.
+ *
+ * Written only for a session that actually established. A connection that failed is a failure
+ * to show at the time, not a session to look back on, and a list of them would bury the ones
+ * somebody is looking for.
+ */
+export interface Session {
+  /** The host that was watched, as hex. */
+  readonly host: string;
+  /** When the two sides finished the handshake, in milliseconds since the epoch. */
+  readonly startedAt: number;
+  /** When the stream ended. */
+  readonly endedAt: number;
+  /** The mean of every round trip reported while it ran, in milliseconds. */
+  readonly rttMs: number;
+  /** How many frames arrived over the whole session. */
+  readonly frames: number;
 }
 
 /**
@@ -394,6 +421,22 @@ export interface PrismApi {
    * @returns {Promise<StreamState>} The current state.
    */
   streamState(): Promise<StreamState>;
+
+  /**
+   * Returns the streams that have run on this machine, most recent first.
+   *
+   * @async
+   * @returns {Promise<readonly Session[]>} What ran, and for how long.
+   */
+  sessions(): Promise<readonly Session[]>;
+
+  /**
+   * Registers a listener for the history, which grows by one whenever a stream ends.
+   *
+   * @param {(sessions: readonly Session[]) => void} listener - Called with the whole list.
+   * @returns {void}
+   */
+  onSessions(listener: (sessions: readonly Session[]) => void): void;
 
   /**
    * Tells the main process how tall the window's content is.

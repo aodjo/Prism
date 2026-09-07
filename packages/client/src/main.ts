@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { Holder } from '@prism/account/holder';
 import { toDataURL } from 'qrcode';
 
-import type { AccountEnrolmentView, HostSnapshot, Settings, StreamState } from './api.js';
+import type { AccountEnrolmentView, HostSnapshot, Session, Settings, StreamState } from './api.js';
+import { loadSessions, recordSession } from './sessions.js';
 import { DEFAULTS, loadSettings, saveSettings } from './settings.js';
 import { Sharing } from './sharing.js';
 import { Stream } from './stream.js';
@@ -58,6 +59,9 @@ let stream: Stream | null = null;
 
 /** What this machine is configured to do. */
 let settings: Settings = { ...DEFAULTS };
+
+/** What has been watched from this machine, most recent first. */
+let sessions: readonly Session[] = [];
 
 /**
  * The account, which both applications hold the same way.
@@ -116,6 +120,22 @@ function broadcastSharing(snapshot: HostSnapshot | null): void {
   for (const open of [window, setup, home]) {
     if (open && !open.isDestroyed()) {
       open.webContents.send('share:state', snapshot);
+    }
+  }
+}
+
+/**
+ * Records a session that has ended and tells every window that is open.
+ *
+ * @param {Session} session - What just ended.
+ * @returns {void}
+ */
+function keepSession(session: Session): void {
+  sessions = recordSession(sessions, session);
+
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('sessions:list', sessions);
     }
   }
 }
@@ -301,7 +321,7 @@ function registerHandlers(): void {
   });
 
   ipcMain.handle('stream:connect', (_event, host: string, address: string) => {
-    stream ??= new Stream(broadcastStream);
+    stream ??= new Stream(broadcastStream, keepSession);
 
     // What the window passed, or what was stored for this host last time. The rendezvous
     // server is the fallback, and `Stream.start` refuses when there is neither.
@@ -313,6 +333,8 @@ function registerHandlers(): void {
   ipcMain.handle('stream:disconnect', () => stream?.stop() ?? idle());
 
   ipcMain.handle('stream:state', () => stream?.state() ?? idle());
+
+  ipcMain.handle('sessions:list', () => sessions);
 
   ipcMain.on('window:fit', (_event, height: number) => {
     if (!window || window.isDestroyed()) {
@@ -409,6 +431,7 @@ async function captureWindow(path: string): Promise<void> {
 
 void app.whenReady().then(() => {
   settings = loadSettings();
+  sessions = loadSessions();
   registerHandlers();
   account.start();
 
