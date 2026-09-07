@@ -31,6 +31,10 @@ pub mod jitter;
 #[cfg(target_os = "windows")]
 pub mod wasapi;
 
+/// Capturing what a Mac is playing, through ScreenCaptureKit's system audio.
+#[cfg(target_os = "macos")]
+pub mod screencapturekit;
+
 /// Samples per second on the wire.
 ///
 /// Fixed at 48 kHz rather than negotiated. It is what Opus works in natively, what every
@@ -53,3 +57,30 @@ pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize * FRAME_US as usize) / 1_
 
 /// Interleaved samples in one frame, both channels together.
 pub const FRAME_INTERLEAVED: usize = FRAME_SAMPLES * CHANNELS;
+
+/// What one poll of a system audio source produced.
+///
+/// Three outcomes rather than two, because "nothing yet" and "nothing ever again" call for
+/// opposite responses: the first is filled with silence and the stream carries on, the second
+/// ends the thread. Collapsing them would either stall a live stream or spend a session
+/// sending silence from a source that died in the first second.
+#[derive(Debug)]
+pub enum Pulled<'a> {
+    /// A whole frame, interleaved, exactly [`FRAME_INTERLEAVED`] samples long.
+    Frame(&'a [f32]),
+    /// Nothing arrived within the timeout.
+    Silence,
+    /// The source has stopped and will produce nothing more.
+    Stopped,
+}
+
+/// A source of everything the machine is playing.
+///
+/// Implemented once per platform — WASAPI's loopback mode on Windows, ScreenCaptureKit's
+/// system audio on macOS — so that the thread which captures, encodes and sends exists once
+/// rather than once per operating system. What differs between them is how a frame is
+/// obtained and nothing else.
+pub trait SystemAudio {
+    /// Waits up to `timeout` for one frame of interleaved samples.
+    fn poll(&mut self, timeout: std::time::Duration) -> Pulled<'_>;
+}

@@ -421,6 +421,8 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut acks = AckTracker::new();
     let mut reports_sent = 0u64;
     let mut reports_failed = 0u64;
+    let mut audio_frames = 0u64;
+    let mut audio_bytes = 0u64;
     // Set when this side has lost a frame, and cleared once the host has answered with a
     // keyframe. Until then every report carries the request, because a single one can be lost
     // and the stream stays black until one arrives.
@@ -493,8 +495,19 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         // wrong for sound, which is five millisecond frames rather than sixteen and a
         // concealed gap rather than a repaired one.
         if channel_of(bytes) == Ok(Channel::Audio) {
-            if let (Some(sink), Ok(packet)) = (audio.as_ref(), AudioPacket::decode(bytes)) {
-                sink.push(packet.sequence, packet.payload, now_us());
+            match AudioPacket::decode(bytes) {
+                Ok(packet) => {
+                    audio_frames += 1;
+                    audio_bytes += packet.payload.len() as u64;
+
+                    // Counted whether or not there is anywhere to play it. A run with no
+                    // window still says whether sound crossed the wire, which is the only way
+                    // to tell "the host is not capturing" from "this machine is not playing".
+                    if let Some(sink) = audio.as_ref() {
+                        sink.push(packet.sequence, packet.payload, now_us());
+                    }
+                }
+                Err(_) => malformed += 1,
             }
 
             continue;
@@ -642,6 +655,28 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         println!("recovery {} slices rebuilt from parity", stats.recovered);
     }
     println!("feedback sent {reports_sent}  failed to send {reports_failed}");
+
+    if audio_frames > 0 {
+        // Five milliseconds a frame, so the count is also how long the sound was. Reported
+        // against the run's own length because the useful question is whether it was
+        // continuous, not how much of it there was.
+        println!(
+            "audio    {audio_frames} frames ({:.1}s of sound), {:.1} kB, mean {} bytes{}",
+            audio_frames as f64 * f64::from(prism_core::audio::FRAME_US) / 1e6,
+            audio_bytes as f64 / 1e3,
+            audio_bytes / audio_frames,
+            if audio.is_some() {
+                ", played"
+            } else {
+                ", not played (no window)"
+            }
+        );
+    } else if agreed.audio {
+        println!(
+            "audio    none arrived, though the session agreed to it. The host has no system \
+             audio capture on its platform, or it was started without --audio."
+        );
+    }
 
     Ok(())
 }

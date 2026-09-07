@@ -274,10 +274,9 @@ impl ScreenCapture {
 }
 
 impl Drop for ScreenCapture {
-    /// Stops the stream so the compositor stops producing frames for it.
+    /// Stops the stream and waits for the system to say it has, before returning.
     fn drop(&mut self) {
-        // SAFETY: the stream is alive, and passing no completion handler is allowed.
-        unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
+        stop_capture(&self.stream);
     }
 }
 
@@ -288,7 +287,7 @@ impl Drop for ScreenCapture {
 /// Returns [`CaptureError::PermissionDenied`] if the request fails, which is what
 /// happens when Screen Recording has not been granted, and [`CaptureError::Start`] if it
 /// does not answer at all.
-fn shareable_content() -> Result<Retained<SCShareableContent>, CaptureError> {
+pub(crate) fn shareable_content() -> Result<Retained<SCShareableContent>, CaptureError> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handler = RcBlock::new(
@@ -318,13 +317,35 @@ fn shareable_content() -> Result<Retained<SCShareableContent>, CaptureError> {
     }
 }
 
-/// Starts the stream, blocking until ScreenCaptureKit reports success or failure.
+/// Stops a stream, blocking until ScreenCaptureKit says it has finished doing so.
+pub(crate) fn stop_capture(stream: &SCStream) {
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let handler = RcBlock::new(move |_error: *mut NSError| {
+        let _ = tx.send(());
+    });
+
+    // SAFETY: the stream is alive and the block is copied by ScreenCaptureKit.
+    unsafe { stream.stopCaptureWithCompletionHandler(Some(&handler)) };
+
+    // Waited for rather than fired and forgotten, which is what this used to do. Stopping is
+    // asynchronous and the capture daemon outlives this process, so a program that exits the
+    // instant it has asked leaves the system tearing down a stream on behalf of something
+    // that is already gone. Starting is waited for; there is no reason stopping should not
+    // be, and every reason to hand the daemon back a stream it has finished with.
+    //
+    // A timeout rather than an unbounded wait because this runs in a destructor: if the
+    // system will not answer, carrying on is better than never returning.
+    let _ = rx.recv_timeout(REQUEST_TIMEOUT);
+}
+
+/// Starts a stream, blocking until ScreenCaptureKit says it has started or refused.
 ///
 /// # Errors
 ///
-/// Returns [`CaptureError::Start`] with the platform's message if the stream will not
-/// start.
-fn start_capture(stream: &SCStream) -> Result<(), CaptureError> {
+/// Returns [`CaptureError::Start`] with what the system said, or with a note that it said
+/// nothing at all.
+pub(crate) fn start_capture(stream: &SCStream) -> Result<(), CaptureError> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     let handler = RcBlock::new(move |error: *mut NSError| {

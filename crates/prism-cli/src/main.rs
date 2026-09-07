@@ -153,6 +153,15 @@ enum Command {
         #[arg(long)]
         adaptive: bool,
 
+        /// Also capture and send this machine's audio, at this many bits per second.
+        ///
+        /// Off by default: the command line exists to measure the video path, and a second
+        /// stream would be in every number without being what any of them are about. Naming a
+        /// rate opts in, which is what makes the audio path testable at all — the client
+        /// offers audio only when it has a window to play it through.
+        #[arg(long)]
+        audio: Option<u32>,
+
         /// Where this machine's long-term key is kept, generated on first use.
         #[arg(long)]
         identity: Option<PathBuf>,
@@ -227,6 +236,14 @@ enum Command {
         #[arg(long)]
         no_input: bool,
 
+        /// Ask for the host's audio even without a window to play it through.
+        ///
+        /// A session with a window asks for audio anyway. This is for measuring the audio
+        /// path: the frames arrive, are counted and reported, and are not played, because a
+        /// measurement run that suddenly made noise would be a surprise.
+        #[arg(long)]
+        audio: bool,
+
         /// Send a steady stream of fabricated pointer motion, so the input path can be
         /// measured without a hand on the mouse.
         #[arg(long)]
@@ -263,6 +280,24 @@ enum Command {
         /// Where to keep the key. Defaults to `~/.prism/identity.key`.
         #[arg(long)]
         identity: Option<PathBuf>,
+    },
+
+    /// Listen to what this machine is playing and report what was heard.
+    ///
+    /// Everything that stops a Mac's sound reaching the wire produces one symptom:
+    /// ScreenCaptureKit starts, delivers buffers on schedule, and fills every one with
+    /// zeroes. A denied Screen Recording grant does that, an output routed somewhere the mix
+    /// is not tapped does that, and so does a quiet room. Nothing downstream can tell them
+    /// apart, because a five byte Opus frame is the correct encoding of silence. This reads
+    /// the samples, which is the only place the three differ.
+    Audio {
+        /// How long to listen, in seconds.
+        #[arg(long, default_value_t = 3)]
+        secs: u64,
+
+        /// Bitrate to encode at while listening, in bits per second.
+        #[arg(long, default_value_t = 128_000)]
+        bitrate: u32,
     },
 
     /// Encode synthetic frames to an Annex B file to verify the encoder.
@@ -387,6 +422,110 @@ fn client_codecs() -> Codecs {
     }
 }
 
+/// Loudest sample still counted as nothing at all.
+///
+/// Far below anything anyone would call quiet, because it is not separating quiet from loud:
+/// a capture that has come adrift from the mix returns samples of exactly zero, and a machine
+/// playing at the lowest volume it offers still returns thousands of times this.
+#[cfg(target_os = "macos")]
+const SILENCE_FLOOR: f32 = 1e-6;
+
+/// Listens to the machine's own output and reports what arrived.
+///
+/// Prints the peak sample and the size of the Opus packets it produced, which is what
+/// separates the two failures that look identical from a distance: a capture that is not
+/// attached to the mix delivers frames of zeroes at exactly the right rate, and those encode
+/// to the same five-byte packets a genuinely silent machine produces.
+///
+/// # Errors
+///
+/// Returns an error if the system will not open its audio at all, or if the encoder will not
+/// start.
+#[cfg(target_os = "macos")]
+fn listen(secs: u64, bitrate_bps: u32) -> Result<(), Box<dyn Error>> {
+    use prism_core::audio::codec::AudioEncoder;
+    use prism_core::audio::screencapturekit::SystemAudioCapture;
+    use prism_core::audio::{Pulled, SystemAudio};
+
+    let mut capture = SystemAudioCapture::start()?;
+    let mut encoder = AudioEncoder::new(bitrate_bps)?;
+
+    println!(
+        "audio: listening for {secs}s at {} kbps",
+        bitrate_bps / 1000
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    let mut frames = 0u64;
+    let mut quiet = 0u64;
+    let mut peak = 0.0f32;
+    let mut bytes = 0usize;
+    let mut largest = 0usize;
+
+    while std::time::Instant::now() < deadline {
+        let Pulled::Frame(frame) = capture.poll(Duration::from_millis(50)) else {
+            quiet += 1;
+            continue;
+        };
+
+        for &sample in frame {
+            peak = peak.max(sample.abs());
+        }
+
+        let packet = encoder.encode(frame)?;
+        bytes += packet.len();
+        largest = largest.max(packet.len());
+        frames += 1;
+    }
+
+    // Printed with room below the audible, because the thing this has to tell apart is a
+    // quiet room from a dead tap and those differ by orders of magnitude rather than by a
+    // decimal place. A wedged capture returns samples of exactly zero; anything a machine is
+    // really playing, at any volume somebody would choose, is far above that.
+    println!(
+        "audio: {frames} frames, {quiet} timed out, peak {peak:.3e} ({}), mean {} bytes, largest {largest}",
+        if peak > 0.0 {
+            format!("{:.1} dBFS", 20.0 * peak.log10())
+        } else {
+            "digital silence".to_owned()
+        },
+        bytes / usize::try_from(frames).unwrap_or(1).max(1)
+    );
+
+    if frames == 0 {
+        return Err("no audio arrived at all; the stream opened but delivered nothing".into());
+    }
+
+    if peak <= SILENCE_FLOOR {
+        return Err(
+            "audio arrived on schedule but every sample was zero, which has three causes and \
+             they look identical from here. The machine may simply be silent — play something \
+             and try again. The output may be routed to a device whose mix is not tapped: \
+             observed with Bluetooth headphones, where switching back to the built-in speakers \
+             restores it. Or this binary may not hold the Screen Recording grant that system \
+             audio is behind, which is refused by delivering empty buffers rather than by \
+             failing, and is granted per binary in System Settings, Privacy & Security, \
+             Screen Recording."
+                .into(),
+        );
+    }
+
+    println!("audio: this machine's output is being captured");
+
+    Ok(())
+}
+
+/// Reports that this platform has no system audio capture.
+///
+/// # Errors
+///
+/// Always. There is nothing to probe.
+#[cfg(not(target_os = "macos"))]
+fn listen(secs: u64, bitrate_bps: u32) -> Result<(), Box<dyn Error>> {
+    let _ = (secs, bitrate_bps);
+    Err("system audio can only be probed on macOS so far".into())
+}
+
 /// Turns the encoder probe's flag into a codec.
 ///
 /// Only the platform with an encoder to probe has a caller for it.
@@ -471,6 +610,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             parity,
             pace,
             adaptive,
+            audio,
             identity,
             peer_key,
         } => {
@@ -490,9 +630,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     pace_bps: pace.map(|mbps| (mbps.clamp(0.0, 10_000.0) * 1e6) as u32),
                     adaptive,
                     inject_input: true,
-                    // The command line measures the video path. Audio would add a second
-                    // stream to every number without being what any of them are about.
-                    audio_bitrate_bps: None,
+                    // Off unless --audio names a rate. The command line measures the video
+                    // path, and a second stream would be in every number without being what
+                    // any of them are about.
+                    audio_bitrate_bps: audio,
                     // What this machine's encoder can actually produce, from the core rather
                     // than restated here — a second answer to that question is a second answer
                     // that drifts.
@@ -573,6 +714,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             mode,
             pacing_ms,
             no_input,
+            audio,
             synthetic_input,
             identity,
             peer_key,
@@ -609,7 +751,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         u16::MAX
                     },
                     max_fps: u16::MAX,
-                    audio: display,
+                    // Asked for whenever there is a window, and on demand without one so the
+                    // path can be measured. Offering it is not the same as playing it.
+                    audio: display || audio,
                 },
                 identity: open_identity(identity.as_deref())?,
                 peer_key: identity::resolve_peer(
@@ -703,6 +847,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
 
             Ok(())
         }
+
+        Command::Audio { secs, bitrate } => listen(secs, bitrate),
 
         Command::Encode {
             out,

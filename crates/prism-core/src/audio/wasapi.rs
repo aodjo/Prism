@@ -39,7 +39,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-use crate::audio::{CHANNELS, FRAME_INTERLEAVED, SAMPLE_RATE};
+use crate::audio::{CHANNELS, FRAME_INTERLEAVED, Pulled, SAMPLE_RATE, SystemAudio};
 
 /// How long the device buffer holds, in hundred-nanosecond units.
 ///
@@ -290,5 +290,21 @@ fn wanted_format() -> WAVEFORMATEXTENSIBLE {
         // Front left and front right.
         dwChannelMask: 0x3,
         SubFormat: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+    }
+}
+
+impl SystemAudio for LoopbackCapture {
+    /// Waits up to `timeout` for one frame, reporting a device failure as [`Pulled::Stopped`].
+    ///
+    /// A loopback client that has lost its device does not recover: the render endpoint it was
+    /// attached to is gone, and every later call fails the same way. Ending the thread is the
+    /// honest response, and the session carries on without sound rather than spinning on an
+    /// error nobody reads.
+    fn poll(&mut self, timeout: Duration) -> Pulled<'_> {
+        match LoopbackCapture::poll(self, timeout) {
+            Ok(Some(samples)) => Pulled::Frame(samples),
+            Ok(None) => Pulled::Silence,
+            Err(_) => Pulled::Stopped,
+        }
     }
 }
