@@ -21,9 +21,6 @@ sha2 = "0.10"
 thiserror.workspace = true
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 axum = "0.8.9"
-rustls-acme = { version = "0.15.4", features = ["axum"] }
-axum-server = "0.8.0"
-futures = "0.3.34"
 
 [lints.rust]
 missing_docs = "warn"

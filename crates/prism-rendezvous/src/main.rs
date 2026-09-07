@@ -68,30 +68,21 @@ struct Cli {
     accounts: Option<PathBuf>,
 
     /// Address to serve the account API on.
-    #[arg(long, default_value = "0.0.0.0:443")]
+    ///
+    /// The loopback by default, because this speaks plain HTTP and is meant to sit behind a
+    /// reverse proxy that terminates TLS. Binding it anywhere else is refused unless
+    /// `--api-insecure` says the exposure is deliberate: the value that signs somebody in
+    /// crosses this connection, and a server that put it on the network in the clear would
+    /// look exactly like one that did not.
+    #[arg(long, default_value = "127.0.0.1:47380")]
     api_bind: SocketAddr,
 
-    /// Domain to get a certificate for, from Let's Encrypt.
+    /// Serve the account API in the clear on an address other than the loopback.
     ///
-    /// The certificate is obtained and renewed by this process over the same port it serves
-    /// on, so nothing else has to be installed, no second port has to be open, and there is no
-    /// renewal to remember. The name has to resolve to this machine and reach it on
-    /// `--api-bind` — through DNS that points here directly, not through a proxy, since the
-    /// challenge has to arrive at this server to be answered.
+    /// For a network where something else is providing confidentiality — a tunnel, a private
+    /// link. Not for the internet.
     #[arg(long)]
-    acme_domain: Option<String>,
-
-    /// Where to keep the certificate between runs.
-    ///
-    /// Without it a restart asks for a new certificate, and Let's Encrypt rate limits that
-    /// hard enough to lock a domain out for a week.
-    #[arg(long, default_value = "acme-cache")]
-    acme_cache: PathBuf,
-
-    /// Address to tell Let's Encrypt about, so it can reach somebody if the account has a
-    /// problem.
-    #[arg(long)]
-    acme_contact: Option<String>,
+    api_insecure: bool,
 
     /// Refuse to carry traffic for peers that could not reach each other directly.
     ///
@@ -136,13 +127,7 @@ fn serve(cli: &Cli) -> io::Result<()> {
     // because it is the only part of this server that is asynchronous and the loop below is
     // the only part that must never wait on anything.
     if let Some(path) = cli.accounts.clone() {
-        spawn_accounts(
-            path,
-            cli.api_bind,
-            cli.acme_domain.clone(),
-            cli.acme_cache.clone(),
-            cli.acme_contact.clone(),
-        )?;
+        spawn_accounts(path, cli.api_bind, cli.api_insecure)?;
     }
 
     let relays = Arc::new(Mutex::new(Relays::new()));
@@ -461,22 +446,25 @@ fn is_timeout(err: &io::Error) -> bool {
 
 /// Starts the account API on a thread of its own.
 ///
-/// Fails loudly rather than falling back. A server that could not get a certificate and served
-/// plain HTTP anyway would have clients sending the value that signs them in, in the clear,
-/// with nothing on either side saying so.
-///
 /// # Errors
 ///
-/// Returns an error if the account store cannot be opened or the thread cannot be spawned.
-fn spawn_accounts(
-    path: PathBuf,
-    bind: SocketAddr,
-    acme_domain: Option<String>,
-    acme_cache: PathBuf,
-    acme_contact: Option<String>,
-) -> io::Result<()> {
+/// Returns an error if the account store cannot be opened, if the address would put the API
+/// in the clear on the network, or if the thread cannot be spawned.
+fn spawn_accounts(path: PathBuf, bind: SocketAddr, insecure: bool) -> io::Result<()> {
     use prism_rendezvous::accounts::Accounts;
     use prism_rendezvous::api::{Service, routes};
+
+    if !bind.ip().is_loopback() && !insecure {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the account API speaks plain HTTP and {bind} is not the loopback. Put a reverse \
+                 proxy in front of it and bind the loopback, or pass --api-insecure if something \
+                 else is providing confidentiality. The value that signs somebody in crosses \
+                 this connection."
+            ),
+        ));
+    }
 
     let accounts = Accounts::open(&path)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
@@ -487,11 +475,19 @@ fn spawn_accounts(
         path.display()
     );
 
+    if bind.ip().is_loopback() {
+        println!("prism-rendezvous: accounts on http://{bind} — put TLS in front of it");
+    } else {
+        println!("prism-rendezvous: accounts on http://{bind} IN THE CLEAR, as asked");
+    }
+
     let service = Service::new(accounts);
 
     std::thread::Builder::new()
         .name("prism-accounts".into())
         .spawn(move || {
+            // Its own runtime, because this is the only part of the server that is
+            // asynchronous and the receive loop is the only part that must never wait.
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -504,72 +500,19 @@ fn spawn_accounts(
             };
 
             runtime.block_on(async move {
-                if let Err(err) =
-                    serve_accounts(routes(service), bind, acme_domain, acme_cache, acme_contact)
-                        .await
-                {
+                let listener = match tokio::net::TcpListener::bind(bind).await {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        eprintln!("prism-rendezvous: the account API could not bind {bind}: {err}");
+                        return;
+                    }
+                };
+
+                if let Err(err) = axum::serve(listener, routes(service)).await {
                     eprintln!("prism-rendezvous: the account API stopped: {err}");
                 }
             });
         })?;
-
-    Ok(())
-}
-
-/// Serves the account API, with a certificate from Let's Encrypt when a domain was named.
-async fn serve_accounts(
-    router: axum::Router,
-    bind: SocketAddr,
-    acme_domain: Option<String>,
-    acme_cache: PathBuf,
-    acme_contact: Option<String>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(domain) = acme_domain else {
-        // Without a domain there is nothing to get a certificate for, and serving the account
-        // API in the clear is not an option: the authentication secret crosses this wire.
-        return Err(
-            "an account API needs --acme-domain, because the sign-in secret must not be sent in \
-             the clear"
-                .into(),
-        );
-    };
-
-    println!("prism-rendezvous: accounts on https://{domain} ({bind})");
-    println!(
-        "prism-rendezvous: certificate cached in {}",
-        acme_cache.display()
-    );
-
-    let mut state = rustls_acme::AcmeConfig::new([domain])
-        .contact(
-            acme_contact
-                .iter()
-                .map(|address| format!("mailto:{address}")),
-        )
-        .cache(rustls_acme::caches::DirCache::new(acme_cache))
-        .directory_lets_encrypt(true)
-        .state();
-
-    let acceptor = state.axum_acceptor(state.default_rustls_config());
-
-    // Reported rather than swallowed. Every way this fails — a name that does not resolve here,
-    // a port nothing forwards, a rate limit — produces a server that is up and refusing every
-    // connection, and the reason is only ever in this stream.
-    tokio::spawn(async move {
-        use futures::StreamExt;
-
-        while let Some(event) = state.next().await {
-            match event {
-                Ok(ok) => println!("prism-rendezvous: certificate {ok:?}"),
-                Err(err) => eprintln!("prism-rendezvous: certificate error: {err}"),
-            }
-        }
-    });
-
-    axum_server::bind(bind)
-        .acceptor(acceptor)
-        .serve(router.into_make_service())
-        .await?;
 
     Ok(())
 }
