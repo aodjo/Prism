@@ -23,6 +23,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use prism_core::identity;
 use prism_core::net::handshake::Identity;
+use prism_core::net::negotiate::{Codecs, H264, Offer};
 use prism_core::net::pairing::Pin;
 
 /// How the client trades latency against even presentation.
@@ -435,6 +436,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     // The command line measures the video path. Audio would add a second
                     // stream to every number without being what any of them are about.
                     audio_bitrate_bps: None,
+                    codecs: Codecs::none().with(H264),
                 },
                 frame_bytes,
                 slices,
@@ -519,6 +521,16 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 report_every,
                 in_flight,
                 decode: decode || display,
+                // What this machine can decode. H.264 alone until the VideoToolbox path is
+                // taught the others; naming a codec that is not implemented would agree a
+                // session that never shows a frame.
+                offer: Offer {
+                    codecs: Codecs::none().with(H264),
+                    max_width: u16::MAX,
+                    max_height: u16::MAX,
+                    max_fps: u16::MAX,
+                    audio: display,
+                },
                 identity: open_identity(identity.as_deref())?,
                 peer_key: identity::resolve_peer(
                     peer_key.as_deref(),

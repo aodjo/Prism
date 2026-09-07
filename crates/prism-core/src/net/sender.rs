@@ -19,6 +19,7 @@ use crate::net::cc::{CongestionConfig, CongestionController, DelaySample};
 use crate::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
 use crate::net::handshake::{Identity, KEY_LEN, PeerPolicy};
 use crate::net::loss::LossInjector;
+use crate::net::negotiate::{Accept, HostAbility};
 use crate::net::packet::{
     AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR,
     FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE,
@@ -146,6 +147,8 @@ pub struct SliceSender {
     peer: [u8; KEY_LEN],
     /// Where that client is.
     peer_address: std::net::SocketAddr,
+    /// What the two agreed the stream would be.
+    agreed: Option<Accept>,
     buffer: [u8; MAX_PACKET_SIZE],
     packets: u64,
     bytes: u64,
@@ -191,12 +194,14 @@ impl SliceSender {
         transport: UdpTransport,
         identity: &Identity,
         allowed: Vec<[u8; KEY_LEN]>,
+        ability: HostAbility,
         patience: std::time::Duration,
     ) -> io::Result<Self> {
-        let (established, peer, _) = crate::control::session::serve(
+        let (established, peer, listener) = crate::control::session::serve(
             &transport,
             identity.clone(),
             PeerPolicy::Paired(allowed),
+            ability,
             patience,
         )?;
         transport.set_read_timeout(None)?;
@@ -206,6 +211,7 @@ impl SliceSender {
             opener: Some(established.session.opener),
             peer: established.session.peer_static,
             peer_address: peer,
+            agreed: listener.agreed(),
             buffer: [0; MAX_PACKET_SIZE],
             packets: 0,
             bytes: 0,
@@ -590,6 +596,14 @@ impl SliceSender {
     #[must_use]
     pub fn peer_address(&self) -> std::net::SocketAddr {
         self.peer_address
+    }
+
+    /// Returns what the two machines agreed the stream would be.
+    ///
+    /// `None` on a session opened without negotiating, which the measurement paths do.
+    #[must_use]
+    pub fn agreed(&self) -> Option<Accept> {
+        self.agreed
     }
 
     /// Returns how many packets have been sent.

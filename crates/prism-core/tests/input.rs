@@ -36,23 +36,22 @@ mod macos {
             })
             .expect("a plain move is always injectable");
 
+        // And wait for it to get there before reading where "there" is. Posting is
+        // asynchronous, so a start read straight after the parking move is wherever the
+        // pointer still was, and every later assertion is measured against a start that was
+        // never true. This was the flake.
+        assert!(
+            wait_until_landed(&injector),
+            "the pointer never reached the corner it was parked at"
+        );
         let (start_x, start_y) = injector.position();
 
         injector
             .inject(InputEvent::MouseMove { dx: 60, dy: 40 })
             .expect("a plain move is always injectable");
 
-        // Posting is asynchronous, so the pointer needs a moment to catch up before it is
-        // fair to ask where it is. How long is not knowable — under a loaded machine
-        // running every other test binary at once it is far longer than on an idle one —
-        // so this waits for the answer rather than guessing at a duration.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !injector.injection_is_landing() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-
         assert!(
-            injector.injection_is_landing(),
+            wait_until_landed(&injector),
             "the pointer did not follow the injected move"
         );
 
@@ -69,6 +68,26 @@ mod macos {
         injector
             .inject(InputEvent::MouseMove { dx: -60, dy: -40 })
             .expect("putting the pointer back is the same operation");
+    }
+
+    /// Waits until the system pointer agrees with where the injector thinks it put it.
+    ///
+    /// `CGEventPost` queues an event rather than applying it, so the two disagree for a while
+    /// after every injection — for longer on a machine running every test binary at once than
+    /// on an idle one. Waiting for them to agree is waiting for the outcome; waiting for a
+    /// duration is guessing at it, and the guess is what made this test flake.
+    fn wait_until_landed(injector: &MacInjector) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+
+        while std::time::Instant::now() < deadline {
+            if injector.injection_is_landing() {
+                return true;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        injector.injection_is_landing()
     }
 
     #[test]

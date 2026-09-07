@@ -32,6 +32,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::net::handshake::{Identity, KEY_LEN};
+use crate::net::negotiate::{Codecs, H264, HostAbility};
 use crate::net::sender::SliceSender;
 
 /// How the host should behave.
@@ -61,6 +62,12 @@ pub struct HostConfig {
     pub parity_loss: Option<f32>,
     /// Whether to inject the client's input events into this machine.
     pub inject_input: bool,
+    /// Codecs this machine can encode.
+    ///
+    /// What the client offers is intersected with this and the best of what remains is used.
+    /// A host that names a codec it cannot actually produce agrees to a stream it then fails
+    /// to send, so this is a statement about the hardware rather than a wish.
+    pub codecs: Codecs,
     /// Send the machine's audio, or `None` to stream picture only.
     ///
     /// The value is the bitrate. A hundred and twenty-eight kilobits is transparent for
@@ -84,7 +91,37 @@ impl Default for HostConfig {
             parity_loss: Some(0.05),
             inject_input: true,
             audio_bitrate_bps: Some(128_000),
+            // H.264 alone until each encoder's other codecs are wired up. Naming one that is
+            // not implemented would agree a session that never produces a frame.
+            codecs: prism_core_h264(),
         }
+    }
+}
+
+/// The codec set a host advertises before anything better is wired up.
+///
+/// A function rather than a constant because `Codecs` is built by combination and a const
+/// expression for it would be less readable than the thing it replaces.
+fn prism_core_h264() -> Codecs {
+    Codecs::none().with(H264)
+}
+
+/// What this machine is able and willing to send, as the negotiation sees it.
+///
+/// The codec is a real statement about this machine's hardware and is what the agreement turns
+/// on. The picture is not, yet: a host sends its screen at the size the screen is, and that
+/// size is not known until capture starts — which is after the handshake. So it claims no
+/// ceiling of its own and the agreement records the client's, which becomes binding the day
+/// there is a scaler to honour it with. Claiming a size here that capture then contradicted
+/// would be worse than claiming none.
+fn ability(config: &HostConfig) -> HostAbility {
+    HostAbility {
+        codecs: config.codecs,
+        width: u16::MAX,
+        height: u16::MAX,
+        fps: u16::try_from(config.fps).unwrap_or(u16::MAX),
+        bitrate_bps: config.bitrate_bps,
+        audio: config.audio_bitrate_bps.is_some(),
     }
 }
 
@@ -386,6 +423,7 @@ pub fn connect(
                     transport,
                     &keys.identity,
                     keys.allowed.clone(),
+                    ability(config),
                     config.patience,
                 )?,
                 config,
@@ -419,6 +457,7 @@ pub fn connect(
         transport.try_clone()?,
         &keys.identity,
         keys.allowed.clone(),
+        ability(config),
         DIRECT_PATIENCE,
     );
 
@@ -443,6 +482,7 @@ pub fn connect(
                 transport,
                 &keys.identity,
                 keys.allowed.clone(),
+                ability(config),
                 RELAYED_PATIENCE,
             )
             .map_err(|err| {

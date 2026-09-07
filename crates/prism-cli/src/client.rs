@@ -22,6 +22,7 @@ use prism_core::clock::now_us;
 use prism_core::net::ack::AckTracker;
 use prism_core::net::clocksync::ClockSync;
 use prism_core::net::handshake::{Identity, KEY_LEN};
+use prism_core::net::negotiate::Offer;
 use prism_core::net::packet::{
     AudioPacket, CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
     FEEDBACK_PACKET_LEN, FecPacket, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE,
@@ -179,6 +180,11 @@ pub struct ClientConfig {
     pub host: Option<SocketAddr>,
     /// Rendezvous server to find the host through.
     pub rendezvous: Option<SocketAddr>,
+    /// What this machine can decode and present.
+    ///
+    /// Sent in the message that opens the session, so the host has chosen a codec by the time
+    /// the session is live.
+    pub offer: Offer,
     /// Go through the relay without trying a direct path first.
     ///
     /// For measuring what relaying costs, and for a person on a path where punching succeeds
@@ -255,6 +261,7 @@ fn open(
             host,
             &config.identity,
             &config.peer_key,
+            config.offer,
             RELAYED_PATIENCE,
         )?;
 
@@ -290,6 +297,7 @@ fn open(
             found.address,
             &config.identity,
             &config.peer_key,
+            config.offer,
             DIRECT_PATIENCE,
         ) {
             Ok(established) => {
@@ -314,6 +322,7 @@ fn open(
         relayed.address,
         &config.identity,
         &config.peer_key,
+        config.offer,
         RELAYED_PATIENCE,
     )?;
 
@@ -348,6 +357,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     // Nothing is read as a packet until the handshake completes, and it only completes with
     // the host pairing recorded: the first message is encrypted to that key and no other.
     let (established, host) = open(&transport, &config)?;
+    let agreed = prism_core::control::session::agreed(&established)?;
 
     // Connected only now that it is settled where the session runs. Doing it earlier would
     // have made the fallback to a relay impossible: a connected socket refuses to send
@@ -358,6 +368,15 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     println!(
         "client: session established with {host} ({})",
         prism_core::identity::to_hex(&established.session.peer_static)
+    );
+    println!(
+        "client: agreed {:?} {}x{} at {} fps, {:.1} Mbps, audio {}",
+        agreed.codec,
+        agreed.width,
+        agreed.height,
+        agreed.fps,
+        f64::from(agreed.bitrate_bps) / 1e6,
+        if agreed.audio { "on" } else { "off" },
     );
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);

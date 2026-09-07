@@ -613,6 +613,14 @@ impl Initiator {
     }
 }
 
+/// Turns the payload a peer sent into the payload to answer with.
+///
+/// Handed the peer's bytes and a buffer to write into, and returns how much it wrote — or
+/// `None` to refuse the peer entirely. A callback rather than a value because the two are not
+/// independent: what this side answers depends on what the peer asked for, and a Noise message
+/// can only be read once.
+pub type Answering<'a> = &'a mut dyn FnMut(&[u8], &mut [u8]) -> Option<usize>;
+
 /// What a responder decided about one datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
@@ -653,12 +661,17 @@ impl Responder {
 
     /// Feeds a datagram and writes any reply into `reply`.
     ///
-    /// `reply` must be at least `RESPONSE_OVERHEAD + payload.len()` bytes.
+    /// `answer` is handed the payload the peer sent and writes this side's reply payload into
+    /// the buffer it is given, returning its length — or `None` to refuse. It is a callback
+    /// rather than a value because the two are not independent: what this side answers depends
+    /// on what the peer asked for, and a Noise message can only be read once.
+    ///
+    /// `reply` must be at least `RESPONSE_OVERHEAD` bytes beyond whatever `answer` writes.
     ///
     /// A peer the policy does not admit gets [`Answer::Ignored`] rather than a refusal.
     /// Silence is the right answer: a rejection would tell an unpaired caller that it had
     /// found a live host, which is exactly what a scan is looking for.
-    pub fn accept(&mut self, datagram: &[u8], payload: &[u8], reply: &mut [u8]) -> Answer {
+    pub fn accept(&mut self, datagram: &[u8], answer: Answering<'_>, reply: &mut [u8]) -> Answer {
         if let Some((seen, answer)) = self.answered.as_ref() {
             // Byte equality is enough to recognise a retransmission: the message is
             // authenticated, so an attacker cannot produce a different one that would pass.
@@ -691,7 +704,13 @@ impl Responder {
             return Answer::Ignored;
         }
 
-        let Ok(written) = handshake.write_message(payload, reply) else {
+        // What this side answers with, decided from what the peer asked for.
+        let mut outgoing = [0u8; MAX_HANDSHAKE_PAYLOAD];
+        let Some(length) = answer(&incoming[..read], &mut outgoing) else {
+            return Answer::Ignored;
+        };
+
+        let Ok(written) = handshake.write_message(&outgoing[..length], reply) else {
             return Answer::Ignored;
         };
 
