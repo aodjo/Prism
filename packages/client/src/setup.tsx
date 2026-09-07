@@ -43,8 +43,14 @@ const STEP_DOTS: Partial<Record<Step, string>> = {
   ready: 'assets/steps-6.svg',
 };
 
-/** The screens that offer a Continue rather than doing something else with the bottom right. */
-const HAS_NEXT: ReadonlySet<Step> = new Set<Step>(['intro', 'permissions', 'device']);
+/**
+ * The screens that offer a Continue rather than doing something else with the bottom right.
+ *
+ * Adding a device is not among them. There is nothing to continue to from that screen until a
+ * machine has been added — the screen after it is a connection being made — so what it offers
+ * instead is to leave it for later.
+ */
+const HAS_NEXT: ReadonlySet<Step> = new Set<Step>(['intro', 'permissions']);
 
 /** How the three permission rows read, in the order the design puts them. */
 const GRANTS = [
@@ -414,10 +420,12 @@ function Setup(): JSX.Element {
               Begin
             </Primary>
           </div>
-          {/* Somebody who already has machines does not need to be told what the product
-              is. What they need is the window their machines are in. */}
-          <button type="button" className="btn-ghost no-drag mt-7" onClick={finish}>
-            Already using PRISM? Restore my devices
+          {/* Somebody who already has an account signs in and their machines follow. It opens
+              the settings window rather than ending setup: this flow is what pairs this
+              machine and asks for the grants it needs, and neither has happened yet however
+              many machines the account already knows about. */}
+          <button type="button" className="btn-ghost no-drag mt-7" onClick={prism.openSettings}>
+            Already using PRISM? Sign in
           </button>
         </section>
       )}
@@ -612,6 +620,13 @@ function Setup(): JSX.Element {
             )}
           </div>
 
+          {/* Adding a device needs a second machine in front of you, and somebody setting this
+              one up may not have it yet. Everything else in the flow has already happened by
+              now, so this is a step to defer rather than a way out of setup. */}
+          <button type="button" className="btn-ghost no-drag mt-7" onClick={finish}>
+            Not now
+          </button>
+
           <Trouble message={pairError} className="mt-4" />
         </section>
       )}
@@ -753,11 +768,6 @@ function Setup(): JSX.Element {
           <div className="ml-[21px]">
             <Wordmark />
           </div>
-          {step !== 'welcome' && step !== 'ready' && (
-            <button type="button" className="btn-ghost no-drag mr-[23px]" onClick={finish}>
-              Skip setup
-            </button>
-          )}
         </div>
 
         {/* Both screens are in the same cell while one is arriving and the other leaving, so
