@@ -210,6 +210,25 @@
         margin-top: 6px;
       }
 
+      /* A missing grant is a warning rather than a failure: the host still runs, it just
+         cannot do the thing the grant covers. */
+      .grant {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 26px;
+      }
+
+      .grant + .grant {
+        margin-top: 8px;
+      }
+
+      .grant .why {
+        color: var(--muted);
+        font-size: 11px;
+      }
+
       [hidden] {
         display: none !important;
       }
@@ -242,6 +261,11 @@
         <span>Frames</span><span class="value" id="frames"></span>
       </div>
       <div class="error" id="session-error" hidden></div>
+    </section>
+
+    <section id="permissions-section" hidden>
+      <h2>Permissions</h2>
+      <div id="permissions"></div>
     </section>
 
     <section>

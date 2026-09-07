@@ -282,6 +282,20 @@ enum Command {
         identity: Option<PathBuf>,
     },
 
+    /// Report what the system still has to allow before this machine can host.
+    ///
+    /// Both grants fail quietly when they are missing: capture delivers black frames and
+    /// silence, injection posts events that go nowhere, and nothing raises an error. So the
+    /// answer is worth having before a session rather than after one that looked fine.
+    Permissions {
+        /// Ask the system for anything missing, rather than only reporting it.
+        ///
+        /// The prompt appears once in the life of an application. After that only a person
+        /// can change the answer, in the settings pane this prints.
+        #[arg(long)]
+        request: bool,
+    },
+
     /// Listen to what this machine is playing and report what was heard.
     ///
     /// Everything that stops a Mac's sound reaching the wire produces one symptom:
@@ -420,6 +434,64 @@ fn client_codecs() -> Codecs {
     {
         Codecs::none().with(H264)
     }
+}
+
+/// Prints what the system allows, and what to do about anything it does not.
+///
+/// # Errors
+///
+/// Returns an error when something is still missing, so that a script can tell a machine
+/// that is ready to host from one that is not.
+fn report_permissions(request: bool) -> Result<(), Box<dyn Error>> {
+    use prism_core::control::permissions::{check, request as ask};
+
+    let mut held = check();
+
+    if request {
+        for grant in held.missing(true) {
+            let granted = ask(grant);
+            println!(
+                "{}: {}",
+                grant.name(),
+                if granted {
+                    "granted".to_string()
+                } else {
+                    format!("still refused — open {}", grant.settings_url())
+                }
+            );
+        }
+
+        held = check();
+    }
+
+    println!(
+        "screen recording: {}\naccessibility   : {}",
+        if held.screen { "granted" } else { "missing" },
+        if held.input { "granted" } else { "missing" },
+    );
+
+    // Judged as a host that controls the machine, because that is what the command line runs
+    // by default and the stricter answer is the useful one to fail on.
+    let missing = held.missing(true);
+    if missing.is_empty() {
+        println!("this machine can host");
+        return Ok(());
+    }
+
+    for grant in &missing {
+        eprintln!(
+            "missing {} — needed {}. Grant it at {}",
+            grant.name(),
+            grant.purpose(),
+            grant.settings_url()
+        );
+    }
+
+    Err(format!(
+        "{} of 2 grants missing; this machine would host with a black screen or no control",
+        missing.len()
+    )
+    .into())
 }
 
 /// Loudest sample still counted as nothing at all.
@@ -846,6 +918,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
 
             Ok(())
         }
+
+        Command::Permissions { request } => report_permissions(request),
 
         Command::Audio { secs, bitrate } => listen(secs, bitrate),
 

@@ -13,5 +13,7 @@
 
 pub mod host;
 pub mod pair;
+/// What the system has to allow before a host can capture or control this machine.
+pub mod permissions;
 pub mod rendezvous;
 pub mod session;

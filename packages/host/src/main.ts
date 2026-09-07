@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, Tray } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -248,6 +248,25 @@ function stopHosting(): void {
  * @returns {void}
  */
 function registerHandlers(): void {
+  ipcMain.handle('permissions:get', () => prism.permissions(settings.injectInput));
+
+  ipcMain.handle('permissions:request', (_event, id: string) => {
+    // The system prompts at most once. After that it answers the same way forever and shows
+    // nothing, so a refusal here means the only way forward is the settings pane.
+    const granted = prism.requestPermission(id);
+    if (!granted) {
+      const grant = prism
+        .permissions(settings.injectInput)
+        .missing.find((missing) => missing.id === id);
+
+      if (grant) {
+        void shell.openExternal(grant.settingsUrl);
+      }
+    }
+
+    return prism.permissions(settings.injectInput);
+  });
+
   ipcMain.handle('prism:identity', () => ({
     version: prism.version(),
     wireFormat: prism.wireFormatVersion(),

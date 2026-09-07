@@ -3,7 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 // The resolution mode is stated because this file is CommonJS while the package is a module,
 // and TypeScript will not guess which one a declaration beside it belongs to. It is types only:
 // nothing is imported at run time.
-import type { HostSnapshot, Identity, Paired, PrismApi, Settings } from './api.js' with { 'resolution-mode': 'import' };
+import type { HostPermissions, HostSnapshot, Identity, Paired, PrismApi, Settings } from './api.js' with { 'resolution-mode': 'import' };
 
 /**
  * The bridge the panel talks to the machine through.
@@ -15,6 +15,11 @@ import type { HostSnapshot, Identity, Paired, PrismApi, Settings } from './api.j
  */
 const api: PrismApi = {
   identity: (): Promise<Identity> => ipcRenderer.invoke('prism:identity'),
+
+  permissions: (): Promise<HostPermissions> => ipcRenderer.invoke('permissions:get'),
+
+  requestPermission: (id: string): Promise<HostPermissions> =>
+    ipcRenderer.invoke('permissions:request', id),
 
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
 
