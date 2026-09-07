@@ -126,7 +126,7 @@ export function Wordmark({ size = 'lg' }: { size?: 'lg' | 'sm' }): JSX.Element {
   return (
     <div className="flex items-center gap-2.5">
       <img
-        src={large ? 'assets/mark-01.svg' : 'assets/mark-home.svg'}
+        src={large ? 'assets/mark.svg' : 'assets/mark-home.svg'}
         alt=""
         className={large ? 'block h-[10px] w-[11.71px]' : 'block h-[13px] w-[15px]'}
       />

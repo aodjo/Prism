@@ -167,10 +167,13 @@ function Pulse(): JSX.Element {
           className="absolute inset-[-27.5%] block max-w-none"
         />
       </div>
+      {/* The wordmark's own triangle, at the size this screen gives it. The same file the top
+          left corner uses: a mark rendered larger is still the mark, and drawing a second one
+          for this spot is how two versions of a logo start to drift apart. */}
       <img
-        src="assets/prism-connecting.svg"
+        src="assets/mark.svg"
         alt=""
-        className="absolute left-[127px] top-[132px] block h-[58px] w-[66px]"
+        className="absolute left-[126px] top-[132px] block h-[58.1px] w-[68px]"
       />
     </div>
   );
