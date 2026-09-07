@@ -8,6 +8,7 @@
 //!
 //! See `docs/wire-format.md` for the protocol this crate implements.
 
+pub mod account;
 pub mod audio;
 pub mod capture;
 pub mod clock;
