@@ -369,6 +369,7 @@ async function pair(): Promise<void> {
 
 /** What this machine is configured to do, as the window last read it. */
 let settings: Settings = {
+  setupDone: true,
   rendezvous: '',
   accountServer: '',
   control: true,

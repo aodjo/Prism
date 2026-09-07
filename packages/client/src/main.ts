@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { createRequire } from 'node:module';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -23,8 +23,20 @@ const here = dirname(fileURLToPath(import.meta.url));
  */
 const prism = require('@prism/native') as typeof import('@prism/native');
 
-/** How wide the window is. Fixed, because its content is a column of hosts and settings. */
+/** How wide the settings window is. Fixed, because its content is a column of rows. */
 const WINDOW_WIDTH = 420;
+
+/**
+ * What the setup flow and the home window open at.
+ *
+ * The design was drawn at 1440 × 900. Opening at that size would fill a laptop display edge to
+ * edge on first launch, so the window starts smaller and the layout is written to hold its
+ * composition at any size rather than only at the one it was drawn at.
+ */
+const STAGE_WIDTH = 1280;
+
+/** And how tall. */
+const STAGE_HEIGHT = 840;
 
 /** The shortest the window goes, so a failed render is not an invisible one. */
 const MIN_WINDOW_HEIGHT = 220;
@@ -32,8 +44,14 @@ const MIN_WINDOW_HEIGHT = 220;
 /** The tallest it goes, so a long list of hosts does not fill the screen. */
 const MAX_WINDOW_HEIGHT = 760;
 
-/** The window. */
+/** The settings window, which is what the original panel became. */
 let window: BrowserWindow | null = null;
+
+/** The setup flow, open only until it is finished or skipped. */
+let setup: BrowserWindow | null = null;
+
+/** The home window, which is where somebody spends their time. */
+let home: BrowserWindow | null = null;
 
 /** The stream process and its state. */
 let stream: Stream | null = null;
@@ -203,6 +221,23 @@ function pushStream(state: StreamState): void {
 }
 
 /**
+ * Sends the stream's state to every window that is open.
+ *
+ * Three of them can be, and all three draw some part of what a stream is doing. Sending to the
+ * one that happened to start it would leave the others showing what was true a minute ago.
+ *
+ * @param {StreamState} state - What the stream is doing.
+ * @returns {void}
+ */
+function broadcastStream(state: StreamState): void {
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('stream:state', state);
+    }
+  }
+}
+
+/**
  * Builds the window.
  *
  * An ordinary window rather than a tray panel: a person picks a machine, watches it, and comes
@@ -235,6 +270,59 @@ function createWindow(): BrowserWindow {
 }
 
 /**
+ * Builds one of the two full-size windows.
+ *
+ * Both are the same window with a different page in it: same chrome, same bridge, same size.
+ * The difference is which of them a launch opens, and that is decided by whether setup has
+ * been through once.
+ *
+ * @param {string} page - The file in `renderer/` to load.
+ * @returns {BrowserWindow} The created window.
+ */
+function createStage(page: string): BrowserWindow {
+  const created = new BrowserWindow({
+    width: STAGE_WIDTH,
+    height: STAGE_HEIGHT,
+    minWidth: 1040,
+    minHeight: 720,
+    title: 'Prism',
+    // The design puts its own content where a title bar would be, and carries the traffic
+    // lights over the top left of it.
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    backgroundColor: '#08080b',
+    webPreferences: {
+      preload: join(here, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  void created.loadFile(join(here, '..', 'renderer', page));
+
+  return created;
+}
+
+/**
+ * Opens the home window, and closes setup if that is what was showing.
+ *
+ * @returns {void}
+ */
+function openHome(): void {
+  if (home && !home.isDestroyed()) {
+    home.focus();
+  } else {
+    home = createStage('home.html');
+  }
+
+  if (setup && !setup.isDestroyed()) {
+    setup.close();
+  }
+
+  setup = null;
+}
+
+/**
  * Registers every call the window is allowed to make.
  *
  * @returns {void}
@@ -246,6 +334,39 @@ function registerHandlers(): void {
     publicKey: prism.identityPublicKey(),
     hosts: prism.pairedPeers(),
   }));
+
+  ipcMain.handle('permissions:get', () => prism.permissions(settings.control));
+
+  ipcMain.handle('permissions:request', (_event, id: string) => {
+    // The system prompts at most once. After that it answers the same way forever and shows
+    // nothing, so a refusal here means the only way forward is the settings pane.
+    const granted = prism.requestPermission(id);
+
+    if (!granted) {
+      const grant = prism.permissions(settings.control).missing.find((one) => one.id === id);
+
+      if (grant) {
+        void shell.openExternal(grant.settingsUrl);
+      }
+    }
+
+    return prism.permissions(settings.control);
+  });
+
+  ipcMain.on('setup:done', () => {
+    settings = { ...settings, setupDone: true };
+    saveSettings(settings);
+    openHome();
+  });
+
+  ipcMain.on('window:settings', () => {
+    if (window && !window.isDestroyed()) {
+      window.focus();
+      return;
+    }
+
+    window = createWindow();
+  });
 
   ipcMain.handle('account:state', async () => {
     await resuming;
@@ -348,7 +469,7 @@ function registerHandlers(): void {
   });
 
   ipcMain.handle('stream:connect', (_event, host: string, address: string) => {
-    stream ??= new Stream(pushStream);
+    stream ??= new Stream(broadcastStream);
 
     // What the window passed, or what was stored for this host last time. The rendezvous
     // server is the fallback, and `Stream.start` refuses when there is neither.
@@ -379,7 +500,22 @@ function registerHandlers(): void {
  * @returns {StreamState} An idle state.
  */
 function idle(): StreamState {
-  return { phase: 'idle', host: null, log: [] };
+  return { phase: 'idle', host: null, terms: null, stats: null, log: [] };
+}
+
+/**
+ * Returns whichever window a person is looking at.
+ *
+ * @returns {BrowserWindow | null} The window, or `null` when none opened.
+ */
+function onScreen(): BrowserWindow | null {
+  for (const open of [home, setup, window]) {
+    if (open && !open.isDestroyed()) {
+      return open;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -394,7 +530,9 @@ function idle(): StreamState {
  * @returns {Promise<void>}
  */
 async function captureWindow(path: string): Promise<void> {
-  if (!window) {
+  const shown = onScreen();
+
+  if (!shown) {
     app.quit();
     return;
   }
@@ -405,13 +543,13 @@ async function captureWindow(path: string): Promise<void> {
   // first is what makes the others photographable at all.
   const first = process.env['PRISM_WINDOW_DRIVE'];
   if (first) {
-    await window.webContents.executeJavaScript(readFileSync(first, 'utf8'), true);
+    await shown.webContents.executeJavaScript(readFileSync(first, 'utf8'), true);
   }
 
-  const image = await window.webContents.capturePage();
+  const image = await shown.webContents.capturePage();
   writeFileSync(path, image.toPNG());
 
-  const text = await window.webContents.executeJavaScript('document.body.innerText');
+  const text = await shown.webContents.executeJavaScript('document.body.innerText');
   process.stdout.write(`${String(text)}\n`);
 
   app.quit();
@@ -422,7 +560,19 @@ void app.whenReady().then(() => {
   registerHandlers();
   resuming = resumeAccount();
 
-  window = createWindow();
+  // A machine that has been through setup goes straight to the thing setup was for. One that
+  // has not is asked the questions setup asks, once.
+  // A developer affordance: the page to open, so that a screenshot can be taken of a window
+  // this machine's own state would not otherwise show.
+  const forced = process.env['PRISM_WINDOW_PAGE'];
+
+  if (forced === 'setup.html' || (!settings.setupDone && forced !== 'home.html')) {
+    setup = createStage('setup.html');
+  } else if (forced === 'index.html') {
+    window = createWindow();
+  } else {
+    home = createStage('home.html');
+  }
 
   const screenshot = process.env['PRISM_WINDOW_SCREENSHOT'];
   if (screenshot) {
@@ -453,7 +603,9 @@ void app.whenReady().then(() => {
  * @returns {Promise<void>}
  */
 async function driveWindow(path: string): Promise<void> {
-  if (!window) {
+  const shown = onScreen();
+
+  if (!shown) {
     app.quit();
     return;
   }
@@ -464,7 +616,19 @@ async function driveWindow(path: string): Promise<void> {
 
   try {
     const source = readFileSync(path, 'utf8');
-    const result: unknown = await window.webContents.executeJavaScript(source, true);
+
+    // A script that ends setup closes the window it is running in, and a promise inside a
+    // destroyed renderer never settles. Racing the close keeps that from hanging forever.
+    const closed = new Promise<string>((resolve) => {
+      shown.once('closed', () => {
+        resolve('the window closed while the script was running');
+      });
+    });
+
+    const result: unknown = await Promise.race([
+      shown.webContents.executeJavaScript(source, true),
+      closed,
+    ]);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (error) {
     process.stdout.write(

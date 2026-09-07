@@ -12,6 +12,7 @@ import type { Settings } from './api.js';
  * can turn it on and immediately see the trade.
  */
 export const DEFAULTS: Settings = {
+  setupDone: false,
   rendezvous: '',
   accountServer: '',
   control: true,

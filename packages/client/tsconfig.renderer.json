@@ -18,5 +18,5 @@
     "sourceMap": true,
     "skipLibCheck": true
   },
-  "include": ["src/panel.ts", "src/api.d.ts"]
+  "include": ["src/panel.ts", "src/setup.ts", "src/home.ts", "src/api.d.ts"]
 }

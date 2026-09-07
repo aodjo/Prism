@@ -1,0 +1,333 @@
+/*
+ * The Prism design system, as the Figma file defines it.
+ *
+ * Two windows share this: the setup flow and the home window. Everything here is a token, a
+ * backdrop or a control — anything that belongs to one screen only lives in that screen's own
+ * stylesheet.
+ *
+ * The aurora backdrop is built from SVGs exported from the design rather than reproduced with
+ * gradients. They are large blurred shapes whose falloff is the whole effect, and a hand-made
+ * approximation of one reads as a different product.
+ */
+
+/* Geist, subset to latin, as one variable file covering every weight the design uses.
+   Bundled rather than fetched: this window has no network origin it is allowed to load from,
+   and a typeface that arrives late is a window that reflows in front of somebody. */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: block;
+  src: url('fonts/geist-latin.woff2') format('woff2');
+}
+
+:root {
+  color-scheme: dark;
+
+  --bg-base: #08080b;
+  --bg-sunk: #06060a;
+  --bg-sidebar: rgba(12, 12, 18, 0.72);
+
+  /* Surfaces are a white wash over the base rather than opaque greys, so that whatever the
+     aurora is doing behind them still comes through. */
+  --surface-1: rgba(255, 255, 255, 0.04);
+  --surface-2: rgba(255, 255, 255, 0.05);
+  --surface-3: rgba(255, 255, 255, 0.06);
+  --surface-4: rgba(255, 255, 255, 0.08);
+
+  --hairline-1: rgba(255, 255, 255, 0.07);
+  --hairline-2: rgba(255, 255, 255, 0.08);
+  --hairline-3: rgba(255, 255, 255, 0.09);
+  --hairline-4: rgba(255, 255, 255, 0.1);
+
+  --ink: #f6f6f8;
+  --ink-2: #e4e4ec;
+  --ink-3: #c9c9d4;
+  --muted: #a2a2b2;
+  --muted-2: #8a8a99;
+  --dim: #62626f;
+  --dim-2: #4e4e5c;
+
+  /* The five colours a prism splits light into. Each one means one thing and is not used for
+     decoration anywhere. */
+  --violet: #7c5cff;
+  --cyan: #35d6ff;
+  --mint: #4de8b0;
+  --amber: #ffb05c;
+  --rose: #ff5ca8;
+  --danger: #ff5c6e;
+  --danger-ink: #ff8a96;
+
+  --on-light: #0b0b10;
+  --light: #f0f0f4;
+
+  --sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --pill: 999px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 15px;
+  color: var(--ink);
+  background: var(--bg-base);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── The backdrop ────────────────────────────────────────────────────────────────────────
+   Positioned in percentages of the window rather than the pixels the design was drawn at, so
+   the composition holds together at any size instead of only at 1440 × 900. Each blob's box is
+   the shape's own bounds; the image inside overflows it by the amount its blur extends, which
+   is what the exported SVG expects. */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* A gradient this wide and this dark bands into visible rings at eight bits a channel, which
+   is what the aurora is made of. A little noise over the top dithers it away — it is below the
+   threshold of being seen as texture and above the one that breaks up the steps. */
+.backdrop::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.055;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='1' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.blob {
+  position: absolute;
+  mix-blend-mode: screen;
+}
+
+.blob img {
+  position: absolute;
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+}
+
+/* The light falls off towards the edges so that the centre of the window is where the eye
+   goes. Reproduced as a gradient because the design's own is one — an SVG holding nothing but
+   a radial fill is a gradient written the long way. */
+.vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse 38.46% 38.46% at 50% 50%,
+    rgba(8, 8, 11, 0) 0%,
+    rgba(8, 8, 11, 0.22) 55%,
+    rgba(6, 6, 10, 0.96) 100%
+  );
+}
+
+/* ── Wordmark ─────────────────────────────────────────────────────────────────────────── */
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wordmark img {
+  display: block;
+  width: 11.71px;
+  height: 10px;
+}
+
+.wordmark span {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 3.6px;
+  color: var(--ink);
+}
+
+/* ── Controls ────────────────────────────────────────────────────────────────────────────
+   Every button in this product is a pill. The three kinds differ by what they are for, not by
+   size: one light-on-dark primary per screen, a washed secondary for everything else, and a
+   red one only where something is being ended. */
+button {
+  font-family: inherit;
+  border: 0;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--violet);
+  outline-offset: 3px;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px 16px 32px;
+  border-radius: var(--pill);
+  background: var(--light);
+  color: var(--on-light);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #ffffff;
+}
+
+.btn-primary.sm {
+  gap: 8px;
+  padding: 9px 14px 9px 18px;
+  font-size: 13.5px;
+}
+
+/* The key or arrow that says what the button does when it is not clicked. Set in a chip so it
+   reads as a legend rather than as part of the label. */
+.btn-primary .trailing {
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(11, 11, 16, 0.09);
+  color: rgba(11, 11, 16, 0.6);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.btn-primary.sm .trailing {
+  font-size: 12px;
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 15px;
+  border: 1px solid var(--hairline-4);
+  border-radius: var(--pill);
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  padding: 9px 15px;
+  border: 1px solid rgba(255, 92, 110, 0.24);
+  border-radius: var(--pill);
+  background: rgba(255, 92, 110, 0.12);
+  color: var(--danger-ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(255, 92, 110, 0.2);
+}
+
+/* A button that is only a sentence. Used where the action is the one somebody takes when they
+   do not want the one beside it. */
+.btn-ghost {
+  padding: 3px 2px;
+  background: none;
+  color: var(--dim);
+  font-size: 13.5px;
+  font-weight: 400;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  color: var(--muted);
+}
+
+/* A grant that has already been given is stated, not offered. */
+.granted {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border-radius: var(--pill);
+  background: rgba(77, 232, 176, 0.14);
+  color: var(--mint);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.granted .tick {
+  font-size: 12px;
+}
+
+/* ── Shared pieces ───────────────────────────────────────────────────────────────────────
+   A live indicator is a dot with its own light around it, which is why it is an image: the
+   glow is a blur the design drew, not a border. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 8px 14px;
+  border: 1px solid rgba(77, 232, 176, 0.24);
+  border-radius: var(--pill);
+  background: rgba(77, 232, 176, 0.12);
+  color: var(--mint);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+
+.badge img {
+  display: block;
+  width: 7px;
+  height: 7px;
+  overflow: visible;
+}
+
+.error {
+  color: var(--danger-ink);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

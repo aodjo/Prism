@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { Settings, StreamState } from './api.js';
+import type { Settings, StreamState, StreamStats, StreamTerms } from './api.js';
 
 /**
  * The stream, as a process of its own.
@@ -71,6 +71,12 @@ export class Stream {
   /** The tail of the process's output. */
   private log: string[] = [];
 
+  /** What the two sides agreed to, once the process has said so. */
+  private terms: StreamTerms | null = null;
+
+  /** The last figures the process reported, or `null` before the first second is up. */
+  private stats: StreamStats | null = null;
+
   /** Called whenever anything above changes. */
   private readonly onChange: (state: StreamState) => void;
 
@@ -89,7 +95,13 @@ export class Stream {
    * @returns {StreamState} The current state.
    */
   state(): StreamState {
-    return { phase: this.phase, host: this.host, log: [...this.log] };
+    return {
+      phase: this.phase,
+      host: this.host,
+      terms: this.terms,
+      stats: this.stats,
+      log: [...this.log],
+    };
   }
 
   /**
@@ -136,6 +148,8 @@ export class Stream {
     this.host = host;
     this.phase = 'connecting';
     this.log = [];
+    this.terms = null;
+    this.stats = null;
 
     const absorb = (chunk: Buffer): void => {
       for (const line of chunk.toString('utf8').split('\n')) {
@@ -153,6 +167,9 @@ export class Stream {
         if (line.includes('session established')) {
           this.phase = 'streaming';
         }
+
+        this.terms = readTerms(line) ?? this.terms;
+        this.stats = readStats(line) ?? this.stats;
       }
 
       this.onChange(this.state());
@@ -190,4 +207,58 @@ export class Stream {
 
     return this.state();
   }
+}
+
+/**
+ * Reads the line the client prints once, naming what the two sides settled on.
+ *
+ * Parsed from the process's own output rather than passed back some other way, because the
+ * process is where the negotiation happens and its output is already being read. A line that
+ * does not match is not an error: most of them are something else.
+ *
+ * @param {string} line - One line of the process's output.
+ * @returns {StreamTerms | null} The terms, or `null` if this line is not that one.
+ */
+function readTerms(line: string): StreamTerms | null {
+  const match =
+    /client: terms codec=(\w+) width=(\d+) height=(\d+) fps=(\d+)/.exec(line);
+
+  if (!match) {
+    return null;
+  }
+
+  // A client that will take whatever the host's screen is says so with the largest number the
+  // field holds. That is not a size anybody wants shown to them.
+  const width = Number(match[2]);
+  const height = Number(match[3]);
+  const capped = width < 65_534 && height < 65_534;
+
+  return {
+    codec: String(match[1]),
+    width: capped ? width : 0,
+    height: capped ? height : 0,
+    fps: Number(match[4]),
+  };
+}
+
+/**
+ * Reads the line the client prints once a second while it is running.
+ *
+ * @param {string} line - One line of the process's output.
+ * @returns {StreamStats | null} The figures, or `null` if this line is not one of those.
+ */
+function readStats(line: string): StreamStats | null {
+  const match =
+    /client: stats rtt_us=(\d+) fps=([\d.]+) kbps=([\d.]+) frames=(\d+)/.exec(line);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    rttMs: Number(match[1]) / 1000,
+    fps: Number(match[2]),
+    mbps: Number(match[3]) / 1000,
+    frames: Number(match[4]),
+  };
 }

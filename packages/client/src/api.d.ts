@@ -75,6 +75,15 @@ export interface Settings {
    * off a screen.
    */
   accountServer: string;
+
+  /**
+   * Whether the setup flow has been through once.
+   *
+   * Stored rather than inferred from whether anything is paired, because somebody who skipped
+   * setup deliberately should not be asked again every time they open the application with no
+   * machines added.
+   */
+  setupDone: boolean;
   /** Whether to send input to the host, or only watch. */
   control: boolean;
   /** Whether to even out arrival jitter at the cost of a little latency. */
@@ -98,13 +107,79 @@ export interface Settings {
  * inside this process could not exist — and putting the frame path in a separate process is
  * the better arrangement anyway.
  */
+/**
+ * What the stream agreed to carry, said once when the session opens.
+ *
+ * Fixed for the life of a session: both sides negotiated it and neither can change it without
+ * opening a new one.
+ */
+export interface StreamTerms {
+  /** The video codec, as the two sides named it. */
+  readonly codec: string;
+  /** Pixels across, or zero when this side asked for whatever the host's screen is. */
+  readonly width: number;
+  /** Pixels down, or zero for the same reason. */
+  readonly height: number;
+  /** Frames a second the host will send. */
+  readonly fps: number;
+}
+
+/**
+ * What the stream is doing right now, refreshed once a second.
+ *
+ * Numbers only. This is the whole of what a running stream tells the interface, and it is why
+ * the interface can show a figure without a frame ever reaching it.
+ */
+export interface StreamStats {
+  /** Best round trip seen so far, in milliseconds. */
+  readonly rttMs: number;
+  /** Frames arriving a second, over the last second. */
+  readonly fps: number;
+  /** What is actually arriving, in megabits a second. */
+  readonly mbps: number;
+  /** Frames reassembled since the stream opened. */
+  readonly frames: number;
+}
+
 export interface StreamState {
   /** `idle`, `connecting`, `streaming`, `stopped` or `failed`. */
   readonly phase: string;
   /** The host being watched, as hex, while a stream is running. */
   readonly host: string | null;
+  /** What the two sides agreed to, once they have. */
+  readonly terms: StreamTerms | null;
+  /** What is happening, as of the last second. */
+  readonly stats: StreamStats | null;
   /** The last few lines the stream process wrote, which is what explains a failure. */
   readonly log: readonly string[];
+}
+
+/** One system grant this machine has not given yet. */
+export interface MissingGrant {
+  /** What to pass back to ask for it. */
+  readonly id: string;
+  /** What the system's own settings call it. */
+  readonly name: string;
+  /** Why it is needed, in one sentence. */
+  readonly purpose: string;
+  /** A link that opens the settings pane holding it. */
+  readonly settingsUrl: string;
+}
+
+/**
+ * What this machine currently allows.
+ *
+ * A client that only watches another screen needs neither of these. They are asked for during
+ * setup because the machine somebody sets up is usually also one they will want to reach from
+ * somewhere else, and the moment to ask is once, at the start.
+ */
+export interface HostPermissions {
+  /** Whether the screen may be recorded. */
+  readonly screen: boolean;
+  /** Whether this machine may be controlled. */
+  readonly input: boolean;
+  /** What is still missing, ready to show. */
+  readonly missing: readonly MissingGrant[];
 }
 
 /** What one pairing exchange produced. */
@@ -128,6 +203,38 @@ export interface PrismApi {
    * @returns {Promise<Identity>} This machine's key and its hosts.
    */
   identity(): Promise<Identity>;
+
+  /**
+   * Returns what this machine allows, without prompting for anything.
+   *
+   * @returns {Promise<HostPermissions>} What is held and what is missing.
+   */
+  permissions(): Promise<HostPermissions>;
+
+  /**
+   * Asks the system for one grant, opening its settings pane if the answer is already no.
+   *
+   * @param {string} id - The grant's id, from [`MissingGrant`].
+   * @returns {Promise<HostPermissions>} What is held afterwards.
+   */
+  requestPermission(id: string): Promise<HostPermissions>;
+
+  /**
+   * Closes setup and opens the home window.
+   *
+   * Called once, at the end of the flow or when somebody skips it. Setup does not run again
+   * unless this machine forgets everything it knows.
+   *
+   * @returns {void}
+   */
+  finishSetup(): void;
+
+  /**
+   * Opens the settings window, or brings it forward if it is already open.
+   *
+   * @returns {void}
+   */
+  openSettings(): void;
 
   /**
    * Returns what is known about the account.

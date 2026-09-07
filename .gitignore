@@ -20,3 +20,9 @@ packages/host/renderer/panel.js
 packages/host/renderer/panel.js.map
 packages/client/renderer/panel.js
 packages/client/renderer/panel.js.map
+packages/client/renderer/setup.js
+packages/client/renderer/setup.js.map
+packages/client/renderer/home.js
+packages/client/renderer/home.js.map
+packages/client/renderer/format.js
+packages/client/renderer/format.js.map

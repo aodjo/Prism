@@ -1,0 +1,1020 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self'"
+    />
+    <title>Prism</title>
+    <link rel="stylesheet" href="prism.css" />
+    <style>
+      /* The setup flow: one window, six screens, one at a time.
+         Every screen is a centred column over the same backdrop, so moving between them moves
+         the content and leaves the world it sits in alone. */
+
+      .drag {
+        position: fixed;
+        inset: 0 0 auto 0;
+        height: 44px;
+        -webkit-app-region: drag;
+        z-index: 3;
+      }
+
+      /* ── Backdrop ─────────────────────────────────────────────────────────────────────
+         Two arrangements. The welcome screen gets four blobs and a horizon that lifts the
+         light off the floor of the window; every screen after it gets the calmer three, so
+         that arriving somewhere is brighter than being somewhere. */
+      #sky-welcome .violet-wide {
+        left: 14.58%;
+        top: 13.33%;
+        width: 70.83%;
+        height: 95.56%;
+      }
+
+      #sky-welcome .violet-wide img {
+        inset: -13.95% -11.76%;
+      }
+
+      #sky-welcome .cyan-left {
+        left: -12.5%;
+        top: 26.67%;
+        width: 55.56%;
+        height: 82.22%;
+      }
+
+      #sky-welcome .cyan-left img {
+        inset: -20.27% -18.75%;
+      }
+
+      #sky-welcome .rose-right {
+        left: 57.64%;
+        top: 28.89%;
+        width: 59.72%;
+        height: 84.44%;
+      }
+
+      #sky-welcome .rose-right img {
+        inset: -19.74% -17.44%;
+      }
+
+      #sky-welcome .core {
+        left: 26.39%;
+        top: 51.11%;
+        width: 51.39%;
+        height: 62.22%;
+      }
+
+      #sky-welcome .core img {
+        inset: -32.14% -24.32%;
+      }
+
+      #sky-welcome .horizon {
+        left: 9.03%;
+        top: 47.78%;
+        width: 81.94%;
+        height: 33.33%;
+      }
+
+      #sky-welcome .horizon img {
+        inset: -36.67% -9.32%;
+      }
+
+      #sky-steps .violet {
+        left: 16.67%;
+        top: 21.11%;
+        width: 67.36%;
+        height: 90%;
+      }
+
+      #sky-steps .violet img {
+        inset: -20.37% -17.01%;
+      }
+
+      #sky-steps .cyan {
+        left: -11.81%;
+        top: 33.33%;
+        width: 54.86%;
+        height: 78.89%;
+      }
+
+      #sky-steps .cyan img {
+        inset: -26.06% -23.42%;
+      }
+
+      #sky-steps .rose {
+        left: 56.94%;
+        top: 27.78%;
+        width: 59.03%;
+        height: 83.33%;
+      }
+
+      #sky-steps .rose img {
+        inset: -24.67% -21.76%;
+      }
+
+      /* The one screen the design brightens, because it is the one that is waiting. */
+      body[data-step='connecting'] #sky-steps .violet {
+        opacity: 1.3;
+      }
+
+      /* ── Frame ────────────────────────────────────────────────────────────────────────── */
+      /* The comp insets its four corners by different amounts — the wordmark sits further in
+         than the step dots, and the skip link further in than the Continue button. The frame
+         takes the outermost of each and the pieces make up the rest. */
+      .frame {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        padding: 71px 40px 64px 56px;
+      }
+
+      .top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex: none;
+        height: 20px;
+      }
+
+      .top .wordmark {
+        margin-left: 21px;
+      }
+
+      #skip {
+        margin-right: 23px;
+        -webkit-app-region: no-drag;
+      }
+
+      .stage {
+        display: flex;
+        flex: 1 1 auto;
+        align-items: center;
+        justify-content: center;
+        min-height: 0;
+      }
+
+      .bottom {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex: none;
+        height: 56px;
+      }
+
+      #steps {
+        display: block;
+        width: 70px;
+        height: 6px;
+      }
+
+      .version {
+        margin-left: auto;
+        color: var(--dim);
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      /* ── Screens ──────────────────────────────────────────────────────────────────────── */
+      .screen {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+      }
+
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+
+      /* 01 · Welcome. The largest type in the product, and the only place it appears.
+         Sized against the window rather than in the pixels the design was drawn at: 104px of
+         1440 is a quarter of the width, and holding it at 104 in a smaller window would let
+         two words fill a line that was drawn to hold three. It never grows past what the
+         design asked for. */
+      .hero-title {
+        max-width: min(1040px, 72.2vw);
+        font-size: min(104px, 7.22vw);
+        line-height: 0.98em;
+        font-weight: 600;
+        letter-spacing: 0.029em;
+      }
+
+      .hero-sub {
+        max-width: min(700px, 48.6vw);
+        margin-top: 28px;
+        color: var(--muted);
+        font-size: min(19px, 1.32vw);
+        line-height: 1.58em;
+      }
+
+      #screen-welcome .btn-primary {
+        margin-top: 28px;
+      }
+
+      #restore {
+        margin-top: 28px;
+      }
+
+      /* 02 · Intro */
+      .prism-art {
+        position: relative;
+        width: 360px;
+        height: 276px;
+      }
+
+      .prism-art > * {
+        position: absolute;
+      }
+
+      .prism-art .glow {
+        left: 36px;
+        top: 18px;
+        width: 276px;
+        height: 240px;
+        mix-blend-mode: screen;
+      }
+
+      .prism-art .glow img {
+        position: absolute;
+        inset: -22.5% -19.57%;
+        display: block;
+        width: auto;
+        height: auto;
+      }
+
+      .prism-art .beam {
+        left: 27px;
+        top: 137px;
+        width: 190px;
+        height: 2px;
+        mix-blend-mode: screen;
+      }
+
+      .prism-art .beam img {
+        position: absolute;
+        inset: -36% -0.38%;
+        display: block;
+        width: auto;
+        height: auto;
+      }
+
+      .prism-art .solid {
+        left: 174px;
+        top: 91px;
+        width: 89px;
+        height: 75px;
+      }
+
+      .prism-art .solid img,
+      .prism-art .glow img,
+      .prism-art .beam img {
+        max-width: none;
+      }
+
+      .prism-art .solid img {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* The split light. Five rays leaving one point at the angles the design set, each fading
+         out along its own length. Drawn rather than exported because they are gradients on a
+         rotated box, which is what the design file holds too. */
+      .ray {
+        left: 216px;
+        top: 136.8px;
+        width: 180px;
+        height: 1.5px;
+        filter: blur(0.75px);
+        mix-blend-mode: screen;
+        transform-origin: 0 50%;
+      }
+
+      .ray.r1 {
+        transform: rotate(-21deg);
+        background: linear-gradient(
+          to right,
+          var(--violet),
+          rgba(124, 92, 255, 0.55) 65%,
+          rgba(124, 92, 255, 0)
+        );
+      }
+
+      .ray.r2 {
+        transform: rotate(-10.5deg);
+        background: linear-gradient(
+          to right,
+          var(--cyan),
+          rgba(53, 214, 255, 0.55) 65%,
+          rgba(53, 214, 255, 0)
+        );
+      }
+
+      .ray.r3 {
+        background: linear-gradient(
+          to right,
+          var(--mint),
+          rgba(77, 232, 176, 0.55) 65%,
+          rgba(77, 232, 176, 0)
+        );
+      }
+
+      .ray.r4 {
+        transform: rotate(10.5deg);
+        background: linear-gradient(
+          to right,
+          var(--amber),
+          rgba(255, 176, 92, 0.55) 65%,
+          rgba(255, 176, 92, 0)
+        );
+      }
+
+      .ray.r5 {
+        transform: rotate(21deg);
+        background: linear-gradient(
+          to right,
+          var(--rose),
+          rgba(255, 92, 168, 0.55) 65%,
+          rgba(255, 92, 168, 0)
+        );
+      }
+
+      .title-lg {
+        max-width: min(640px, 44.4vw);
+        font-size: min(40px, 2.78vw);
+        line-height: 47px;
+        font-weight: 600;
+        letter-spacing: -1.1px;
+      }
+
+      .title {
+        max-width: min(700px, 48.6vw);
+        font-size: min(38px, 2.64vw);
+        line-height: 45px;
+        font-weight: 600;
+        letter-spacing: -1.1px;
+      }
+
+      .lead {
+        max-width: min(520px, 36.1vw);
+        color: var(--muted);
+        font-size: min(15.5px, 1.076vw);
+        line-height: 26px;
+      }
+
+      .body {
+        max-width: min(580px, 40.3vw);
+        color: var(--muted);
+        font-size: min(15px, 1.042vw);
+        line-height: 25px;
+      }
+
+      #screen-intro .title-lg {
+        margin-top: 16px;
+      }
+
+      #screen-intro .lead {
+        margin-top: 16px;
+      }
+
+      /* 03 · Permissions */
+      #screen-permissions .body {
+        max-width: min(560px, 38.9vw);
+        margin-top: 14px;
+      }
+
+      .card {
+        width: min(620px, 43.1vw);
+        border: 1px solid var(--hairline-3);
+        border-radius: var(--radius-xl);
+        background: var(--surface-2);
+        overflow: hidden;
+        text-align: left;
+      }
+
+      #screen-permissions .card {
+        margin-top: 63px;
+      }
+
+      .grant {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 20px 18px 20px 22px;
+      }
+
+      .grant + .grant {
+        border-top: 1px solid var(--hairline-1);
+      }
+
+      .grant .mark {
+        display: flex;
+        flex: none;
+        align-items: center;
+        justify-content: center;
+        width: 38px;
+        height: 38px;
+        border-radius: 11px;
+        font-size: 15px;
+        font-weight: 500;
+      }
+
+      .grant[data-grant='screen'] .mark {
+        border: 1px solid rgba(124, 92, 255, 0.28);
+        background: rgba(124, 92, 255, 0.16);
+        color: var(--violet);
+      }
+
+      .grant[data-grant='input'] .mark {
+        border: 1px solid rgba(53, 214, 255, 0.28);
+        background: rgba(53, 214, 255, 0.16);
+        color: var(--cyan);
+      }
+
+      .grant[data-grant='network'] .mark {
+        border: 1px solid rgba(77, 232, 176, 0.28);
+        background: rgba(77, 232, 176, 0.16);
+        color: var(--mint);
+      }
+
+      .grant .text {
+        display: flex;
+        flex: 1 1 0;
+        min-width: 0;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .grant .name {
+        font-size: 15px;
+        font-weight: 500;
+      }
+
+      .grant .why {
+        color: var(--muted-2);
+        font-size: 13px;
+      }
+
+      .footnote {
+        margin-top: 16px;
+        color: var(--dim);
+        font-size: 13px;
+      }
+
+      /* 04 · Add device */
+      #screen-device .body {
+        margin-top: 14px;
+      }
+
+      .code {
+        display: flex;
+        gap: 10px;
+        margin-top: 88px;
+      }
+
+      /* One box per character, so that the code is read and typed as six things rather than as
+         a word. The caret lives in the box being filled. */
+      .code input {
+        width: 62px;
+        height: 72px;
+        padding: 0;
+        border: 1px solid var(--hairline-4);
+        border-radius: var(--radius-lg);
+        background: var(--surface-1);
+        color: var(--ink);
+        font-family: inherit;
+        font-size: 26px;
+        font-weight: 500;
+        text-align: center;
+        text-transform: uppercase;
+        caret-color: rgba(124, 92, 255, 0.9);
+      }
+
+      .code input:not(:placeholder-shown) {
+        background: var(--surface-4);
+      }
+
+      .code input:focus {
+        outline: 0;
+        border: 1.6px solid rgba(124, 92, 255, 0.85);
+        box-shadow: 0 0 18px rgba(124, 92, 255, 0.35);
+      }
+
+      /* Where a machine is, for the case the design does not draw: pairing needs an address,
+         and there is no address to be had until a rendezvous server is configured. Kept quiet
+         and out of the way of the code, which is the thing being asked for. */
+      .where {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .where label {
+        color: var(--dim);
+        font-size: 12.5px;
+      }
+
+      .where input {
+        width: 240px;
+        padding: 7px 12px;
+        border: 1px solid var(--hairline-2);
+        border-radius: var(--pill);
+        background: var(--surface-1);
+        color: var(--ink-3);
+        font-family: inherit;
+        font-size: 12.5px;
+        text-align: center;
+      }
+
+      .where input::placeholder {
+        color: var(--dim-2);
+      }
+
+      .where input:focus {
+        outline: 0;
+        border-color: rgba(124, 92, 255, 0.6);
+        color: var(--ink);
+      }
+
+      .rule {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        width: min(620px, 43.1vw);
+        margin-top: 34px;
+        color: var(--dim);
+        font-size: 12.5px;
+      }
+
+      .rule::before,
+      .rule::after {
+        content: '';
+        flex: 1 1 0;
+        height: 1px;
+        background: var(--hairline-2);
+      }
+
+      .devices {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        width: min(620px, 43.1vw);
+        margin-top: 32px;
+        text-align: left;
+      }
+
+      .device {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 14px 14px 14px 18px;
+        border: 1px solid var(--hairline-2);
+        border-radius: var(--radius-lg);
+        background: var(--surface-1);
+      }
+
+      .device .status {
+        display: block;
+        flex: none;
+        width: 8px;
+        height: 8px;
+        overflow: visible;
+      }
+
+      .device .text {
+        display: flex;
+        flex: 1 1 0;
+        min-width: 0;
+        flex-direction: column;
+        gap: 3px;
+      }
+
+      .device .name {
+        font-size: 14.5px;
+        font-weight: 500;
+        line-height: 1.2;
+      }
+
+      .device .meta {
+        color: var(--muted-2);
+        font-size: 11.5px;
+        line-height: 1.2;
+      }
+
+      .device .ping {
+        color: var(--dim);
+        font-size: 11.5px;
+        font-weight: 500;
+      }
+
+      .empty {
+        padding: 18px 0;
+        color: var(--dim);
+        font-size: 13px;
+        text-align: center;
+      }
+
+      /* 05 · Connecting */
+      .pulse {
+        position: relative;
+        width: 320px;
+        height: 320px;
+      }
+
+      .pulse img {
+        position: absolute;
+        display: block;
+      }
+
+      .pulse .ring1 {
+        left: 0;
+        top: 0;
+        width: 320px;
+        height: 320px;
+      }
+
+      .pulse .ring2 {
+        left: 40px;
+        top: 40px;
+        width: 240px;
+        height: 240px;
+      }
+
+      .pulse .ring3 {
+        left: 78px;
+        top: 78px;
+        width: 164px;
+        height: 164px;
+      }
+
+      /* The rings travel outward while the connection is being made, one after the other, and
+         stop when it is. It is the only motion in the flow, and it is here because this is the
+         only screen that is waiting for something. */
+      .pulse .ring1,
+      .pulse .ring2,
+      .pulse .ring3 {
+        animation: ripple 3s ease-out infinite;
+        transform-origin: center;
+      }
+
+      .pulse .ring2 {
+        animation-delay: 0.4s;
+      }
+
+      .pulse .ring1 {
+        animation-delay: 0.8s;
+      }
+
+      @keyframes ripple {
+        0% {
+          opacity: 0.15;
+          transform: scale(0.94);
+        }
+        45% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0.15;
+          transform: scale(1.06);
+        }
+      }
+
+      .pulse .glow {
+        position: absolute;
+        left: 60px;
+        top: 60px;
+        width: 200px;
+        height: 200px;
+        mix-blend-mode: screen;
+      }
+
+      .pulse .glow img {
+        position: absolute;
+        inset: -27.5%;
+        width: auto;
+        height: auto;
+        max-width: none;
+      }
+
+      .pulse .solid {
+        left: 127px;
+        top: 132px;
+        width: 66px;
+        height: 58px;
+      }
+
+      #screen-connecting .title {
+        margin-top: 20px;
+      }
+
+      .meta {
+        margin-top: 10px;
+        color: var(--muted-2);
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+
+      .progress {
+        width: min(500px, 34.7vw);
+        margin-top: 59px;
+        border: 1px solid var(--hairline-2);
+        border-radius: var(--radius-lg);
+        background: var(--surface-1);
+        overflow: hidden;
+        text-align: left;
+      }
+
+      .stage-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 18px;
+      }
+
+      .stage-row + .stage-row {
+        border-top: 1px solid var(--surface-3);
+      }
+
+      .stage-row .mark {
+        display: flex;
+        flex: none;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        border-radius: var(--pill);
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      .stage-row[data-state='done'] .mark {
+        background: rgba(77, 232, 176, 0.16);
+        color: var(--mint);
+      }
+
+      /* A dashed ring rather than a spinner: it says this one is open without implying a
+         proportion of it is finished, which nothing here can honestly report. */
+      .stage-row[data-state='doing'] .mark {
+        border: 2px dashed rgba(124, 92, 255, 0.85);
+      }
+
+      /* The tick is in the markup for every row so that a row becoming done does not have to
+         grow a character. Until then there is nothing to read in it. */
+      .stage-row:not([data-state='done']) .mark {
+        color: transparent;
+      }
+
+      .stage-row[data-state='waiting'] .mark {
+        border: 2px solid var(--hairline-4);
+      }
+
+      .stage-row .what {
+        color: var(--ink-3);
+        font-size: 14px;
+        font-weight: 500;
+      }
+
+      .stage-row[data-state='doing'] .what {
+        color: var(--ink);
+      }
+
+      .stage-row .detail {
+        margin-left: auto;
+        color: var(--dim);
+        font-size: 11.5px;
+      }
+
+      #cancel {
+        margin-top: 22px;
+      }
+
+      /* 06 · Ready */
+      .ready-title {
+        max-width: min(760px, 52.8vw);
+        margin-top: 19px;
+        font-size: min(61px, 4.24vw);
+        line-height: 65px;
+        font-weight: 600;
+        letter-spacing: -2.1px;
+      }
+
+      .ready-sub {
+        max-width: min(640px, 44.4vw);
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: min(16px, 1.11vw);
+        line-height: 27px;
+      }
+
+      .stats {
+        display: flex;
+        width: min(560px, 38.9vw);
+        margin-top: 26px;
+        border: 1px solid var(--hairline-3);
+        border-radius: var(--radius-xl);
+        background: var(--surface-2);
+        overflow: hidden;
+      }
+
+      .stat {
+        display: flex;
+        flex: 1 1 0;
+        min-width: 0;
+        flex-direction: column;
+        align-items: center;
+        gap: 7px;
+        padding: 20px 0;
+      }
+
+      .stat + .stat {
+        border-left: 1px solid var(--hairline-1);
+      }
+
+      .stat .label {
+        color: var(--dim);
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 1.4px;
+      }
+
+      .stat .value {
+        font-size: 17px;
+        font-weight: 500;
+      }
+
+      #screen-ready .btn-primary {
+        margin-top: 23px;
+      }
+    </style>
+  </head>
+
+  <body data-step="welcome">
+    <div class="drag"></div>
+
+    <div class="backdrop" id="sky-welcome">
+      <div class="blob violet-wide"><img src="assets/aurora-w1.svg" alt="" /></div>
+      <div class="blob cyan-left"><img src="assets/aurora-w2.svg" alt="" /></div>
+      <div class="blob rose-right"><img src="assets/aurora-w3.svg" alt="" /></div>
+      <div class="blob core"><img src="assets/aurora-w4.svg" alt="" /></div>
+      <div class="blob horizon"><img src="assets/aurora-horizon.svg" alt="" /></div>
+      <div class="vignette"></div>
+    </div>
+
+    <div class="backdrop" id="sky-steps" hidden>
+      <div class="blob violet"><img src="assets/aurora-violet.svg" alt="" /></div>
+      <div class="blob cyan"><img src="assets/aurora-cyan.svg" alt="" /></div>
+      <div class="blob rose"><img src="assets/aurora-rose.svg" alt="" /></div>
+      <div class="vignette"></div>
+    </div>
+
+    <div class="frame">
+      <div class="top">
+        <div class="wordmark">
+          <img src="assets/mark-01.svg" alt="" />
+          <span>PRISM</span>
+        </div>
+        <button type="button" class="btn-ghost" id="skip" hidden>Skip setup</button>
+      </div>
+
+      <div class="stage">
+        <!-- 01 · Welcome -->
+        <section class="screen" id="screen-welcome">
+          <h1 class="hero-title">Your desktop.<br />Everywhere.</h1>
+          <p class="hero-sub">Low-latency remote access for macOS, Windows, and Linux.</p>
+          <button type="button" class="btn-primary" id="begin">
+            Begin<span class="trailing">→</span>
+          </button>
+          <button type="button" class="btn-ghost" id="restore">
+            Already using PRISM? Restore my devices
+          </button>
+        </section>
+
+        <!-- 02 · Intro -->
+        <section class="screen" id="screen-intro" hidden>
+          <div class="prism-art">
+            <div class="glow"><img src="assets/prism-glow.svg" alt="" /></div>
+            <div class="beam"><img src="assets/incident-beam.svg" alt="" /></div>
+            <div class="ray r1"></div>
+            <div class="ray r2"></div>
+            <div class="ray r3"></div>
+            <div class="ray r4"></div>
+            <div class="ray r5"></div>
+            <div class="solid"><img src="assets/prism-intro.svg" alt="" /></div>
+          </div>
+          <h2 class="title-lg">One machine, every screen.</h2>
+          <p class="lead">
+            PRISM streams your desktop to any other device you own — with latency low enough
+            that you stop noticing it&rsquo;s remote.
+          </p>
+        </section>
+
+        <!-- 03 · Permissions -->
+        <section class="screen" id="screen-permissions" hidden>
+          <h2 class="title">A few permissions first</h2>
+          <p class="body">
+            PRISM needs these to capture and control this machine.<br />Nothing is sent outside
+            your own network.
+          </p>
+          <div class="card" id="grants"></div>
+          <p class="footnote">You can change these later in Settings → Privacy.</p>
+        </section>
+
+        <!-- 04 · Add device -->
+        <section class="screen" id="screen-device" hidden>
+          <h2 class="title">Add your first device</h2>
+          <p class="body">
+            Install PRISM on the machine you want to reach, then type the six characters it
+            shows on screen.
+          </p>
+          <div class="code" id="code">
+            <input type="text" maxlength="1" inputmode="numeric" placeholder=" " aria-label="Character 1" />
+            <input type="text" maxlength="1" inputmode="numeric" placeholder=" " aria-label="Character 2" />
+            <input type="text" maxlength="1" inputmode="numeric" placeholder=" " aria-label="Character 3" />
+            <input type="text" maxlength="1" inputmode="numeric" placeholder=" " aria-label="Character 4" />
+            <input type="text" maxlength="1" inputmode="numeric" placeholder=" " aria-label="Character 5" />
+            <input type="text" maxlength="1" inputmode="numeric" placeholder=" " aria-label="Character 6" />
+          </div>
+          <div class="where">
+            <label for="pair-address">Showing that code at</label>
+            <input type="text" id="pair-address" placeholder="192.168.0.14:47100" spellcheck="false" />
+          </div>
+          <div class="rule">or pick one nearby</div>
+          <div class="devices" id="known"></div>
+          <p class="error" id="pair-error" hidden></p>
+        </section>
+
+        <!-- 05 · Connecting -->
+        <section class="screen" id="screen-connecting" hidden>
+          <div class="pulse">
+            <img class="ring1" src="assets/ring-1.svg" alt="" />
+            <img class="ring2" src="assets/ring-2.svg" alt="" />
+            <img class="ring3" src="assets/ring-3.svg" alt="" />
+            <div class="glow"><img src="assets/core-glow.svg" alt="" /></div>
+            <img class="solid" src="assets/prism-connecting.svg" alt="" />
+          </div>
+          <h2 class="title" id="connect-to">Connecting</h2>
+          <p class="meta" id="connect-meta"></p>
+          <div class="progress">
+            <div class="stage-row" data-state="waiting" id="stage-handshake">
+              <span class="mark">✓</span>
+              <span class="what">Secure handshake</span>
+              <span class="detail">Ed25519</span>
+            </div>
+            <div class="stage-row" data-state="waiting" id="stage-codec">
+              <span class="mark">✓</span>
+              <span class="what">Negotiating codec</span>
+              <span class="detail" id="detail-codec">—</span>
+            </div>
+            <div class="stage-row" data-state="waiting" id="stage-video">
+              <span class="mark">✓</span>
+              <span class="what">Opening video stream</span>
+              <span class="detail" id="detail-video">—</span>
+            </div>
+          </div>
+          <button type="button" class="btn-ghost" id="cancel">Cancel</button>
+          <p class="error" id="connect-error" hidden></p>
+        </section>
+
+        <!-- 06 · Ready -->
+        <section class="screen" id="screen-ready" hidden>
+          <span class="badge"><img src="assets/dot-ready.svg" alt="" />Connected</span>
+          <h2 class="ready-title">You&rsquo;re all set.</h2>
+          <p class="ready-sub" id="ready-sub"></p>
+          <div class="stats">
+            <div class="stat">
+              <span class="label">LATENCY</span>
+              <span class="value" id="stat-latency" style="color: var(--mint)">—</span>
+            </div>
+            <div class="stat">
+              <span class="label">CODEC</span>
+              <span class="value" id="stat-codec" style="color: var(--cyan)">—</span>
+            </div>
+            <div class="stat">
+              <span class="label">DISPLAY</span>
+              <span class="value" id="stat-display" style="color: var(--violet)">—</span>
+            </div>
+          </div>
+          <button type="button" class="btn-primary" id="enter">
+            Enter PRISM<span class="trailing">⌘↵</span>
+          </button>
+        </section>
+      </div>
+
+      <div class="bottom">
+        <img id="steps" src="assets/steps-2.svg" alt="" hidden />
+        <span class="version" id="version" hidden></span>
+        <button type="button" class="btn-primary" id="next" hidden>
+          Continue<span class="trailing">→</span>
+        </button>
+      </div>
+    </div>
+
+    <script type="module" src="setup.js"></script>
+  </body>
+</html>

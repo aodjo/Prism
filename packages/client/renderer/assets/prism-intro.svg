@@ -1,0 +1,13 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="89" height="75" viewBox="0 0 89 75" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path id="Prism" d="M88.3418 74.625H0.658203L44.5 0.734375L88.3418 74.625Z" fill="url(#paint0_linear_0_10)" stroke="url(#paint1_linear_0_10)" stroke-width="0.75"/>
+<defs>
+<linearGradient id="paint0_linear_0_10" x1="-6.8841" y1="1.06437e-06" x2="64.5178" y2="73.3786" gradientUnits="userSpaceOnUse">
+<stop stop-color="white" stop-opacity="0.11"/>
+<stop offset="1" stop-color="white" stop-opacity="0.02"/>
+</linearGradient>
+<linearGradient id="paint1_linear_0_10" x1="-6.8841" y1="50" x2="95.8842" y2="50" gradientUnits="userSpaceOnUse">
+<stop stop-color="white" stop-opacity="0.55"/>
+<stop offset="1" stop-color="white" stop-opacity="0.16"/>
+</linearGradient>
+</defs>
+</svg>
