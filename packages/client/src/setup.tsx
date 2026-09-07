@@ -33,8 +33,8 @@ const prism = window.prism;
 /** The screens, in the order somebody sees them. */
 const STEPS = [
   'welcome',
-  'intro',
   'account',
+  'intro',
   'permissions',
   'device',
   'connecting',
@@ -397,11 +397,22 @@ function Setup(): JSX.Element {
     setStep(next);
   };
 
-  const advance = (): void => {
-    const next = STEPS[STEPS.indexOf(step) + 1];
+  /**
+   * Whether a screen has nothing left to ask.
+   *
+   * Only the account screen ever does: somebody already signed in has answered it, and showing
+   * them a page that says so and offers a button to leave is a page that wastes their time.
+   */
+  const answered = (which: Step): boolean => which === 'account' && signedIn !== null;
 
-    if (next) {
-      go(next);
+  const advance = (): void => {
+    for (let at = STEPS.indexOf(step) + 1; at < STEPS.length; at += 1) {
+      const next = STEPS[at];
+
+      if (next && !answered(next)) {
+        go(next);
+        return;
+      }
     }
   };
 
@@ -523,13 +534,15 @@ function Setup(): JSX.Element {
               many machines the account already knows about. */}
           {/* Directly over the brightest part of the aurora, which is the one place on any of
               these screens where even the muted end of the scale washes out. */}
-          <button
-            type="button"
-            className="btn-ghost no-drag mt-7 text-ink-3 hover:text-ink"
-            onClick={prism.openSettings}
-          >
-            Already using PRISM? Sign in
-          </button>
+          {signedIn === null && (
+            <button
+              type="button"
+              className="btn-ghost no-drag mt-7 text-ink-3 hover:text-ink"
+              onClick={advance}
+            >
+              Already using PRISM? Sign in
+            </button>
+          )}
         </section>
       )}
 
@@ -549,12 +562,11 @@ function Setup(): JSX.Element {
       {which === 'account' && (
         <section className={cls}>
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-            {signedIn === null ? 'Sign in to PRISM' : 'Signed in'}
+            Your PRISM account
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
-            {signedIn === null
-              ? 'An account is how your machines find each other. Without one they still pair, by reading a code off the other screen.'
-              : `${signedIn} — every machine on this account already knows about this one.`}
+            An account is how your machines find each other. Without one they still pair, by
+            reading a code off the other screen.
           </p>
 
           {enrolment ? (
@@ -583,7 +595,7 @@ function Setup(): JSX.Element {
                 I have it — sign in
               </button>
             </div>
-          ) : signedIn === null ? (
+          ) : (
             <div className="card mt-9 flex w-[min(440px,30.6vw)] flex-col gap-3 p-6 text-left">
               <label className="flex flex-col gap-1.5">
                 <span className="text-fine-2 text-dim">Email</span>
@@ -612,7 +624,9 @@ function Setup(): JSX.Element {
                 />
               </label>
               <label className="flex flex-col gap-1.5">
-                <span className="text-fine-2 text-dim">Six digits from your authenticator</span>
+                <span className="text-fine-2 text-dim">
+                  Six digits from your authenticator — only when signing in
+                </span>
                 <input
                   type="text"
                   inputMode="numeric"
@@ -653,21 +667,13 @@ function Setup(): JSX.Element {
                 </button>
               </div>
             </div>
-          ) : (
-            <div className="card mt-9 flex w-[min(440px,30.6vw)] items-center justify-between gap-3 p-5">
-              <span className="text-body-2 text-ink">{signedIn}</span>
-              <span className="tag-granted">
-                <span className="text-fine">✓</span>
-                <span>Signed in</span>
-              </span>
-            </div>
           )}
 
           <Trouble message={accountTrouble} className="mt-4" />
 
           {/* An account is worth having and not worth being trapped by: a machine with none
               still pairs by code, which is the next screen either way. */}
-          {signedIn === null && enrolment === null && (
+          {enrolment === null && (
             <button type="button" className="btn-ghost no-drag mt-7" onClick={advance}>
               Continue without an account
             </button>
@@ -973,7 +979,8 @@ function Setup(): JSX.Element {
     </>
   );
 
-  const counted = COUNTED.indexOf(step as (typeof COUNTED)[number]);
+  const shownSteps = COUNTED.filter((which) => !answered(which));
+  const counted = shownSteps.indexOf(step as (typeof COUNTED)[number]);
 
   return (
     <>
@@ -1033,11 +1040,11 @@ function Setup(): JSX.Element {
           key={`nav-${step}`}
           className="flex h-14 flex-none animate-[fade-in_420ms_ease-out_both] items-center justify-between"
         >
-          {counted >= 0 ? <Steps at={counted} of={COUNTED.length} /> : <span />}
+          {counted >= 0 ? <Steps at={counted} of={shownSteps.length} /> : <span />}
           {step === 'welcome' && (
             <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>
           )}
-          {(HAS_NEXT.has(step) || (step === 'account' && signedIn !== null)) && (
+          {HAS_NEXT.has(step) && (
             <Primary trailing="→" onClick={advance}>
               Continue
             </Primary>
