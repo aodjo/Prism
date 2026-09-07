@@ -64,17 +64,53 @@ export interface AccountEnrolmentView {
   readonly secret: string;
 }
 
+/** What this machine's own session is doing while it is shared. */
+export interface HostSnapshot {
+  /** `opening`, `waiting`, `streaming`, `stopped` or `failed`. */
+  readonly phase: string;
+  /** Where the rendezvous server sees this machine, once it has said. */
+  readonly observed: string | null;
+  /**
+   * The address this machine is actually listening on.
+   *
+   * What somebody on the same network has to be told, and the only way to reach this machine
+   * when no rendezvous server is configured.
+   */
+  readonly local: string | null;
+  /** The watching machine's public key as hex, once one has connected. */
+  readonly peer: string | null;
+  /** Frames captured, encoded and sent. */
+  readonly frames: bigint;
+  /** Packets put on the wire, parity included. */
+  readonly packets: bigint;
+  /** Bytes put on the wire, headers included. */
+  readonly bytes: bigint;
+  /** What sending has worked out to so far, in bits per second. */
+  readonly bitrateBps: bigint;
+  /** What went wrong, when the phase is `failed`. */
+  readonly error: string | null;
+}
+
 export interface Settings {
   /** Rendezvous server to find hosts through, or empty to connect directly. */
   rendezvous: string;
   /**
-   * Account server to sign in to, or empty to pair by code instead.
+   * Account server to sign in to.
    *
-   * Signing in is what makes a machine's own machines follow it: the account knows which
-   * public keys are its own, so two of them trust each other without anybody reading digits
-   * off a screen.
+   * Signing in is what makes a machine's own machines find each other: the account knows which
+   * public keys are its own, so two of them trust each other without anybody carrying a code
+   * from one screen to the other.
    */
   accountServer: string;
+
+  /** Address to listen on while shared. Port zero lets the operating system choose. */
+  bind: string;
+  /** Frames per second to capture at while shared. */
+  fps: number;
+  /** What to spend while shared, in bits per second. */
+  bitrateBps: number;
+  /** Whether to start sharing as soon as the application launches. */
+  shareOnLaunch: boolean;
 
   /**
    * Whether the setup flow has been through once.
@@ -210,6 +246,40 @@ export interface PrismApi {
    * @returns {Promise<HostPermissions>} What is held afterwards.
    */
   requestPermission(id: string): Promise<HostPermissions>;
+
+  /**
+   * Starts sharing this machine's screen.
+   *
+   * @async
+   * @returns {Promise<HostSnapshot | null>} What the session is doing a moment after starting.
+   * @throws {Error} If nothing is trusted yet, or the session could not be started.
+   */
+  startSharing(): Promise<HostSnapshot | null>;
+
+  /**
+   * Stops sharing.
+   *
+   * @async
+   * @returns {Promise<null>} Nothing, which is what the session is now.
+   */
+  stopSharing(): Promise<null>;
+
+  /**
+   * Returns what this machine's own session is doing, or `null` when it is not shared.
+   *
+   * @async
+   * @returns {Promise<HostSnapshot | null>} The counters.
+   */
+  sharing(): Promise<HostSnapshot | null>;
+
+  /**
+   * Listens for what this machine's own session is doing.
+   *
+   * @param {(snapshot: HostSnapshot | null) => void} listener - Called five times a second
+   *   while shared, and once with `null` when sharing stops.
+   * @returns {void}
+   */
+  onSharing(listener: (snapshot: HostSnapshot | null) => void): void;
 
   /**
    * Closes setup and opens the home window.

@@ -7,8 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { Holder } from '@prism/account/holder';
 import { toDataURL } from 'qrcode';
 
-import type { AccountEnrolmentView, Settings, StreamState } from './api.js';
+import type { AccountEnrolmentView, HostSnapshot, Settings, StreamState } from './api.js';
 import { DEFAULTS, loadSettings, saveSettings } from './settings.js';
+import { Sharing } from './sharing.js';
 import { Stream } from './stream.js';
 
 const require = createRequire(import.meta.url);
@@ -104,6 +105,28 @@ function broadcastStream(state: StreamState): void {
     }
   }
 }
+
+/**
+ * Sends what this machine's own session is doing to every window that is open.
+ *
+ * @param {HostSnapshot | null} snapshot - The counters, or `null` when sharing stopped.
+ * @returns {void}
+ */
+function broadcastSharing(snapshot: HostSnapshot | null): void {
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('share:state', snapshot);
+    }
+  }
+}
+
+/**
+ * This machine's willingness to be watched.
+ *
+ * Beside the stream rather than in a second application: one machine has one identity and one
+ * account, and two applications sharing them was two of everything that had to agree.
+ */
+const sharing = new Sharing(prism, broadcastSharing);
 
 /**
  * Builds the window.
@@ -237,6 +260,12 @@ function registerHandlers(): void {
 
     window = createWindow();
   });
+
+  ipcMain.handle('share:start', () => sharing.start(settings));
+
+  ipcMain.handle('share:stop', () => sharing.stop());
+
+  ipcMain.handle('share:state', () => sharing.snapshot());
 
   ipcMain.handle('account:state', () => account.view());
 
@@ -383,6 +412,15 @@ void app.whenReady().then(() => {
   registerHandlers();
   account.start();
 
+  if (settings.shareOnLaunch) {
+    try {
+      sharing.start(settings);
+    } catch {
+      // Nothing is on screen yet to be told. The home window reads the session's state when it
+      // opens, and a failure to start shows there as a machine that is not shared.
+    }
+  }
+
   // A machine that has been through setup goes straight to the thing setup was for. One that
   // has not is asked the questions setup asks, once.
   //
@@ -470,6 +508,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   // A stream that outlived its window would keep a remote screen on this machine with nothing
-  // on screen to say so, and no way to stop it short of finding the process.
+  // on screen to say so, and no way to stop it short of finding the process. A session that
+  // outlived it would keep handing this screen out, which is worse.
   stream?.stop();
+  sharing.stop();
 });

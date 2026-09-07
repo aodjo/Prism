@@ -78,46 +78,6 @@ importers:
 
   packages/design: {}
 
-  packages/host:
-    dependencies:
-      '@prism/account':
-        specifier: workspace:*
-        version: link:../account
-      '@prism/native':
-        specifier: workspace:*
-        version: link:../native
-      react:
-        specifier: ^19.2.8
-        version: 19.2.8
-      react-dom:
-        specifier: ^19.2.8
-        version: 19.2.8(react@19.2.8)
-    devDependencies:
-      '@prism/design':
-        specifier: workspace:*
-        version: link:../design
-      '@tailwindcss/cli':
-        specifier: ^4.3.3
-        version: 4.3.3
-      '@types/react':
-        specifier: ^19.2.18
-        version: 19.2.18
-      '@types/react-dom':
-        specifier: ^19.2.7
-        version: 19.2.7(@types/react@19.2.18)
-      electron:
-        specifier: ^44.2.0
-        version: 44.2.0
-      esbuild:
-        specifier: ^0.28.2
-        version: 0.28.2
-      tailwindcss:
-        specifier: ^4.3.3
-        version: 4.3.3
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-
   packages/native: {}
 
   packages/protocol: {}

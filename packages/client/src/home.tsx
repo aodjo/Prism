@@ -11,7 +11,13 @@ import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'r
 import type { JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import type { AccountDeviceView, PrismApi, Settings, StreamState } from './api.js';
+import type {
+  AccountDeviceView,
+  HostSnapshot,
+  PrismApi,
+  Settings,
+  StreamState,
+} from './api.js';
 import { latency } from './format.js';
 import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
@@ -135,6 +141,8 @@ function Home(): JSX.Element {
   const [picked, setPicked] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [trouble, setTrouble] = useState<string | null>(null);
+  /** What this machine's own session is doing, or `null` when it is not shared. */
+  const [mine, setMine] = useState<HostSnapshot | null>(null);
   const search = useRef<HTMLInputElement | null>(null);
 
   /** A minute of each figure, oldest first. */
@@ -178,21 +186,23 @@ function Home(): JSX.Element {
 
   useEffect(() => {
     void (async () => {
-      const [identity, signedIn, stored, state] = await Promise.all([
+      const [identity, signedIn, stored, state, own] = await Promise.all([
         prism.identity(),
         prism.accountState(),
         prism.getSettings(),
         prism.streamState(),
+        prism.sharing(),
       ]);
 
       setOwnKey(identity.publicKey);
       setSettings(stored);
       setDevices(signedIn.devices);
       setAccount({ email: signedIn.email, relay: signedIn.relayAllowed });
+      setMine(own);
 
-      // Both sources, minus this machine: one arrives by pairing and the other by signing in,
-      // and which of the two brought a machine here is not something anybody wants to read two
-      // lists to find out.
+      // Both sources, minus this machine: one arrives by having been trusted through the
+      // account and the other by having been reached before, and which of the two brought a
+      // machine here is not something anybody wants to read two lists to find out.
       const all = [
         ...new Set([...signedIn.devices.map((device) => device.publicKey), ...identity.hosts]),
       ].filter((key) => key !== identity.publicKey);
@@ -201,6 +211,10 @@ function Home(): JSX.Element {
       setStream(state);
       setPicked(state.host ?? all[0] ?? null);
     })();
+  }, []);
+
+  useEffect(() => {
+    prism.onSharing(setMine);
   }, []);
 
   useEffect(() => {
@@ -260,6 +274,7 @@ function Home(): JSX.Element {
   const watching = picked !== null && stream.host === picked && RUNNING.has(stream.phase);
   const live = watching && stream.phase === 'streaming';
   const stats = live ? stream.stats : null;
+  const shared = mine !== null && mine.phase !== 'stopped' && mine.phase !== 'failed';
 
   const watch = (): void => {
     if (picked === null) {
@@ -302,7 +317,49 @@ function Home(): JSX.Element {
           <kbd className="font-sans text-tiny-2 text-dim-2">⌘K</kbd>
         </div>
 
-        <div className="mt-[30px] flex-none text-label-2 font-medium text-dim-2">DEVICES</div>
+        {/* This machine, and whether anybody else may watch it. It sits above the others
+            because it is the one row that is about what this machine gives rather than what it
+            takes, and because it is the switch somebody comes here to flip. */}
+        <div className="mt-[30px] flex-none text-label-2 font-medium text-dim-2">THIS MACHINE</div>
+
+        <div className="mt-2.5 flex flex-none items-center gap-2.5 rounded-tile border border-line-2 bg-wash-1 px-2.5 py-[9px]">
+          <img
+            src={`assets/status-${shared ? 'live' : 'off'}.svg`}
+            alt=""
+            className="block size-[7px] flex-none overflow-visible"
+          />
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="truncate text-note font-medium text-ink">
+              {shared ? 'Shared' : 'Not shared'}
+            </span>
+            <span className="truncate text-tiny leading-tight text-dim">
+              {mine?.peer
+                ? `${machineName(mine.peer)} is watching`
+                : shared
+                  ? 'waiting for a machine'
+                  : 'nobody can watch'}
+            </span>
+          </span>
+          <button
+            type="button"
+            className={shared ? 'btn-secondary no-drag' : 'btn-primary-sm no-drag'}
+            onClick={() => {
+              void (async () => {
+                setTrouble(null);
+
+                try {
+                  setMine(shared ? await prism.stopSharing() : await prism.startSharing());
+                } catch (error) {
+                  setTrouble(reason(error));
+                }
+              })();
+            }}
+          >
+            {shared ? 'Stop' : 'Share'}
+          </button>
+        </div>
+
+        <div className="mt-[26px] flex-none text-label-2 font-medium text-dim-2">DEVICES</div>
 
         <div className="mt-2.5 flex min-h-0 shrink flex-col gap-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {shown.length === 0 ? (

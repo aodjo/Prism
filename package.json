@@ -12,7 +12,6 @@
     "build:native:debug": "pnpm --filter @prism/native build:debug",
     "client": "pnpm --filter @prism/client start",
     "client:setup": "pnpm --filter @prism/client start:setup",
-    "host": "pnpm --filter @prism/host start",
     "lint": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
     "lint:cross": "cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
     "smoke:electron": "electron scripts/electron-smoke.cjs",

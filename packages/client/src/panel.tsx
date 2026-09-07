@@ -391,6 +391,63 @@ function Panel(): JSX.Element {
             />
           </Row>
         </Band>
+
+        {/* What this machine gives out rather than what it takes in. Separate from the settings
+            above because they answer a different question — one is about watching, this is
+            about being watched. */}
+        <Band title="Sharing this machine">
+          <Row label="Frame rate">
+            <input
+              type="number"
+              min={1}
+              max={480}
+              step={1}
+              className={FIELD}
+              value={settings?.fps ?? 60}
+              onChange={(event) => {
+                save({ fps: Number(event.target.value) });
+              }}
+            />
+          </Row>
+          <Row label="Bitrate (Mbps)">
+            <input
+              type="number"
+              min={1}
+              max={200}
+              step={1}
+              className={FIELD}
+              value={settings ? Math.round(settings.bitrateBps / 1e6) : 24}
+              onChange={(event) => {
+                save({ bitrateBps: Number(event.target.value) * 1e6 });
+              }}
+            />
+          </Row>
+          <Row label="Listen on">
+            <input
+              type="text"
+              spellCheck={false}
+              placeholder="0.0.0.0:47200"
+              className={FIELD}
+              value={settings?.bind ?? ''}
+              onChange={(event) => {
+                setSettings((was) => (was ? { ...was, bind: event.target.value } : was));
+              }}
+              onBlur={(event) => {
+                save({ bind: event.target.value.trim() });
+              }}
+            />
+          </Row>
+          <Row label="Share on launch">
+            <input
+              type="checkbox"
+              className="size-[15px] accent-violet"
+              checked={settings?.shareOnLaunch ?? false}
+              onChange={(event) => {
+                save({ shareOnLaunch: event.target.checked });
+              }}
+            />
+          </Row>
+        </Band>
       </div>
     </>
   );
