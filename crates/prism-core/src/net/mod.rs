@@ -10,7 +10,6 @@ pub mod loss;
 pub mod negotiate;
 pub mod packet;
 pub mod packetize;
-pub mod pairing;
 pub mod reassemble;
 pub mod rendezvous;
 pub mod seal;

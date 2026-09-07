@@ -175,18 +175,18 @@ function handleMenu(): void {
 
   const description =
     phase === 'streaming'
-      ? 'Prism — streaming'
+      ? 'Prism — shared, in use'
       : phase === 'waiting'
-        ? 'Prism — waiting for a client'
+        ? 'Prism — shared, waiting'
         : phase === 'failed'
           ? `Prism — ${snapshot?.error ?? 'failed'}`
-          : 'Prism — not hosting';
+          : 'Prism — not shared';
 
   const menu = Menu.buildFromTemplate([
     { label: description, enabled: false },
     { type: 'separator' },
     {
-      label: host ? 'Stop hosting' : 'Start hosting',
+      label: host ? 'Stop sharing' : 'Share this machine',
       click: () => {
         if (host) {
           stopHosting();
@@ -304,14 +304,6 @@ function registerHandlers(): void {
     saveSettings(settings);
 
     return settings;
-  });
-
-  ipcMain.handle('pairing:code', () => prism.generatePairingCode());
-
-  ipcMain.handle('pairing:await', async (_event, bind: string, code: string) => {
-    const peer = await prism.pairAsHost(bind, code);
-
-    return { peer, peers: prism.pairedPeers() };
   });
 
   ipcMain.handle('host:start', () => {

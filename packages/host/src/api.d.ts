@@ -104,14 +104,6 @@ export interface Settings {
   autoStart: boolean;
 }
 
-/** What one pairing exchange produced. */
-export interface Paired {
-  /** The machine that just paired, as hex. */
-  readonly peer: string;
-  /** Every paired machine, including the new one. */
-  readonly peers: readonly string[];
-}
-
 /**
  * The whole surface between the panel and the machine.
  *
@@ -164,28 +156,6 @@ export interface PrismApi {
    * @returns {Promise<Settings>} The settings as they now stand.
    */
   setSettings(next: Partial<Settings>): Promise<Settings>;
-
-  /**
-   * Generates a six digit pairing code.
-   *
-   * Separate from waiting for it to be used, because the code has to be on screen before the
-   * waiting starts and the waiting does not end until somebody has used it.
-   *
-   * @async
-   * @returns {Promise<string>} Six digits.
-   */
-  pairingCode(): Promise<string>;
-
-  /**
-   * Waits for one client to pair using a code that is already on screen.
-   *
-   * @async
-   * @param {string} bind - Address to listen on while pairing.
-   * @param {string} code - The six digits being shown.
-   * @returns {Promise<Paired>} The client's key and the new peer list.
-   * @throws {Error} If nobody pairs before the code expires or the code was mistyped.
-   */
-  awaitPairing(bind: string, code: string): Promise<Paired>;
 
   /**
    * Starts hosting with the stored settings.

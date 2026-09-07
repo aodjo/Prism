@@ -464,12 +464,6 @@ function registerHandlers(): void {
     return settings;
   });
 
-  ipcMain.handle('pairing:run', async (_event, host: string, code: string) => {
-    const peer = await prism.pairAsClient(host, code);
-
-    return { peer, hosts: prism.pairedPeers() };
-  });
-
   ipcMain.handle('stream:connect', (_event, host: string, address: string) => {
     stream ??= new Stream(broadcastStream);
 

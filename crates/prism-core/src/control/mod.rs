@@ -12,7 +12,6 @@
 //! window, so what a caller would want to show is returned instead.
 
 pub mod host;
-pub mod pair;
 /// What the system has to allow before a host can capture or control this machine.
 pub mod permissions;
 pub mod rendezvous;

@@ -27,22 +27,20 @@ const prism = window.prism;
 /** The phases in which a session is running and the button should offer to stop it. */
 const RUNNING: ReadonlySet<string> = new Set(['opening', 'waiting', 'streaming']);
 
-/** How long the word "Paired" stays on screen before the code is put away. */
-const PAIRED_LINGER_MS = 1500;
-
 /**
  * What each phase is called in the panel.
  *
  * Written out rather than derived from the phase string, because these are the words a person
- * reads and they should not change because a name changed in Rust.
+ * reads and they should not change because a name changed in Rust. They talk about sharing
+ * rather than hosting: hosting is what the machine does, sharing is what the person did.
  */
 const PHASE_LABELS: Record<string, string> = {
   opening: 'Opening',
-  waiting: 'Waiting for a client',
-  streaming: 'Streaming',
-  stopped: 'Not hosting',
+  waiting: 'Shared · waiting',
+  streaming: 'Shared · in use',
+  stopped: 'Not shared',
   failed: 'Failed',
-  idle: 'Not hosting',
+  idle: 'Not shared',
 };
 
 /** The colour each phase paints the state band's edge. */
@@ -159,10 +157,6 @@ function Panel(): JSX.Element {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [held, setHeld] = useState<HostPermissions | null>(null);
 
-  const [code, setCode] = useState<string | null>(null);
-  const [hint, setHint] = useState('Type this on the other machine');
-  const [pairing, setPairing] = useState(false);
-  const [pairTrouble, setPairTrouble] = useState<string | null>(null);
   const [trouble, setTrouble] = useState<string | null>(null);
 
   const [open, setOpen] = useState(false);
@@ -226,6 +220,12 @@ function Panel(): JSX.Element {
     void prism.setSettings(change);
   };
 
+  /**
+   * Turns sharing on or off.
+   *
+   * One switch rather than two. Sharing is what somebody came here to do; the session that
+   * makes it possible is an implementation detail of doing it.
+   */
   const toggle = (): void => {
     void (async () => {
       setTrouble(null);
@@ -234,36 +234,6 @@ function Panel(): JSX.Element {
         setSnapshot(running ? await prism.stopHosting() : await prism.startHosting());
       } catch (error) {
         setTrouble(reason(error));
-      }
-    })();
-  };
-
-  const pair = (): void => {
-    if (pairing || !settings) {
-      return;
-    }
-
-    void (async () => {
-      setPairing(true);
-      setPairTrouble(null);
-
-      try {
-        const shown = await prism.pairingCode();
-        setCode(shown);
-        setHint('Type this on the other machine');
-
-        const { peers } = await prism.awaitPairing(settings.bind, shown);
-
-        setIdentity((was) => ({ ...was, peers }));
-        setHint('Paired');
-        setTimeout(() => {
-          setCode(null);
-        }, PAIRED_LINGER_MS);
-      } catch (error) {
-        setCode(null);
-        setPairTrouble(reason(error));
-      } finally {
-        setPairing(false);
       }
     })();
   };
@@ -337,7 +307,7 @@ function Panel(): JSX.Element {
             {PHASE_LABELS[phase] ?? phase}
           </span>
           <button type="button" className="btn-primary-sm no-drag" onClick={toggle}>
-            {running ? 'Stop' : 'Start hosting'}
+            {running ? 'Stop' : 'Share'}
           </button>
         </div>
 
@@ -422,25 +392,12 @@ function Panel(): JSX.Element {
         </Band>
       )}
 
-      <Band title="Paired devices">
+      {/* Who this machine is shared with. Not a list of pairings any more — the account is the
+          list, and everything signed in to it can reach this machine while sharing is on. */}
+      <Band title="Your machines">
         <Row label={peers}>
-          <button type="button" className="btn-secondary no-drag" disabled={pairing} onClick={pair}>
-            Pair a device
-          </button>
+          <span className="text-tiny text-dim">on this account</span>
         </Row>
-        {code !== null && (
-          <div className="mt-2.5 text-center">
-            {/* The one number in this application a person reads out loud to somebody else, so
-                it is set at the size that survives being read off a screen from a step away. */}
-            <div className="font-mono text-[30px] font-semibold tracking-[0.16em] select-text text-violet">
-              {code}
-            </div>
-            <div className="mt-1 text-tiny text-dim">{hint}</div>
-          </div>
-        )}
-        {pairTrouble !== null && (
-          <p className="mt-2 whitespace-pre-wrap text-fine-2 text-danger-ink">{pairTrouble}</p>
-        )}
       </Band>
 
       <Band title="Settings">

@@ -89,10 +89,6 @@ function Panel(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
 
-  const [pairAddress, setPairAddress] = useState('');
-  const [pairCode, setPairCode] = useState('');
-  const [pairing, setPairing] = useState(false);
-  const [pairTrouble, setPairTrouble] = useState<string | null>(null);
 
   const body = useRef<HTMLDivElement | null>(null);
 
@@ -171,28 +167,6 @@ function Panel(): JSX.Element {
         setTrouble(reason(error));
       } finally {
         setBusy(false);
-      }
-    })();
-  };
-
-  const pair = (): void => {
-    void (async () => {
-      setPairing(true);
-      setPairTrouble(null);
-
-      try {
-        const paired = await prism.pair(pairAddress.trim(), pairCode.trim());
-
-        setSettings(
-          await prism.setSettings({
-            addresses: { ...settings?.addresses, [paired.peer]: pairAddress.trim() },
-          }),
-        );
-        setPairCode('');
-      } catch (error) {
-        setPairTrouble(reason(error));
-      } finally {
-        setPairing(false);
       }
     })();
   };
@@ -364,40 +338,6 @@ function Panel(): JSX.Element {
             <Trouble message={trouble ?? account.error} className="mt-2.5" />
           </Band>
         )}
-
-        <Band title="Pair by code">
-          <Row label="Address">
-            <input
-              type="text"
-              spellCheck={false}
-              placeholder="192.168.1.5:47100"
-              className={FIELD}
-              value={pairAddress}
-              onChange={(event) => {
-                setPairAddress(event.target.value);
-              }}
-            />
-          </Row>
-          <Row label="Code">
-            <input
-              type="text"
-              inputMode="numeric"
-              maxLength={6}
-              placeholder="123456"
-              className={FIELD}
-              value={pairCode}
-              onChange={(event) => {
-                setPairCode(event.target.value);
-              }}
-            />
-          </Row>
-          <div className="mt-2.5 flex justify-end">
-            <button type="button" className="btn-secondary" disabled={pairing} onClick={pair}>
-              {pairing ? 'Pairing…' : 'Pair'}
-            </button>
-          </div>
-          <Trouble message={pairTrouble} className="mt-2.5" />
-        </Band>
 
         <Band title="Settings">
           <Row label="Account server">

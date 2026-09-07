@@ -182,14 +182,6 @@ export interface HostPermissions {
   readonly missing: readonly MissingGrant[];
 }
 
-/** What one pairing exchange produced. */
-export interface Paired {
-  /** The host that was just paired with, as hex. */
-  readonly peer: string;
-  /** Every paired host, including the new one. */
-  readonly hosts: readonly string[];
-}
-
 /**
  * The whole surface between the window and the machine.
  *
@@ -305,17 +297,6 @@ export interface PrismApi {
    * @returns {Promise<Settings>} The settings as they now stand.
    */
   setSettings(next: Partial<Settings>): Promise<Settings>;
-
-  /**
-   * Pairs with a host that is showing a code.
-   *
-   * @async
-   * @param {string} host - The address the host is waiting on.
-   * @param {string} code - The six digits it is showing.
-   * @returns {Promise<Paired>} The host's key and the new list.
-   * @throws {Error} If the code was not accepted or the host did not answer.
-   */
-  pair(host: string, code: string): Promise<Paired>;
 
   /**
    * Opens a stream window onto a paired host.

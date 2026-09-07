@@ -293,15 +293,19 @@ function Setup(): JSX.Element {
     log: [],
   });
   const [target, setTarget] = useState<string | null>(null);
-  const [address, setAddress] = useState('');
-  const [pairError, setPairError] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
-  const [pairing, setPairing] = useState(false);
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
-  const [totp, setTotp] = useState('');
+  /**
+   * Whether the account screen is asking for the six digits rather than the email and password.
+   *
+   * Its own page, the way a machine asks for a PIN: the code is short, it is typed against a
+   * clock, and a field for it sitting under a password somebody has not finished typing is a
+   * field that gets filled in with a code that has already expired.
+   */
+  const [askingCode, setAskingCode] = useState(false);
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
   const [working, setWorking] = useState(false);
@@ -448,8 +452,14 @@ function Setup(): JSX.Element {
 
   /**
    * Signs in, and takes the machines the account knows about with it.
+   *
+   * The code arrives as an argument rather than off the field it was typed into, because the
+   * six boxes call this the moment the last one is filled and the state behind them has not
+   * been committed yet.
+   *
+   * @param {string} code - The six digits.
    */
-  const signIn = (): void => {
+  const signIn = (code: string): void => {
     void (async () => {
       setWorking(true);
       setAccountTrouble(null);
@@ -458,7 +468,7 @@ function Setup(): JSX.Element {
         const state = await prism.accountSignIn(
           email.trim(),
           password,
-          totp.trim(),
+          code,
           `${navigator.platform || 'This machine'} (${new Date().getFullYear()})`,
         );
 
@@ -471,7 +481,7 @@ function Setup(): JSX.Element {
         );
         setPassword('');
         setConfirm('');
-        setTotp('');
+        setAskingCode(false);
         setGreeted(true);
       } catch (error) {
         setAccountTrouble(reason(error));
@@ -607,23 +617,34 @@ function Setup(): JSX.Element {
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
             {greeted
               ? `Hello, ${signedIn ?? ''}`
-              : enrolment
-                ? 'One more thing'
-                : joining
-                  ? 'Create your account'
-                  : 'Welcome back'}
+              : askingCode
+                ? 'Enter your code'
+                : enrolment
+                  ? 'One more thing'
+                  : joining
+                    ? 'Create your account'
+                    : 'Welcome back'}
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
             {greeted
               ? 'Every machine on this account now knows about this one, and this one knows about them.'
-              : enrolment
-                ? 'Set up the second factor now. It is the only time it is shown.'
-                : joining
-                  ? 'An account is how your machines find each other, and how this one is recognised when it asks.'
-                  : 'Sign in and every machine on your account finds this one.'}
+              : askingCode
+                ? `Six digits from your authenticator, for ${email.trim()}.`
+                : enrolment
+                  ? 'Set up the second factor now. It is the only time it is shown.'
+                  : joining
+                    ? 'An account is how your machines find each other, and how this one is recognised when it asks.'
+                    : 'Sign in and every machine on your account finds this one.'}
           </p>
 
-          {greeted ? null : enrolment ? (
+          {greeted ? null : askingCode ? (
+            <CodeBoxes
+              disabled={working}
+              onComplete={(code) => {
+                signIn(code);
+              }}
+            />
+          ) : enrolment ? (
             <div className="card mt-9 w-[min(440px,30.6vw)] p-6">
               <p className="mx-auto max-w-[36ch] text-note leading-normal text-dim">
                 Scan this with an authenticator app. It is shown once — the server keeps only
@@ -639,14 +660,15 @@ function Setup(): JSX.Element {
               <code className="block text-center text-fine tracking-[0.06em] select-all text-ink-3">
                 {enrolment.secret}
               </code>
-              {/* Straight to signing in, with the address already filled: the account exists
-                  now, and the next thing it needs is the code that was just set up. */}
+              {/* Straight to the code. The account exists, the address and password are still
+                  in hand, and the only thing left is the six digits that were just set up. */}
               <button
                 type="button"
                 className="btn-primary-sm no-drag mx-auto mt-5 block"
                 onClick={() => {
                   setEnrolment(null);
                   setJoining(false);
+                  setAskingCode(true);
                 }}
               >
                 I have it — sign in
@@ -675,22 +697,30 @@ function Setup(): JSX.Element {
                 <input
                   type="password"
                   autoComplete={joining ? 'new-password' : 'current-password'}
+                  placeholder="••••••••"
                   className={ACCOUNT_FIELD}
                   value={password}
                   onChange={(event) => {
                     setPassword(event.target.value);
                   }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !joining) {
+                      setAskingCode(true);
+                    }
+                  }}
                 />
               </label>
 
               {/* Only when creating one. A password being typed to sign in is checked by the
-                  server on the next line; one being set has nothing to check it against. */}
+                  server against what it already has; one being set has nothing to check it
+                  against but a second reading of the same keystrokes. */}
               {joining && (
                 <label className="flex flex-col gap-1.5">
                   <span className="text-fine-2 text-dim">Password again</span>
                   <input
                     type="password"
                     autoComplete="new-password"
+                    placeholder="••••••••"
                     className={
                       confirm !== '' && confirm !== password
                         ? `${ACCOUNT_FIELD} border-[rgba(255,92,110,0.5)]`
@@ -709,51 +739,45 @@ function Setup(): JSX.Element {
                 </label>
               )}
 
-              {/* Only the sign-in screen asks for a code. Somebody creating an account does not
-                  have one yet — that is what the next screen is for. */}
-              {!joining && (
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-fine-2 text-dim">Six digits from your authenticator</span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={6}
-                    autoComplete="one-time-code"
-                    placeholder="123456"
-                    className={`${ACCOUNT_FIELD} tracking-[0.3em]`}
-                    value={totp}
-                    onChange={(event) => {
-                      setTotp(event.target.value);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        signIn();
-                      }
-                    }}
-                  />
-                </label>
-              )}
-
               <button
                 type="button"
                 className="btn-primary-sm no-drag mt-2 justify-center"
                 disabled={working}
-                onClick={joining ? createAccount : signIn}
+                onClick={
+                  joining
+                    ? createAccount
+                    : () => {
+                        setAccountTrouble(null);
+                        setAskingCode(true);
+                      }
+                }
               >
-                {joining ? 'Create account' : 'Sign in'}
+                {joining ? 'Create account' : 'Continue'}
               </button>
             </div>
           )}
 
           <Trouble message={accountTrouble} className="mt-4" />
 
-          {enrolment === null && !greeted && (
+          {askingCode && (
             <button
               type="button"
               className="btn-ghost no-drag mt-5"
               onClick={() => {
                 setAccountTrouble(null);
-                setTotp('');
+                setAskingCode(false);
+              }}
+            >
+              Use a different email
+            </button>
+          )}
+
+          {enrolment === null && !greeted && !askingCode && (
+            <button
+              type="button"
+              className="btn-ghost no-drag mt-5"
+              onClick={() => {
+                setAccountTrouble(null);
                 setConfirm('');
                 setJoining(!joining);
               }}
@@ -761,9 +785,6 @@ function Setup(): JSX.Element {
               {joining ? 'I already have an account' : 'I need an account'}
             </button>
           )}
-
-          {/* An account is worth having and not worth being trapped by: a machine with none
-              still pairs by code, which is what the device screen is for either way. */}
         </section>
       )}
 
@@ -842,75 +863,17 @@ function Setup(): JSX.Element {
       {which === 'device' && (
         <section className={cls}>
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-            Add your first device
+            Your machines
           </h2>
           <p className="mt-3.5 max-w-[min(580px,40.3vw)] text-body-2 text-muted">
-            Install PRISM on the machine you want to reach, then type the six characters it
-            shows on screen.
+            Install PRISM on the machine you want to reach, sign in to the same account, and
+            press Share on it. It appears here.
           </p>
 
-          <CodeBoxes
-            disabled={pairing}
-            onComplete={(code) => {
-              void (async () => {
-                if (address.trim() === '') {
-                  setPairError('Type where that machine is, as address:port');
-                  return;
-                }
-
-                setPairError(null);
-                setPairing(true);
-
-                try {
-                  const paired = await prism.pair(address.trim(), code);
-
-                  // Remembered so that connecting does not ask for the same address a
-                  // second line later.
-                  const next = await prism.setSettings({
-                    addresses: { ...settings?.addresses, [paired.peer]: address.trim() },
-                  });
-                  setSettings(next);
-                  await open(paired.peer, address.trim());
-                } catch (error) {
-                  setPairError(reason(error));
-                } finally {
-                  setPairing(false);
-                }
-              })();
-            }}
-          />
-
-          {/* Where a machine is, for the case the design does not draw: pairing needs an
-              address, and there is none to be had until a rendezvous server is configured.
-              Kept quiet and out of the way of the code, which is what is being asked for. */}
-          <div className="mt-[18px] flex items-center gap-2.5">
-            <label htmlFor="pair-address" className="text-note-2 text-dim">
-              Showing that code at
-            </label>
-            <input
-              id="pair-address"
-              type="text"
-              spellCheck={false}
-              placeholder="192.168.0.14:47100"
-              value={address}
-              onChange={(event) => {
-                setAddress(event.target.value);
-              }}
-              className="no-drag w-60 rounded-pill border border-line-2 bg-wash-1 px-3 py-[7px] text-center text-note-2 text-ink-3 placeholder:text-dim-2 focus:border-[rgba(124,92,255,0.6)] focus:text-ink focus:outline-none"
-            />
-          </div>
-
-          <div className="mt-[34px] flex w-[min(620px,43.1vw)] items-center gap-4 text-note-2 text-dim before:h-px before:flex-1 before:bg-line-2 before:content-[''] after:h-px after:flex-1 after:bg-line-2 after:content-['']">
-            {/* Not "nearby". Nothing here scanned a network — these are the machines this one
-                has already paired with or that arrived with the account. Calling them nearby
-                would be claiming a capability the application does not have. */}
-            or one you already have
-          </div>
-
-          <div className="mt-8 flex w-[min(620px,43.1vw)] flex-col gap-2.5 text-left">
+          <div className="mt-11 flex w-[min(620px,43.1vw)] flex-col gap-2.5 text-left">
             {known.length === 0 ? (
               <div className="py-[18px] text-center text-note text-dim">
-                Nothing yet — a code above is how the first one arrives
+                Nothing yet — the next machine you sign in on shows up here
               </div>
             ) : (
               known.map((key) => {
@@ -947,14 +910,11 @@ function Setup(): JSX.Element {
             )}
           </div>
 
-          {/* Adding a device needs a second machine in front of you, and somebody setting this
-              one up may not have it yet. Everything else in the flow has already happened by
-              now, so this is a step to defer rather than a way out of setup. */}
+          {/* A second machine may not be to hand yet, and nothing else in the flow is waiting
+              on one. This is a step to come back to rather than a way out of setup. */}
           <button type="button" className="btn-ghost no-drag mt-7" onClick={finish}>
             Not now
           </button>
-
-          <Trouble message={pairError} className="mt-4" />
         </section>
       )}
 

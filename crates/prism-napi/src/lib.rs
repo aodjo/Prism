@@ -20,9 +20,6 @@ mod tasks;
 use napi::bindgen_prelude::{AsyncTask, BigInt};
 use napi_derive::napi;
 use prism_core::identity;
-use prism_core::net::pairing::Pin;
-
-use crate::tasks::{PairAsClient, PairAsHost};
 
 /// Returns the Prism version string.
 ///
@@ -79,20 +76,6 @@ pub fn paired_peers() -> napi::Result<Vec<String>> {
         .iter()
         .map(identity::to_hex)
         .collect())
-}
-
-/// Generates a six digit pairing code.
-///
-/// Returned rather than generated inside [`pair_as_host`] because the code has to be on screen
-/// before that call returns, and it does not return until somebody has used it.
-///
-/// # Errors
-///
-/// Fails if the platform has no usable randomness, which is a condition no pairing should
-/// proceed under.
-#[napi]
-pub fn generate_pairing_code() -> napi::Result<String> {
-    Ok(Pin::generate().map_err(to_napi)?.to_display())
 }
 
 /// One thing the system still has to allow.
@@ -233,32 +216,6 @@ pub fn account_trust_devices(public_keys: Vec<String>) -> napi::Result<u32> {
     }
 
     Ok(added)
-}
-
-/// Waits for one client to pair using `code`, and returns its public key as hex.
-///
-/// The code is single use: whether the attempt succeeds or fails, this call is finished with
-/// it and a second attempt needs a fresh one. That is the whole reason six digits is enough.
-///
-/// # Errors
-///
-/// Rejects if nobody pairs before the code expires, if the code was mistyped, or if the
-/// address cannot be bound.
-#[napi(ts_return_type = "Promise<string>")]
-pub fn pair_as_host(bind: String, code: String) -> AsyncTask<PairAsHost> {
-    AsyncTask::new(PairAsHost { bind, code })
-}
-
-/// Pairs with a host that is showing `code`, and returns its public key as hex.
-///
-/// # Errors
-///
-/// Rejects if the code was not accepted — which covers a mistyped code, a code already used,
-/// and a machine answering that is not the one showing it, none of which can be told apart —
-/// or if the host does not answer at all.
-#[napi(ts_return_type = "Promise<string>")]
-pub fn pair_as_client(host: String, code: String) -> AsyncTask<PairAsClient> {
-    AsyncTask::new(PairAsClient { host, code })
 }
 
 /// Turns any error into one JavaScript can throw.
