@@ -98,6 +98,64 @@ fn hex(key: &[u8; KEY_LEN]) -> String {
     key.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// The audio thread, for as long as a run wants one.
+///
+/// Every host mode needs the same three things — start it if the session agreed to it, count
+/// what it sent, stop it at the end — so they are here once rather than in each loop. A mode
+/// that forgot the last one would leave a thread reading the machine's sound after the run
+/// that asked for it had printed its summary and returned.
+struct HostAudio {
+    sent: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HostAudio {
+    /// Starts capturing and sending this machine's audio, if the session agreed to carry it.
+    ///
+    /// Refusing to start is not an error: a host with no audio source still has a screen. The
+    /// core says so on the way past, so a silent session is never silent about why.
+    fn start(sender: &SliceSender, config: &HostConfig) -> Self {
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Only when both sides agreed to it. Sending audio a client never asked for spends
+        // bandwidth on packets it will decode and drop.
+        let wanted = config
+            .audio_bitrate_bps
+            .filter(|_| sender.agreed().is_none_or(|agreed| agreed.audio));
+
+        let thread = wanted.and_then(|bitrate| {
+            prism_core::control::host::spawn_audio(sender, bitrate, &sent, &stop)
+                .ok()
+                .flatten()
+        });
+
+        if thread.is_some() {
+            println!(
+                "host: also sending this machine's audio at {} kbps",
+                config.audio_bitrate_bps.unwrap_or(0) / 1000
+            );
+        }
+
+        Self { sent, stop, thread }
+    }
+
+    /// Stops the thread and says how much sound went out.
+    fn finish(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+            let sent = self.sent.load(std::sync::atomic::Ordering::Relaxed);
+            println!(
+                "audio   : {sent} frames sent ({:.1}s of sound)",
+                sent as f64 * f64::from(prism_core::audio::FRAME_US) / 1e6
+            );
+        }
+    }
+}
+
 /// Sends `config.frames` synthetic frames and reports what was transmitted.
 ///
 /// Frames are paced to the requested rate by sleeping to each frame's deadline. Packets
@@ -132,6 +190,7 @@ pub fn run(run: HostRun, keys: &HostKeys) -> io::Result<()> {
     }
     let slices = build_slices(run.frame_bytes, run.slices);
     let interval = frame_interval(config.fps);
+    let audio = HostAudio::start(&sender, config);
 
     println!(
         "host: sending {} synthetic frames of {} bytes in {} slices at {} fps",
@@ -170,6 +229,7 @@ pub fn run(run: HostRun, keys: &HostKeys) -> io::Result<()> {
         }
     }
 
+    audio.finish();
     report(&sender, start.elapsed());
     Ok(())
 }
@@ -222,6 +282,7 @@ pub fn run_encoded(
         .map(|_| Nv12Frame::new(encoder_config.width, encoder_config.height))
         .collect::<Result<Vec<_>, _>>()?;
     let interval = frame_interval(config.fps);
+    let audio = HostAudio::start(&sender, config);
 
     println!(
         "host: encoding {} frames at {}x{} {} fps, {} kbps",
@@ -291,6 +352,7 @@ pub fn run_encoded(
         emitted += 1;
     }
 
+    audio.finish();
     report(&sender, start.elapsed());
     if dropped > 0 {
         println!("host: {dropped} frames produced nothing within the encode deadline");
@@ -433,6 +495,8 @@ pub fn run_captured(
         sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
 
+    let audio = HostAudio::start(&sender, config);
+
     println!(
         "host: capturing the screen at {width}x{height} {} fps, {} kbps",
         config.fps,
@@ -479,6 +543,7 @@ pub fn run_captured(
         sent_frames += 1;
     }
 
+    audio.finish();
     report(&sender, start.elapsed());
     if dropped > 0 {
         println!("host: {dropped} frames produced nothing within the encode deadline");
@@ -660,6 +725,8 @@ pub fn run_windows(
         sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
 
+    let audio = HostAudio::start(&sender, config);
+
     println!(
         "host: {} at {width}x{height}, NVENC at {} kbps",
         if capture { "capturing" } else { "painting" },
@@ -710,6 +777,7 @@ pub fn run_windows(
         sent += 1;
     }
 
+    audio.finish();
     report(&sender, start.elapsed());
     sender.report_pacing();
     if config.adaptive {
