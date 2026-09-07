@@ -255,14 +255,9 @@ impl ScreenPump {
 
         for slice_id in 0..frame.slices.len() {
             let data = frame.slice(slice_id).expect("slice index is in range");
-            if let Err(err) = sender.send_slice(
-                frame_id,
-                slice_id as u16,
-                data,
-                capture_ts_us,
-                is_idr,
-                slice_id == last,
-            ) {
+            if let Err(err) =
+                sender.send_slice(frame_id, data, capture_ts_us, is_idr, slice_id == last)
+            {
                 return after_send(&err);
             }
         }

@@ -38,6 +38,25 @@ use crate::stats::LatencyRecorder;
 /// the oldest frame in its own window still finds its timestamp.
 const CAPTURE_HISTORY: usize = 64;
 
+/// The most bytes one wire slice may carry, for a given parity setting.
+///
+/// A free function as well as a method because it is the whole of the decision and there is
+/// no way to stand a real session in front of a test.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::net::sender::max_slice_bytes;
+/// assert_eq!(max_slice_bytes(None), usize::MAX);
+/// assert!(max_slice_bytes(Some(0.05)) < usize::MAX);
+/// ```
+#[must_use]
+pub fn max_slice_bytes(parity_loss: Option<f32>) -> usize {
+    parity_loss.map_or(usize::MAX, |loss| {
+        max_data_shards_for(loss) * MAX_VIDEO_PAYLOAD
+    })
+}
+
 /// The shortest gap between two keyframes the host will produce because it was asked to.
 ///
 /// Two frames at sixty a second, four at a hundred and twenty. Short, because the usual
@@ -218,7 +237,13 @@ pub struct SliceSender {
     codec: FecCodec,
     parity: ParityBlock,
     parity_sent: u64,
-    oversized_slice_warned: bool,
+    /// The frame the wire slice numbering currently belongs to.
+    ///
+    /// Numbering restarts at zero for each frame, which is what the client expects when it
+    /// concatenates a frame's slices in order.
+    slicing_frame: Option<u32>,
+    /// The number the next wire slice will carry.
+    next_slice_id: u16,
     /// Spreads a frame's packets across the interval instead of blasting them at line rate.
     pacer: Option<SendPacer>,
     /// Whether the congestion controller is allowed to drive the pacer's rate.
@@ -274,7 +299,8 @@ impl SliceSender {
             codec: FecCodec::new(),
             parity: ParityBlock::new(),
             parity_sent: 0,
-            oversized_slice_warned: false,
+            slicing_frame: None,
+            next_slice_id: 0,
             pacer: None,
             adaptive: false,
             audio_frames: 0,
@@ -422,33 +448,68 @@ impl SliceSender {
     pub fn send_slice(
         &mut self,
         frame_id: u32,
-        slice_id: u16,
         data: &[u8],
         capture_ts_us: u64,
         idr: bool,
         last: bool,
     ) -> io::Result<()> {
-        let mut flags = 0;
-        if idr {
-            flags |= FLAG_IDR;
-        }
-        if last {
-            flags |= FLAG_LAST_OF_FRAME;
-        }
-
-        let packetizer = SlicePacketizer::new(frame_id, slice_id, flags, capture_ts_us, data)
-            .expect("an encoded slice is always packetisable");
-
-        for packet in packetizer {
-            let len = packet
-                .encode_into(&mut self.buffer)
-                .expect("packet fits the send buffer");
-            self.emit(len)?;
+        // Wire slices are numbered here rather than by the caller, because one slice from the
+        // encoder may become several on the wire and only this side knows when. Callers hand
+        // over the encoder's slices in order and say which is the frame's last; the numbering
+        // that reaches the client is this function's business.
+        if self.slicing_frame != Some(frame_id) {
+            self.slicing_frame = Some(frame_id);
+            self.next_slice_id = 0;
         }
 
-        self.send_parity(frame_id, slice_id, data, capture_ts_us)?;
+        let limit = self.max_slice_bytes();
+        let chunks = data.len().div_ceil(limit).max(1);
+
+        for (index, chunk) in data.chunks(limit).enumerate() {
+            let mut flags = 0;
+            if idr {
+                flags |= FLAG_IDR;
+            }
+            // Only the very last packet of the very last piece ends the frame. Setting it on
+            // each piece would have the client assembling a frame it has most of.
+            if last && index + 1 == chunks {
+                flags |= FLAG_LAST_OF_FRAME;
+            }
+
+            let slice_id = self.next_slice_id;
+            self.next_slice_id = self.next_slice_id.wrapping_add(1);
+
+            let packetizer = SlicePacketizer::new(frame_id, slice_id, flags, capture_ts_us, chunk)
+                .expect("an encoded slice is always packetisable");
+
+            for packet in packetizer {
+                let len = packet
+                    .encode_into(&mut self.buffer)
+                    .expect("packet fits the send buffer");
+                self.emit(len)?;
+            }
+
+            self.send_parity(frame_id, slice_id, chunk, capture_ts_us)?;
+        }
 
         Ok(())
+    }
+
+    /// The most bytes one wire slice may carry.
+    ///
+    /// A Reed-Solomon block holds 255 shards in all, so a slice longer than the data half of
+    /// that cannot be protected by one block. The encoder does not know or care: Apple
+    /// Silicon ignores the slice size limit entirely and hands over whole frames, and a
+    /// keyframe at a real bitrate is several hundred packets. Left alone, exactly the frame
+    /// that must not be lost is the one frame sent unprotected.
+    ///
+    /// So a long slice becomes several wire slices, each with its own parity block. The
+    /// client already rebuilds a frame by concatenating its slices in order, which is why
+    /// this is invisible on the far side and costs nothing but a few extra headers.
+    ///
+    /// Without parity there is nothing to fit inside, and splitting would only add headers.
+    fn max_slice_bytes(&self) -> usize {
+        max_slice_bytes(self.parity_loss)
     }
 
     /// Paces, optionally drops, and sends the first `len` bytes of the send buffer.
@@ -496,11 +557,8 @@ impl SliceSender {
     /// something is missing, so putting it ahead of the data would delay every packet it
     /// protects for no gain.
     ///
-    /// A slice too large for one Reed-Solomon block is sent unprotected rather than
-    /// silently under-protected. The field holds 255 shards, and squeezing a 254-shard
-    /// block in leaves room for exactly one parity shard — protection of 0.4 percent, which
-    /// looks enabled and repairs nothing. Splitting into several blocks is the real answer
-    /// and it needs a block index on the wire, so for now this says so once and moves on.
+    /// Every slice reaching here fits one block, because [`Self::max_slice_bytes`] is what
+    /// decided how long it could be.
     ///
     /// # Errors
     ///
@@ -516,16 +574,12 @@ impl SliceSender {
             return Ok(());
         };
 
+        // Guaranteed by `max_slice_bytes`, which is what decides how long a wire slice may
+        // be. Kept as a guard rather than an assertion because the alternative to skipping is
+        // a block with one parity shard for two hundred data ones — protection that looks
+        // enabled and repairs nothing.
         let data_count = data.len().div_ceil(MAX_VIDEO_PAYLOAD);
         if data_count > max_data_shards_for(loss) {
-            if !self.oversized_slice_warned {
-                self.oversized_slice_warned = true;
-                eprintln!(
-                    "host: slice of {data_count} packets is too large for one parity block \
-                     (limit {}), sending it unprotected",
-                    max_data_shards_for(loss)
-                );
-            }
             return Ok(());
         }
 
