@@ -82,6 +82,14 @@ jobs:
         if: matrix.name == 'linux-x64'
         run: cargo clippy --package prism-core --features vaapi --all-targets
 
+      # Its tests are behind the same feature, so without this they compile nowhere and run
+      # nowhere. They need no GPU: what they check is the reasoning around one — which
+      # profile, which entrypoint, how the quantiser moves — and that is the part that would
+      # otherwise only be checked by a machine nobody has to hand.
+      - name: Test the VAAPI encoder
+        if: matrix.name == 'linux-x64'
+        run: cargo test --package prism-core --features vaapi
+
       - name: Rust tests
         run: cargo test --workspace
 

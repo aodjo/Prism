@@ -12,10 +12,11 @@
 //! decisions the plan makes about latency have to be made here, explicitly, and they are the
 //! part of this file worth reading:
 //!
-//! - **Constant bitrate against a one-frame buffer.** The single most important setting in the
-//!   whole pipeline. A larger buffer lets the encoder answer a hard frame with a huge one, and
-//!   a huge frame takes several frame times to transmit — which is a latency spike with no
-//!   name on it. Sized in [`RateControl::for_frames`].
+//! - **A bitrate this encoder may not be able to hold.** VideoToolbox and NVENC take a target
+//!   and a one-frame buffer; measured on an Intel TigerLake UHD, VAAPI's low power entrypoint
+//!   offers *only* constant quantiser — `VAConfigAttribRateControl` reports `VA_RC_CQP` and
+//!   nothing else. So on that hardware the bitrate is not something to ask for but something
+//!   to steer, one frame at a time, through the quantiser. See [`RateControl`].
 //! - **No frame reordering and no B-frames.** A B-frame cannot be encoded until the frame
 //!   after it exists, so it costs a whole frame of latency before anything else happens.
 //! - **The intra period is effectively infinite.** A periodic keyframe is a periodic bitrate
@@ -129,56 +130,88 @@ pub struct UnsupportedCodec {
     pub codec: Codec,
 }
 
-/// How much the encoder may spend, and how far ahead it may spend it.
+/// How the encoder is kept near its bitrate.
 ///
-/// The second number is the one that matters. Rate control is not about the average — every
-/// encoder hits its average — it is about what happens to a frame the encoder finds hard.
+/// What a driver offers is not a given. `VAConfigAttribRateControl` on an Intel TigerLake UHD,
+/// low power entrypoint, reports `VA_RC_CQP` and nothing else — no constant bitrate, no
+/// buffer to size, no target to name. On hardware like that the only lever is the quantiser,
+/// and holding a rate means moving it: the frame came out too big, so the next one is coded
+/// more coarsely.
+///
+/// This is the arithmetic for that, kept separate from the encoder so it can be reasoned about
+/// and tested without a GPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateControl {
-    /// Target bits per second.
+    /// The bitrate being aimed at.
     pub bits_per_second: u32,
-    /// The buffer the encoder is allowed to think in, in bits.
-    pub buffer_bits: u32,
-    /// How full that buffer is considered at the start, in bits.
-    ///
-    /// The same as the buffer, so the encoder begins with its whole allowance rather than
-    /// spending the first second earning it.
-    pub initial_buffer_bits: u32,
+    /// Bytes a frame may take, on average, to hit that rate.
+    pub bytes_per_frame: u32,
+    /// The quantiser the next frame will be coded at.
+    pub qp: u8,
 }
 
-impl RateControl {
-    /// Sizes the buffer to hold this many frames.
-    ///
-    /// One is the setting the latency target is built on, and the argument exists so the
-    /// reasoning can be tested rather than only asserted: at one frame the encoder cannot
-    /// produce a picture that takes longer than a frame time to send, which is exactly the
-    /// property the whole pipeline depends on.
-    ///
-    /// # Panics
-    ///
-    /// Never. A frame rate of zero is treated as one, because a session that negotiated zero
-    /// frames a second has a bigger problem than its buffer size and dividing by it here would
-    /// only hide that.
-    #[must_use]
-    pub fn for_frames(bitrate_bps: u32, fps: u32, frames: u32) -> Self {
-        let per_frame = bitrate_bps / fps.max(1);
-        // Saturating rather than wrapping: a wrapped buffer size is a small buffer, which
-        // looks like a working encoder producing terrible pictures.
-        let buffer_bits = per_frame.saturating_mul(frames.max(1));
+/// Coarsest quantiser the controller will use.
+///
+/// H.264 allows 51, which is a picture nobody would watch. Stopping short of it means a
+/// session on a hopeless link produces a bad picture rather than an unrecognisable one, and
+/// the congestion controller is the thing that should be lowering the target instead.
+pub const MAX_QP: u8 = 42;
 
+/// Finest quantiser the controller will use.
+///
+/// Below about eighteen the encoder spends bits on detail no viewer of a moving screen will
+/// notice, and spending them is what makes a frame too large to send in its own frame time.
+pub const MIN_QP: u8 = 18;
+
+impl RateControl {
+    /// Starts at a quantiser in the middle of the useful range.
+    ///
+    /// Twenty-six is H.264's own default and a reasonable guess for a desktop; the first few
+    /// frames correct it either way.
+    #[must_use]
+    pub fn new(bitrate_bps: u32, fps: u32) -> Self {
         Self {
             bits_per_second: bitrate_bps,
-            buffer_bits,
-            initial_buffer_bits: buffer_bits,
+            bytes_per_frame: bitrate_bps / 8 / fps.max(1),
+            qp: 26,
         }
     }
 
-    /// The rate control a session should run at.
-    ///
-    /// One frame of buffer, from the plan's first design decision.
+    /// The controller a session should start with.
     #[must_use]
     pub fn for_session(config: &EncoderConfig) -> Self {
-        Self::for_frames(config.bitrate_bps, config.fps, 1)
+        Self::new(config.bitrate_bps, config.fps)
+    }
+
+    /// Moves the quantiser after seeing what a frame actually cost.
+    ///
+    /// One step at a time rather than jumping to what the last frame implies. A screen that
+    /// changes suddenly produces one large frame, and an encoder that answered it by coarsening
+    /// several steps would follow one hard frame with several ugly ones — which is more visible
+    /// than the frame that caused it.
+    pub fn observe(&mut self, frame_bytes: u32) {
+        /// Fraction over budget before the quantiser is coarsened, and under before it is
+        /// refined. A band rather than a point, so a frame that lands near the target does not
+        /// have the controller oscillating around it.
+        const TOLERANCE: u32 = 8;
+
+        let over = self.bytes_per_frame + self.bytes_per_frame / TOLERANCE;
+        let under = self.bytes_per_frame - self.bytes_per_frame / TOLERANCE;
+
+        if frame_bytes > over {
+            self.qp = (self.qp + 1).min(MAX_QP);
+        } else if frame_bytes < under {
+            self.qp = self.qp.saturating_sub(1).max(MIN_QP);
+        }
+    }
+
+    /// Changes the rate being aimed at, as the congestion controller decides it.
+    ///
+    /// The quantiser is left where it is: it is already close to right for the picture, and
+    /// the next frame will move it toward the new budget the same way as any other.
+    pub fn retarget(&mut self, bitrate_bps: u32, fps: u32) {
+        self.bits_per_second = bitrate_bps;
+        self.bytes_per_frame = bitrate_bps / 8 / fps.max(1);
     }
 }
 
@@ -244,10 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn the_buffer_holds_exactly_one_frame_of_bits() {
-        // The single most important number in the pipeline. A buffer of several frames lets
-        // the encoder answer a hard frame with a picture that takes several frame times to
-        // transmit, and that is a latency spike nothing downstream can undo.
+    fn the_budget_is_the_bitrate_divided_by_the_frame_rate() {
         let rate = RateControl::for_session(&EncoderConfig {
             codec: Codec::H264,
             width: 2560,
@@ -257,27 +287,78 @@ mod tests {
             max_slice_bytes: 0,
         });
 
-        assert_eq!(rate.bits_per_second, 40_000_000);
-        assert_eq!(rate.buffer_bits, 40_000_000 / 120);
-        assert_eq!(
-            rate.initial_buffer_bits, rate.buffer_bits,
-            "the encoder should start with its whole allowance"
-        );
-    }
-
-    #[test]
-    fn a_bigger_buffer_is_bigger_by_exactly_the_frames_asked_for() {
-        let one = RateControl::for_frames(24_000_000, 60, 1);
-        let four = RateControl::for_frames(24_000_000, 60, 4);
-
-        assert_eq!(four.buffer_bits, one.buffer_bits * 4);
+        assert_eq!(rate.bytes_per_frame, 40_000_000 / 8 / 120);
     }
 
     #[test]
     fn a_frame_rate_of_zero_does_not_divide_by_it() {
-        let rate = RateControl::for_frames(24_000_000, 0, 1);
+        assert_eq!(RateControl::new(24_000_000, 0).bytes_per_frame, 3_000_000);
+    }
 
-        assert_eq!(rate.buffer_bits, 24_000_000);
+    #[test]
+    fn a_frame_over_budget_coarsens_the_quantiser_and_one_under_refines_it() {
+        let mut rate = RateControl::new(24_000_000, 60);
+        let budget = rate.bytes_per_frame;
+        let started = rate.qp;
+
+        rate.observe(budget * 4);
+        assert_eq!(
+            rate.qp,
+            started + 1,
+            "a frame four times over changed nothing"
+        );
+
+        rate.observe(budget / 4);
+        rate.observe(budget / 4);
+        assert_eq!(
+            rate.qp,
+            started - 1,
+            "two frames well under did not refine it"
+        );
+    }
+
+    #[test]
+    fn a_frame_near_the_budget_leaves_the_quantiser_alone() {
+        // Without a band the controller oscillates around the target, and every oscillation is
+        // a visible change in how the picture is coded.
+        let mut rate = RateControl::new(24_000_000, 60);
+        let budget = rate.bytes_per_frame;
+        let started = rate.qp;
+
+        rate.observe(budget);
+        rate.observe(budget + budget / 100);
+        rate.observe(budget - budget / 100);
+
+        assert_eq!(rate.qp, started);
+    }
+
+    #[test]
+    fn the_quantiser_stays_inside_the_useful_range() {
+        // Fifty-one is legal and unwatchable. A hopeless link should produce a bad picture
+        // rather than an unrecognisable one, and lowering the target is the congestion
+        // controller's job rather than this one's.
+        let mut rate = RateControl::new(1_000_000, 60);
+        for _ in 0..200 {
+            rate.observe(u32::MAX);
+        }
+        assert_eq!(rate.qp, super::MAX_QP);
+
+        for _ in 0..200 {
+            rate.observe(0);
+        }
+        assert_eq!(rate.qp, super::MIN_QP);
+    }
+
+    #[test]
+    fn retargeting_moves_the_budget_and_leaves_the_quantiser() {
+        let mut rate = RateControl::new(24_000_000, 60);
+        rate.observe(rate.bytes_per_frame * 4);
+        let qp = rate.qp;
+
+        rate.retarget(12_000_000, 60);
+
+        assert_eq!(rate.bytes_per_frame, 12_000_000 / 8 / 60);
+        assert_eq!(rate.qp, qp, "the quantiser is already close to right");
     }
 
     #[test]
