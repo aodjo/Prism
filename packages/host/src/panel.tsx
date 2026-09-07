@@ -57,6 +57,20 @@ const PHASE_EDGE: Record<string, string> = {
 const IDLE_EDGE = 'border-l-dim-2 bg-wash-1';
 
 /**
+ * The colour the grip carries for each phase.
+ *
+ * The whole reason the shelf is at the edge of the screen rather than in the menu bar: a
+ * glance at the grip says whether this machine is still handing its screen to somebody, with
+ * nothing to open and nothing to read.
+ */
+const GRIP_TONE: Record<string, string> = {
+  opening: 'text-cyan',
+  waiting: 'text-cyan',
+  streaming: 'text-mint',
+  failed: 'text-danger-ink',
+};
+
+/**
  * Shortens a public key for display.
  *
  * A key is sixty-four hex characters and nobody reads all of them. The first and last six are
@@ -151,6 +165,7 @@ function Panel(): JSX.Element {
   const [pairTrouble, setPairTrouble] = useState<string | null>(null);
   const [trouble, setTrouble] = useState<string | null>(null);
 
+  const [open, setOpen] = useState(false);
   const body = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -173,25 +188,34 @@ function Panel(): JSX.Element {
     prism.onSnapshot(setSnapshot);
   }, []);
 
-  // The panel is as tall as what is in it. Measured rather than calculated, because a missing
-  // grant or a pairing code adds a section that was not there a moment ago.
+  useEffect(() => {
+    prism.onFold(setOpen);
+  }, []);
+
+  // The window is shaped from whether the panel is out and how tall it is. Measured rather
+  // than calculated, because a missing grant or a pairing code adds a section that was not
+  // there a moment ago.
   useEffect(() => {
     const measured = body.current;
 
     if (!measured) {
+      prism.shelf(open, 0);
       return;
     }
 
-    const watch = new ResizeObserver(() => {
-      prism.fit(measured.scrollHeight);
-    });
+    const report = (): void => {
+      prism.shelf(open, measured.scrollHeight);
+    };
 
+    report();
+
+    const watch = new ResizeObserver(report);
     watch.observe(measured);
 
     return () => {
       watch.disconnect();
     };
-  }, []);
+  }, [open]);
 
   const phase = snapshot?.phase ?? 'idle';
   const running = RUNNING.has(phase);
@@ -252,8 +276,40 @@ function Panel(): JSX.Element {
         ? short(only)
         : `${identity.peers.length} devices`;
 
+  const grip = (
+    <button
+      type="button"
+      aria-label={open ? 'Fold the panel away' : 'Pull the panel out'}
+      className={`no-drag flex w-[30px] flex-none items-center justify-center self-stretch border-y border-l border-line-2 bg-sidebar text-ui backdrop-blur-md transition-colors hover:bg-wash-3 ${
+        GRIP_TONE[phase] ?? 'text-dim'
+      } ${open ? 'rounded-l-none' : 'rounded-l-xl'}`}
+      onClick={() => {
+        setOpen(!open);
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        prism.shelfMenu();
+      }}
+    >
+      {open ? '›' : '‹'}
+    </button>
+  );
+
+  // Folded, the window is the grip and nothing else, so the screen gives up thirty pixels of
+  // its edge rather than a strip somebody's clicks have to get past.
+  if (!open) {
+    return <div className="flex h-full">{grip}</div>;
+  }
+
   return (
-    <div ref={body}>
+    // No height of its own: the row is as tall as the panel's content, which is the figure
+    // reported back so the window can be made that tall too. Giving it the window's height
+    // instead would make the measurement circular and the panel would never shrink.
+    <div className="flex items-stretch">
+      <div
+        ref={body}
+        className="min-w-0 flex-1 overflow-hidden rounded-l-xl border-y border-l border-line-2 bg-base/95 backdrop-blur-md"
+      >
       <div className="drag h-3.5" />
 
       <header className="flex items-baseline gap-2.5 px-4 pb-3">
@@ -450,6 +506,19 @@ function Panel(): JSX.Element {
           />
         </Row>
       </Band>
+
+        <div className="flex items-center justify-between px-4 py-3 text-tiny text-dim">
+          <span>Right-click the grip for more</span>
+          <button
+            type="button"
+            className="no-drag text-tiny text-dim transition-colors hover:text-danger-ink"
+            onClick={prism.shelfMenu}
+          >
+            Menu
+          </button>
+        </div>
+      </div>
+      {grip}
     </div>
   );
 }

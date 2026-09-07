@@ -222,7 +222,25 @@ export interface PrismApi {
    * @param {number} height - The content's height in CSS pixels.
    * @returns {void}
    */
-  fit(height: number): void;
+  shelf(open: boolean, height: number): void;
+
+  /**
+   * Shows what the handle offers on a right click.
+   *
+   * @returns {void}
+   */
+  shelfMenu(): void;
+
+  /**
+   * Listens for the main process folding or unfolding the shelf.
+   *
+   * Clicking away folds it, and the handle's own menu can ask for it back. Both happen outside
+   * this window, so the panel is told rather than asked.
+   *
+   * @param {(open: boolean) => void} listener - Called with the new state.
+   * @returns {void}
+   */
+  onFold(listener: (open: boolean) => void): void;
 
   /**
    * Registers a listener for snapshots the main process pushes while the panel is open.

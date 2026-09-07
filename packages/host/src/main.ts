@@ -1,10 +1,9 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, screen, shell } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-import { TRAY_ICON } from './icon.js';
 import type { Settings } from './api.js';
 import { DEFAULTS, loadSettings, saveSettings } from './settings.js';
 
@@ -38,11 +37,17 @@ const MIN_PANEL_HEIGHT = 200;
 /** The tallest it goes, so a long list of paired devices does not fill the screen. */
 const MAX_PANEL_HEIGHT = 720;
 
-/** The tray icon and its menu. */
-let tray: Tray | null = null;
+/** How wide the grip is — the strip that stays against the screen edge when the panel folds. */
+const HANDLE_WIDTH = 30;
 
-/** The panel the tray icon opens. */
+/** How tall the grip is on its own, which is all the screen gives up while it is folded. */
+const HANDLE_HEIGHT = 56;
+
+/** The shelf: a handle at the edge of the screen and the panel it pulls out. */
 let panel: BrowserWindow | null = null;
+
+/** Whether the panel is pulled out. Nothing is pushed to a shelf nobody has opened. */
+let shelfOpen = false;
 
 /** The running session, or `null` when this machine is not hosting. */
 let host: InstanceType<typeof prism.Host> | null = null;
@@ -54,21 +59,30 @@ let ticker: NodeJS.Timeout | null = null;
 let settings: Settings = { ...DEFAULTS };
 
 /**
- * Builds the window the tray icon opens.
+ * Builds the shelf.
  *
- * Frameless and always on top, positioned under the tray icon, and hidden rather than closed
- * when it loses focus — the shape a menu bar application has, rather than a window somebody
- * has to find again.
+ * A handle fixed to the right edge of the screen with the panel folded behind it, rather than
+ * a menu bar item. Hosting is a thing somebody switches on and then forgets, and what they
+ * want afterwards is to glance at the edge of the screen and see whether it is still on —
+ * which a handle that carries the session's colour answers without being opened.
  *
- * @returns {BrowserWindow} The created window, hidden until the icon is clicked.
+ * Frameless, transparent and always on top. Every part of it that is drawn is opaque, so the
+ * window never sits over the screen swallowing clicks that were meant for what is behind it.
+ *
+ * @returns {BrowserWindow} The created window, hidden until it has been placed.
  */
-function createPanel(): BrowserWindow {
+function createShelf(): BrowserWindow {
   const window = new BrowserWindow({
-    width: PANEL_WIDTH,
-    height: MIN_PANEL_HEIGHT,
+    width: HANDLE_WIDTH,
+    height: HANDLE_HEIGHT,
     show: false,
     frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
     resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
     webPreferences: {
@@ -83,38 +97,52 @@ function createPanel(): BrowserWindow {
 
   void window.loadFile(join(here, '..', 'renderer', 'index.html'));
 
+  // Above ordinary windows but below anything the system puts on top of everything. A shelf
+  // that covered a system alert would be a shelf somebody had to move to answer it.
+  window.setAlwaysOnTop(true, 'floating');
+  window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+
+  // Clicking away folds it, the way any panel pulled out over other windows should.
   window.on('blur', () => {
-    window.hide();
+    if (shelfOpen) {
+      window.webContents.send('shelf:fold');
+    }
   });
 
   return window;
 }
 
 /**
- * Positions the panel under the tray icon and shows it.
+ * Puts the shelf against the right edge of the screen at the size it is currently asking for.
  *
- * Clamped to the display the icon is on, so a panel opened from an icon near the right edge
- * does not hang off the screen.
+ * The handle is centred in the window and the window is centred on the display, so the handle
+ * stays exactly where it was when the panel folds out from behind it. A shelf whose grip moved
+ * every time it opened would be one nobody could find twice.
  *
+ * @param {number} height - How tall the panel wants to be, when it is open.
  * @returns {void}
  */
-function showPanel(): void {
-  if (!panel || !tray) {
+function placeShelf(height: number): void {
+  if (!panel || panel.isDestroyed()) {
     return;
   }
 
-  const icon = tray.getBounds();
-  const { width, height } = panel.getBounds();
-  const work = screen.getDisplayNearestPoint({ x: icon.x, y: icon.y }).workArea;
+  const work = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
 
-  const x = Math.round(
-    Math.min(Math.max(icon.x + icon.width / 2 - width / 2, work.x), work.x + work.width - width),
+  const width = shelfOpen ? PANEL_WIDTH + HANDLE_WIDTH : HANDLE_WIDTH;
+  const tall = shelfOpen
+    ? Math.round(Math.min(Math.max(height, MIN_PANEL_HEIGHT), MAX_PANEL_HEIGHT))
+    : HANDLE_HEIGHT;
+
+  panel.setBounds(
+    {
+      width,
+      height: tall,
+      x: work.x + work.width - width,
+      y: Math.round(work.y + (work.height - tall) / 2),
+    },
+    false,
   );
-  const y = Math.round(Math.min(icon.y + icon.height + 4, work.y + work.height - height));
-
-  panel.setPosition(x, y, false);
-  panel.show();
-  panel.focus();
 }
 
 /**
@@ -126,7 +154,7 @@ function showPanel(): void {
  * @returns {void}
  */
 function pushSnapshot(): void {
-  if (!panel || panel.isDestroyed() || !panel.isVisible()) {
+  if (!panel || panel.isDestroyed() || !shelfOpen) {
     return;
   }
 
@@ -134,18 +162,14 @@ function pushSnapshot(): void {
 }
 
 /**
- * Sets the tray icon's tooltip and menu to match what the session is doing.
+ * Shows what the handle offers on a right click.
  *
- * The menu is what a person sees without opening the panel, so it carries the one fact that
- * matters: whether this machine is streaming its screen to somebody.
+ * The one thing somebody might want without opening the panel is to stop hosting, and the one
+ * thing they cannot do from inside the panel is quit.
  *
  * @returns {void}
  */
-function refreshTray(): void {
-  if (!tray) {
-    return;
-  }
-
+function handleMenu(): void {
   const snapshot = host?.snapshot() ?? null;
   const phase = snapshot?.phase ?? 'idle';
 
@@ -158,31 +182,33 @@ function refreshTray(): void {
           ? `Prism — ${snapshot?.error ?? 'failed'}`
           : 'Prism — not hosting';
 
-  tray.setToolTip(description);
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: description, enabled: false },
-      { type: 'separator' },
-      { label: 'Open Prism', click: showPanel },
-      {
-        label: host ? 'Stop hosting' : 'Start hosting',
-        click: () => {
-          if (host) {
-            stopHosting();
-          } else {
-            try {
-              startHosting();
-            } catch {
-              // The panel is where a failure gets explained; the menu only offers the action.
-              showPanel();
-            }
+  const menu = Menu.buildFromTemplate([
+    { label: description, enabled: false },
+    { type: 'separator' },
+    {
+      label: host ? 'Stop hosting' : 'Start hosting',
+      click: () => {
+        if (host) {
+          stopHosting();
+        } else {
+          try {
+            startHosting();
+          } catch {
+            // The panel is where a failure gets explained; the menu only offers the action.
+            panel?.webContents.send('shelf:unfold');
           }
-        },
+        }
       },
-      { type: 'separator' },
-      { label: 'Quit', click: () => app.quit() },
-    ]),
-  );
+    },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]);
+
+  if (panel && !panel.isDestroyed()) {
+    menu.popup({ window: panel });
+  } else {
+    menu.popup();
+  }
 }
 
 /**
@@ -215,10 +241,8 @@ function startHosting(): void {
 
   ticker = setInterval(() => {
     pushSnapshot();
-    refreshTray();
   }, SNAPSHOT_INTERVAL_MS);
 
-  refreshTray();
 }
 
 /**
@@ -236,7 +260,6 @@ function stopHosting(): void {
   host = null;
 
   pushSnapshot();
-  refreshTray();
 }
 
 /**
@@ -305,15 +328,21 @@ function registerHandlers(): void {
 
   ipcMain.handle('host:snapshot', () => host?.snapshot() ?? null);
 
-  ipcMain.on('panel:fit', (_event, height: number) => {
-    if (!panel || panel.isDestroyed()) {
-      return;
-    }
+  // The renderer says whether the panel is out and how tall it wants to be; the shape of the
+  // window follows from those two. Measured rather than calculated, because a missing grant or
+  // a pairing code adds a section that was not there a moment ago.
+  ipcMain.on('shelf:state', (_event, open: boolean, height: number) => {
+    shelfOpen = open;
+    placeShelf(height);
 
-    const wanted = Math.round(Math.min(Math.max(height, MIN_PANEL_HEIGHT), MAX_PANEL_HEIGHT));
-    if (panel.getBounds().height !== wanted) {
-      panel.setBounds({ height: wanted }, false);
+    if (open) {
+      panel?.focus();
+      pushSnapshot();
     }
+  });
+
+  ipcMain.on('shelf:menu', () => {
+    handleMenu();
   });
 }
 
@@ -326,14 +355,9 @@ void app.whenReady().then(() => {
 
   registerHandlers();
 
-  const icon = nativeImage.createFromDataURL(TRAY_ICON);
-  icon.setTemplateImage(true);
-
-  tray = new Tray(icon);
-  tray.on('click', showPanel);
-
-  panel = createPanel();
-  refreshTray();
+  panel = createShelf();
+  placeShelf(MIN_PANEL_HEIGHT);
+  panel.showInactive();
 
   // A developer affordance, and the only way to see what this window looks like without a
   // person in front of it. Left in because a panel nobody can screenshot is a panel that
@@ -375,11 +399,15 @@ async function capturePanel(path: string): Promise<void> {
   }
 
   panel.removeAllListeners('blur');
-  showPanel();
+  panel.show();
 
   // Long enough for the renderer to have asked the main process who this machine is and to
   // have drawn the answer. A shorter wait photographs an empty panel.
   await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  // Pulled out, because a picture of the grip on its own says nothing about the panel.
+  panel.webContents.send('shelf:unfold');
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
   const image = await panel.webContents.capturePage();
   writeFileSync(path, image.toPNG());
@@ -413,11 +441,14 @@ async function drivePanel(path: string): Promise<void> {
   }
 
   panel.removeAllListeners('blur');
-  showPanel();
+  panel.show();
 
   // Long enough for the renderer to have asked who this machine is and drawn the answer,
   // which every script here starts from.
   await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  panel.webContents.send('shelf:unfold');
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
   try {
     const source = readFileSync(path, 'utf8');

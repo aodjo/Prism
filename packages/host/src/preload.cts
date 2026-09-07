@@ -37,8 +37,21 @@ const api: PrismApi = {
 
   snapshot: (): Promise<HostSnapshot | null> => ipcRenderer.invoke('host:snapshot'),
 
-  fit: (height: number): void => {
-    ipcRenderer.send('panel:fit', height);
+  shelf: (open: boolean, height: number): void => {
+    ipcRenderer.send('shelf:state', open, height);
+  },
+
+  shelfMenu: (): void => {
+    ipcRenderer.send('shelf:menu');
+  },
+
+  onFold: (listener: (open: boolean) => void): void => {
+    ipcRenderer.on('shelf:fold', () => {
+      listener(false);
+    });
+    ipcRenderer.on('shelf:unfold', () => {
+      listener(true);
+    });
   },
 
   onSnapshot: (listener: (snapshot: HostSnapshot | null) => void): void => {
