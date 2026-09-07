@@ -188,15 +188,30 @@ function renderHosts(): void {
     name.textContent = short(host);
     name.title = host;
 
+    // Where this host is, when there is no rendezvous server to ask. The host's own panel
+    // shows the address it is listening on; this is where it gets typed, and it is remembered
+    // so it is typed once rather than every time.
+    const address = document.createElement('input');
+    address.type = 'text';
+    address.className = 'address';
+    address.placeholder = settings.rendezvous === '' ? '192.168.1.5:47200' : 'via rendezvous';
+    address.spellcheck = false;
+    address.value = settings.addresses[host] ?? '';
+    address.addEventListener('change', () => {
+      const next = { ...settings.addresses, [host]: address.value.trim() };
+      settings = { ...settings, addresses: next };
+      void save({ addresses: next });
+    });
+
     const connect = document.createElement('button');
     connect.className = 'primary';
     connect.textContent = 'Connect';
     connect.disabled = RUNNING.has(phase);
     connect.addEventListener('click', () => {
-      void start(host);
+      void start(host, address.value.trim());
     });
 
-    row.append(name, connect);
+    row.append(name, address, connect);
     list.append(row);
   }
 }
@@ -208,11 +223,11 @@ function renderHosts(): void {
  * @param {string} host - The host's public key as hex.
  * @returns {Promise<void>}
  */
-async function start(host: string): Promise<void> {
+async function start(host: string, address: string): Promise<void> {
   el('stream-error').hidden = true;
 
   try {
-    render(await prism.connect(host, ''));
+    render(await prism.connect(host, address));
   } catch (error) {
     showError('stream-error', error);
   }
@@ -260,6 +275,9 @@ async function pair(): Promise<void> {
   }
 }
 
+/** What this machine is configured to do, as the window last read it. */
+let settings: Settings = { rendezvous: '', control: true, smooth: false, addresses: {} };
+
 /**
  * Loads the stored settings into the inputs.
  *
@@ -267,7 +285,7 @@ async function pair(): Promise<void> {
  * @returns {Promise<void>}
  */
 async function loadSettings(): Promise<void> {
-  const settings = await prism.getSettings();
+  settings = await prism.getSettings();
 
   input('rendezvous').value = settings.rendezvous;
   input('control').checked = settings.control;
@@ -302,7 +320,12 @@ function listen(): void {
   });
 
   input('rendezvous').addEventListener('change', (event) => {
-    void save({ rendezvous: (event.target as HTMLInputElement).value.trim() });
+    const rendezvous = (event.target as HTMLInputElement).value.trim();
+    settings = { ...settings, rendezvous };
+    void save({ rendezvous });
+    // The placeholder in every host row says whether an address is needed, and that answer
+    // just changed.
+    renderHosts();
   });
 
   input('control').addEventListener('change', (event) => {

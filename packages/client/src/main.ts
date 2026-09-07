@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { createRequire } from 'node:module';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -114,7 +114,11 @@ function registerHandlers(): void {
   ipcMain.handle('stream:connect', (_event, host: string, address: string) => {
     stream ??= new Stream(pushStream);
 
-    return stream.start(host, address, settings);
+    // What the window passed, or what was stored for this host last time. The rendezvous
+    // server is the fallback, and `Stream.start` refuses when there is neither.
+    const direct = address.trim() || (settings.addresses[host] ?? '');
+
+    return stream.start(host, direct, settings);
   });
 
   ipcMain.handle('stream:disconnect', () => stream?.stop() ?? idle());
@@ -179,8 +183,54 @@ void app.whenReady().then(() => {
   const screenshot = process.env['PRISM_WINDOW_SCREENSHOT'];
   if (screenshot) {
     void captureWindow(screenshot);
+    return;
+  }
+
+  const drive = process.env['PRISM_WINDOW_DRIVE'];
+  if (drive) {
+    void driveWindow(drive);
   }
 });
+
+/**
+ * Runs a script inside the window and prints what it returned, then quits.
+ *
+ * The companion to the screenshot: that says what the window looks like, this says whether it
+ * does anything. The script runs in the renderer, so it reaches the application exactly the
+ * way a person does — through the buttons in the markup and the surface the preload exposes,
+ * with no privileged access of its own. A stream opened any other way would prove the native
+ * code works and nothing about the application on top of it.
+ *
+ * A developer affordance, enabled only by an environment variable naming a file on this
+ * machine.
+ *
+ * @async
+ * @param {string} path - The script to run, as a file of JavaScript.
+ * @returns {Promise<void>}
+ */
+async function driveWindow(path: string): Promise<void> {
+  if (!window) {
+    app.quit();
+    return;
+  }
+
+  // Long enough for the renderer to have asked who this machine is and drawn the answer,
+  // which every script here starts from.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  try {
+    const source = readFileSync(path, 'utf8');
+    const result: unknown = await window.webContents.executeJavaScript(source, true);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } catch (error) {
+    process.stdout.write(
+      `drive failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  }
+
+  app.quit();
+}
 
 app.on('window-all-closed', () => {
   app.quit();

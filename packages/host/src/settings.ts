@@ -7,12 +7,14 @@ import type { Settings } from './api.js';
 /**
  * The settings a machine uses before anybody has changed anything.
  *
- * Port zero rather than a fixed one: with a rendezvous server the port is discovered, and
- * pinning it would only matter to somebody forwarding a port by hand, who will set it.
+ * The port is fixed rather than left to the operating system. With a rendezvous server it
+ * makes no difference, since the port is discovered either way — but without one, a host on
+ * an operating-system-chosen port is a host nobody can reach: the client has no way to learn
+ * a number nothing told it. The same port the headless host uses, so the two agree.
  */
 export const DEFAULTS: Settings = {
   rendezvous: '',
-  bind: '0.0.0.0:0',
+  bind: '0.0.0.0:47200',
   fps: 60,
   bitrateBps: 24_000_000,
   injectInput: true,

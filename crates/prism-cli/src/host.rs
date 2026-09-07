@@ -5,7 +5,6 @@
 //! the client's latency figure describe the pipeline rather than just the network.
 
 use std::io;
-use std::net::SocketAddr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -56,8 +55,9 @@ fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
     // the flag exists for the application, which has a person who can click stop.
     let cancelled = std::sync::atomic::AtomicBool::new(false);
 
-    let mut waiting = |observed: Option<SocketAddr>| {
-        if let Some(observed) = observed {
+    let mut waiting = |reachable: prism_core::control::host::Reachable| {
+        println!("host: listening on {}", reachable.local);
+        if let Some(observed) = reachable.observed {
             println!("host: registered, reachable at {observed}");
         }
         println!("host: waiting for a paired client");

@@ -176,6 +176,12 @@ pub struct Snapshot {
     pub phase: Phase,
     /// Where the rendezvous server sees this machine, once it has said.
     pub observed: Option<SocketAddr>,
+    /// The address this machine is actually listening on.
+    ///
+    /// What somebody on the same network has to be told. Without a rendezvous server it is
+    /// the only way to reach this host, and it is not knowable in advance when the configured
+    /// port was zero.
+    pub local: Option<SocketAddr>,
     /// The connected client's public key, once one has connected.
     pub peer: Option<[u8; KEY_LEN]>,
     /// Frames captured, encoded and sent.
@@ -209,6 +215,7 @@ struct Shared {
     audio_frames: Arc<AtomicU64>,
     /// Written once when each becomes known, so a lock costs nothing measurable.
     observed: Mutex<Option<SocketAddr>>,
+    local: Mutex<Option<SocketAddr>>,
     peer: Mutex<Option<[u8; KEY_LEN]>>,
     error: Mutex<Option<String>>,
 }
@@ -291,6 +298,7 @@ impl HostService {
             packets: self.shared.packets.load(Ordering::Relaxed),
             bytes: self.shared.bytes.load(Ordering::Relaxed),
             bitrate_bps: self.shared.bitrate_bps.load(Ordering::Relaxed),
+            local: self.shared.local.lock().ok().and_then(|slot| *slot),
             audio_frames: self.shared.audio_frames.load(Ordering::Relaxed),
             error: self
                 .shared
@@ -342,9 +350,12 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<Atom
 
     let opened = {
         let shared = Arc::clone(shared);
-        let mut waiting = move |observed: Option<SocketAddr>| {
+        let mut waiting = move |reachable: Reachable| {
             if let Ok(mut slot) = shared.observed.lock() {
-                *slot = observed;
+                *slot = reachable.observed;
+            }
+            if let Ok(mut slot) = shared.local.lock() {
+                *slot = Some(reachable.local);
             }
             shared.set_phase(Phase::Waiting);
         };
@@ -390,6 +401,69 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<Atom
     shared.set_phase(Phase::Stopped);
 }
 
+/// Turns a bound address into one somebody could actually type.
+///
+/// Public so it can be tested directly; a host has one moment where this matters and it is
+/// not one a test can easily stand in front of.
+///
+/// A host binds the wildcard address so it answers on every interface, and then reports
+/// `0.0.0.0` — which is the truth and is useless, because it is the one address no client can
+/// connect to. The port is right, so only the interface has to be found.
+///
+/// Found by asking the routing table rather than by listing interfaces: a connected UDP
+/// socket sends nothing, it only makes the kernel choose the route it would use and therefore
+/// the source address that goes with it. That picks the right interface on a machine with
+/// several, which enumerating cannot do. The destination is a documentation address that is
+/// never routed anywhere, so nothing leaves this machine.
+///
+/// Falls back to the address as bound when there is no route at all, which is a machine with
+/// no network and nothing to report anyway.
+pub fn reachable_address(bound: SocketAddr) -> SocketAddr {
+    if !bound.ip().is_unspecified() {
+        return bound;
+    }
+
+    let probe = match bound.ip() {
+        std::net::IpAddr::V4(_) => std::net::UdpSocket::bind("0.0.0.0:0"),
+        std::net::IpAddr::V6(_) => std::net::UdpSocket::bind("[::]:0"),
+    };
+
+    let Ok(probe) = probe else {
+        return bound;
+    };
+
+    let elsewhere: SocketAddr = match bound.ip() {
+        std::net::IpAddr::V4(_) => "192.0.2.1:9".parse().expect("a valid address"),
+        std::net::IpAddr::V6(_) => "[2001:db8::1]:9".parse().expect("a valid address"),
+    };
+
+    if probe.connect(elsewhere).is_err() {
+        return bound;
+    }
+
+    probe.local_addr().map_or(bound, |mut local| {
+        local.set_port(bound.port());
+        local
+    })
+}
+
+/// Where a waiting host can be reached.
+///
+/// Both, because they answer different questions and a host usually has only one of them. The
+/// observed address is what a rendezvous server sees and is the only useful one across the
+/// internet; the local one is what a machine on the same network types in, and is the only
+/// one there is when no server is configured.
+#[derive(Debug, Clone, Copy)]
+pub struct Reachable {
+    /// The address this machine's socket is actually bound to.
+    ///
+    /// Worth reporting even when it was asked for, because a port of zero means the operating
+    /// system chose one and nobody can connect to a port they were never told.
+    pub local: SocketAddr,
+    /// Where the rendezvous server says it sees this machine, when there is one.
+    pub observed: Option<SocketAddr>,
+}
+
 /// What opening a session produced.
 #[derive(Debug)]
 pub struct Opened {
@@ -424,17 +498,21 @@ pub fn connect(
     config: &HostConfig,
     keys: &HostKeys,
     cancelled: &AtomicBool,
-    waiting: &mut dyn FnMut(Option<SocketAddr>),
+    waiting: &mut dyn FnMut(Reachable),
 ) -> io::Result<Opened> {
     use crate::control::session::{DIRECT_PATIENCE, RELAYED_PATIENCE};
     use crate::net::transport::UdpTransport;
 
     let transport = UdpTransport::bind(config.bind)?;
+    let local = reachable_address(transport.local_addr()?);
 
     let Some(server) = config.rendezvous else {
         // Reachable only where a client can already address this machine: the same network, a
         // virtual one, or a forwarded port. Nothing to punch and nothing to fall back to.
-        waiting(None);
+        waiting(Reachable {
+            local,
+            observed: None,
+        });
         stopped(cancelled)?;
 
         return Ok(Opened {
@@ -467,7 +545,10 @@ pub fn connect(
     )?;
     std::mem::forget(keepalive_stop);
 
-    waiting(Some(observed));
+    waiting(Reachable {
+        local,
+        observed: Some(observed),
+    });
 
     let (caller, _) =
         crate::control::rendezvous::await_caller(&transport, server, config.patience)?;

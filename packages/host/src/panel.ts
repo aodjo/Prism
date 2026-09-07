@@ -189,6 +189,9 @@ function render(snapshot: HostSnapshot | null): void {
   const streaming = snapshot !== null && phase === 'streaming';
 
   setRow('peer-row', 'peer', snapshot?.peer ? short(snapshot.peer) : null);
+  // Shown while waiting rather than only once a client is on, because waiting is exactly
+  // when somebody needs to read it off and type it into the other machine.
+  setRow('local-row', 'local', snapshot?.local ?? null);
   setRow('observed-row', 'observed', snapshot?.observed ?? null);
   setRow('rate-row', 'rate', streaming ? rate(snapshot.bitrateBps) : null);
   setRow('frames-row', 'frames', streaming ? String(snapshot.frames) : null);
