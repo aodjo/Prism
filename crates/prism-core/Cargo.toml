@@ -80,3 +80,16 @@ windows = { version = "0.62", features = [
     "Win32_Security",
 ] }
 windows-core = "0.62"
+
+[features]
+# The Linux host's VAAPI encoder. Off by default because building it needs the libva headers
+# and libclang on the build machine, and `pnpm lint:cross` compiles the Linux target from a
+# Mac that has neither. Turned on where the encoder is actually built: CI's Linux job, and a
+# Linux machine with a GPU. See `docs/linux-build.md`.
+vaapi = ["dep:libva"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The maintained fork of ChromiumOS's `cros-libva`. The original is pinned to an older libva
+# and does not compile against the 1.23 headers Debian and Ubuntu now ship — a compile error
+# rather than a subtle one, but a wall all the same.
+libva = { version = "0.1.4", optional = true }

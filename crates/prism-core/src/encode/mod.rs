@@ -10,8 +10,18 @@
 //! consumes and what the decoder can be fed directly once the pieces are put back in
 //! order.
 
+/// The H.264 parameter sets, for the encoders that do not write their own.
+///
+/// Bitstream syntax and nothing else, so it builds and is tested everywhere rather than only
+/// where the backend that needs it does.
+pub mod h264;
+
 #[cfg(target_os = "windows")]
 pub mod nv12;
+
+/// Encoding on Linux through VAAPI, which covers Intel, AMD and NVIDIA behind one interface.
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+pub mod vaapi;
 
 #[cfg(target_os = "windows")]
 pub mod nvenc;

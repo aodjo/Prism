@@ -16,6 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      # This job compiles the Linux host, which encodes through VAAPI.
+      - name: Install VAAPI development files
+        run: sudo apt-get update && sudo apt-get install -y libva-dev clang pkg-config
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -43,6 +48,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The Linux host encodes through VAAPI, which needs the library and its headers to
+      # build. Installed here rather than assumed, because a runner without them would skip
+      # compiling the whole backend and report a green build for code nobody had checked.
+      - name: Install VAAPI development files
+        if: matrix.name == 'linux-x64'
+        run: sudo apt-get update && sudo apt-get install -y libva-dev clang pkg-config
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -62,6 +74,21 @@ jobs:
       # compiles.
       - name: Lint on this platform
         run: cargo clippy --workspace --all-targets
+
+      # The VAAPI encoder is behind a feature because building it needs the libva headers,
+      # which not every machine that compiles this repository has. This job installed them, so
+      # this is where the backend actually gets compiled and linted.
+      - name: Lint the VAAPI encoder
+        if: matrix.name == 'linux-x64'
+        run: cargo clippy --package prism-core --features vaapi --all-targets
+
+      # Its tests are behind the same feature, so without this they compile nowhere and run
+      # nowhere. They need no GPU: what they check is the reasoning around one — which
+      # profile, which entrypoint, how the quantiser moves — and that is the part that would
+      # otherwise only be checked by a machine nobody has to hand.
+      - name: Test the VAAPI encoder
+        if: matrix.name == 'linux-x64'
+        run: cargo test --package prism-core --features vaapi
 
       - name: Rust tests
         run: cargo test --workspace
