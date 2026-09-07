@@ -29,8 +29,8 @@ export interface Identity {
 export interface AccountState {
   /** Where the account server is, or empty when none is configured. */
   readonly server: string;
-  /** The name signed in as, or `null`. */
-  readonly name: string | null;
+  /** The address signed in as, or `null`. */
+  readonly email: string | null;
   /** This machine's own public key, as hex. */
   readonly publicKey: string;
   /** Every machine on the account, this one included. */
@@ -246,17 +246,17 @@ export interface PrismApi {
   /**
    * Creates an account and returns the second factor to set up, once.
    *
-   * @param {string} name - What to sign in as.
+   * @param {string} email - The address to sign in with.
    * @param {string} password - The password, which never leaves this machine.
    * @returns {Promise<AccountEnrolmentView>} What to put into an authenticator app.
    * @throws {Error} If the name is taken, or the server cannot be reached.
    */
-  accountRegister(name: string, password: string): Promise<AccountEnrolmentView>;
+  accountRegister(email: string, password: string): Promise<AccountEnrolmentView>;
 
   /**
    * Signs in, registers this machine, and trusts every other machine on the account.
    *
-   * @param {string} name - The account name.
+   * @param {string} email - The address the account is under.
    * @param {string} password - The password, which never leaves this machine.
    * @param {string} code - Six digits from an authenticator app.
    * @param {string} label - What to call this machine.
@@ -264,7 +264,7 @@ export interface PrismApi {
    * @throws {Error} If any of the three is wrong, which is reported as one failure.
    */
   accountSignIn(
-    name: string,
+    email: string,
     password: string,
     code: string,
     label: string,

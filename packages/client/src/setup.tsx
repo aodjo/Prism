@@ -13,6 +13,7 @@ import { createRoot } from 'react-dom/client';
 
 import type {
   AccountDeviceView,
+  AccountEnrolmentView,
   HostPermissions,
   PrismApi,
   Settings,
@@ -30,18 +31,20 @@ declare global {
 const prism = window.prism;
 
 /** The screens, in the order somebody sees them. */
-const STEPS = ['welcome', 'intro', 'permissions', 'device', 'connecting', 'ready'] as const;
+const STEPS = [
+  'welcome',
+  'intro',
+  'account',
+  'permissions',
+  'device',
+  'connecting',
+  'ready',
+] as const;
 
 type Step = (typeof STEPS)[number];
 
-/** Which of the five dots is lit on each screen. The welcome screen is before the count. */
-const STEP_DOTS: Partial<Record<Step, string>> = {
-  intro: 'assets/steps-2.svg',
-  permissions: 'assets/steps-3.svg',
-  device: 'assets/steps-4.svg',
-  connecting: 'assets/steps-5.svg',
-  ready: 'assets/steps-6.svg',
-};
+/** The screens that are counted. The welcome screen comes before the count starts. */
+const COUNTED = STEPS.slice(1);
 
 /**
  * The screens that offer a Continue rather than doing something else with the bottom right.
@@ -80,8 +83,41 @@ const GRANTS = [
 /** How many characters a pairing code has. */
 const CODE_LENGTH = 6;
 
+/** The one shape every box on the account screen has. */
+const ACCOUNT_FIELD =
+  'w-full rounded-tile border border-line-2 bg-base px-3 py-2 text-body-2 text-ink placeholder:text-dim focus:border-[rgba(124,92,255,0.6)] focus:outline-none';
+
 /** What a screen is laid out inside: a centred column over the backdrop. */
 const SCREEN = 'flex flex-col items-center text-center';
+
+/**
+ * How far through the flow somebody is.
+ *
+ * Drawn here rather than taken from the design's exported image, because that image has one
+ * dot per screen baked into it and the number of screens is not a constant. The geometry is
+ * the export's: six-pixel dots, an eighteen-pixel pill for the one being shown, seven pixels
+ * between them.
+ *
+ * @param {object} props - What to draw.
+ * @param {number} props.at - Which step, counting from zero.
+ * @param {number} props.of - How many there are.
+ * @returns {JSX.Element} The dots.
+ */
+function Steps({ at, of }: { at: number; of: number }): JSX.Element {
+  return (
+    <div className="flex h-1.5 items-center gap-[7px]">
+      {Array.from({ length: of }, (_, index) => (
+        <span
+          // A fixed run that never reorders: position is what identifies one of these.
+          key={index}
+          className={`block h-1.5 rounded-full bg-white transition-all duration-300 ${
+            index === at ? 'w-[18px] opacity-90' : 'w-1.5 opacity-[0.18]'
+          }`}
+        />
+      ))}
+    </div>
+  );
+}
 
 /* ── 02 · Intro ───────────────────────────────────────────────────────────────────────── */
 
@@ -262,6 +298,14 @@ function Setup(): JSX.Element {
   const [connectError, setConnectError] = useState<string | null>(null);
   const [pairing, setPairing] = useState(false);
 
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [totp, setTotp] = useState('');
+  const [signedIn, setSignedIn] = useState<string | null>(null);
+  const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
+  const [working, setWorking] = useState(false);
+  const [accountTrouble, setAccountTrouble] = useState<string | null>(null);
+
   /**
    * Returns what to call a machine.
    *
@@ -285,6 +329,7 @@ function Setup(): JSX.Element {
       setVersion(identity.version);
       setSettings(stored);
       setDevices(account.devices);
+      setSignedIn(account.email);
 
       // Both sources, minus this machine. A machine arrives here either by having been paired
       // with or by being on the account, and setup should offer whichever is already true.
@@ -365,6 +410,58 @@ function Setup(): JSX.Element {
   };
 
   /**
+   * Signs in, and takes the machines the account knows about with it.
+   */
+  const signIn = (): void => {
+    void (async () => {
+      setWorking(true);
+      setAccountTrouble(null);
+
+      try {
+        const state = await prism.accountSignIn(
+          email.trim(),
+          password,
+          totp.trim(),
+          `${navigator.platform || 'This machine'} (${new Date().getFullYear()})`,
+        );
+
+        setSignedIn(state.email);
+        setDevices(state.devices);
+        setKnown((was) =>
+          [...new Set([...state.devices.map((device) => device.publicKey), ...was])].filter(
+            (key) => key !== state.publicKey,
+          ),
+        );
+        setPassword('');
+        setTotp('');
+        advance();
+      } catch (error) {
+        setAccountTrouble(reason(error));
+      } finally {
+        setWorking(false);
+      }
+    })();
+  };
+
+  /**
+   * Creates an account and shows the second factor, once.
+   */
+  const createAccount = (): void => {
+    void (async () => {
+      setWorking(true);
+      setAccountTrouble(null);
+
+      try {
+        setEnrolment(await prism.accountRegister(email.trim(), password));
+      } catch (error) {
+        setAccountTrouble(reason(error));
+      } finally {
+        setWorking(false);
+      }
+    })();
+  };
+
+  /**
    * Opens a stream onto a machine.
    */
   const open = async (host: string, where: string): Promise<void> => {
@@ -440,6 +537,135 @@ function Setup(): JSX.Element {
             PRISM streams your desktop to any other device you own — with latency low enough
             that you stop noticing it&rsquo;s remote.
           </p>
+        </section>
+      )}
+
+      {which === 'account' && (
+        <section className={cls}>
+          <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
+            {signedIn === null ? 'Sign in to PRISM' : 'Signed in'}
+          </h2>
+          <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
+            {signedIn === null
+              ? 'An account is how your machines find each other. Without one they still pair, by reading a code off the other screen.'
+              : `${signedIn} — every machine on this account already knows about this one.`}
+          </p>
+
+          {enrolment ? (
+            <div className="card mt-9 w-[min(440px,30.6vw)] p-6">
+              <p className="mx-auto max-w-[36ch] text-note leading-normal text-dim">
+                Scan this with an authenticator app. It is shown once — the server keeps only
+                enough to check codes, which is not enough to show it again.
+              </p>
+              <img
+                src={enrolment.qr}
+                alt=""
+                width={200}
+                height={200}
+                className="mx-auto my-4 block rounded-xl bg-white p-2"
+              />
+              <code className="block text-center text-fine tracking-[0.06em] select-all text-ink-3">
+                {enrolment.secret}
+              </code>
+              <button
+                type="button"
+                className="btn-secondary no-drag mx-auto mt-5 block"
+                onClick={() => {
+                  setEnrolment(null);
+                }}
+              >
+                I have it — sign in
+              </button>
+            </div>
+          ) : signedIn === null ? (
+            <div className="card mt-9 flex w-[min(440px,30.6vw)] flex-col gap-3 p-6 text-left">
+              <label className="flex flex-col gap-1.5">
+                <span className="text-fine-2 text-dim">Email</span>
+                <input
+                  type="email"
+                  autoComplete="username"
+                  spellCheck={false}
+                  placeholder="you@example.com"
+                  className={ACCOUNT_FIELD}
+                  value={email}
+                  onChange={(event) => {
+                    setEmail(event.target.value);
+                  }}
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-fine-2 text-dim">Password</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  className={ACCOUNT_FIELD}
+                  value={password}
+                  onChange={(event) => {
+                    setPassword(event.target.value);
+                  }}
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-fine-2 text-dim">Six digits from your authenticator</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  autoComplete="one-time-code"
+                  placeholder="123456"
+                  className={`${ACCOUNT_FIELD} tracking-[0.3em]`}
+                  value={totp}
+                  onChange={(event) => {
+                    setTotp(event.target.value);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      signIn();
+                    }
+                  }}
+                />
+              </label>
+
+              <div className="mt-2 flex items-center justify-between gap-3">
+                {/* Creating one asks for the same two fields, so it is the same form with a
+                    different button rather than a second screen to fill in twice. */}
+                <button
+                  type="button"
+                  className="btn-ghost no-drag"
+                  disabled={working}
+                  onClick={createAccount}
+                >
+                  Create an account
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary-sm no-drag"
+                  disabled={working}
+                  onClick={signIn}
+                >
+                  Sign in
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="card mt-9 flex w-[min(440px,30.6vw)] items-center justify-between gap-3 p-5">
+              <span className="text-body-2 text-ink">{signedIn}</span>
+              <span className="tag-granted">
+                <span className="text-fine">✓</span>
+                <span>Signed in</span>
+              </span>
+            </div>
+          )}
+
+          <Trouble message={accountTrouble} className="mt-4" />
+
+          {/* An account is worth having and not worth being trapped by: a machine with none
+              still pairs by code, which is the next screen either way. */}
+          {signedIn === null && enrolment === null && (
+            <button type="button" className="btn-ghost no-drag mt-7" onClick={advance}>
+              Continue without an account
+            </button>
+          )}
         </section>
       )}
 
@@ -741,7 +967,7 @@ function Setup(): JSX.Element {
     </>
   );
 
-  const dots = STEP_DOTS[step];
+  const counted = COUNTED.indexOf(step as (typeof COUNTED)[number]);
 
   return (
     <>
@@ -801,11 +1027,11 @@ function Setup(): JSX.Element {
           key={`nav-${step}`}
           className="flex h-14 flex-none animate-[fade-in_420ms_ease-out_both] items-center justify-between"
         >
-          {dots ? <img src={dots} alt="" className="block h-1.5 w-[70px]" /> : <span />}
+          {counted >= 0 ? <Steps at={counted} of={COUNTED.length} /> : <span />}
           {step === 'welcome' && (
             <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>
           )}
-          {HAS_NEXT.has(step) && (
+          {(HAS_NEXT.has(step) || (step === 'account' && signedIn !== null)) && (
             <Primary trailing="→" onClick={advance}>
               Continue
             </Primary>

@@ -62,8 +62,8 @@ let settings: Settings = { ...DEFAULTS };
 /** The account server, rebuilt whenever its address changes. */
 let account: AccountClient | null = null;
 
-/** The name signed in as, or `null`. */
-let accountName: string | null = null;
+/** The address signed in as, or `null`. */
+let accountEmail: string | null = null;
 
 /** Every machine the account knows, as of the last time it said. */
 let accountDevices: readonly AccountDeviceView[] = [];
@@ -97,7 +97,7 @@ function accountClient(): AccountClient | null {
 
   if (server === '') {
     account = null;
-    accountName = null;
+    accountEmail = null;
     return null;
   }
 
@@ -111,7 +111,7 @@ function accountClient(): AccountClient | null {
     }
 
     account = new AccountClient(server, prism.accountAuth);
-    accountName = null;
+    accountEmail = null;
   }
 
   return account;
@@ -125,7 +125,7 @@ function accountClient(): AccountClient | null {
 function accountState(): AccountState {
   return {
     server: settings.accountServer,
-    name: accountName,
+    email: accountEmail,
     publicKey: prism.identityPublicKey(),
     devices: accountDevices,
     relayAllowed,
@@ -176,7 +176,7 @@ async function resumeAccount(): Promise<void> {
       return;
     }
 
-    accountName = session.name;
+    accountEmail = session.email;
     relayAllowed = session.relayAllowed;
     adoptDevices(session.devices);
     accountError = null;
@@ -375,14 +375,14 @@ function registerHandlers(): void {
     return accountState();
   });
 
-  ipcMain.handle('account:register', async (_event, name: string, password: string) => {
+  ipcMain.handle('account:register', async (_event, email: string, password: string) => {
     const client = accountClient();
     if (!client) {
       throw new Error('set an account server first');
     }
 
     accountError = null;
-    const enrolment = await client.register(name, password);
+    const enrolment = await client.register(email, password);
 
     // Drawn here rather than in the window, because the window may not load anything and this
     // process may. What crosses is a picture of a link the account server already sent.
@@ -393,15 +393,15 @@ function registerHandlers(): void {
 
   ipcMain.handle(
     'account:signIn',
-    async (_event, name: string, password: string, code: string, label: string) => {
+    async (_event, email: string, password: string, code: string, label: string) => {
       const client = accountClient();
       if (!client) {
         throw new Error('set an account server first');
       }
 
       try {
-        const session = await client.signIn(name, password, code);
-        accountName = name;
+        const session = await client.signIn(email, password, code);
+        accountEmail = email;
         relayAllowed = session.relayAllowed;
 
         // This machine tells the account about itself before reading the list, so that the
@@ -414,9 +414,9 @@ function registerHandlers(): void {
 
         // Kept only once both halves have worked. A token stored before this machine had been
         // registered would come back to a list that does not have it in.
-        keepSession({ name, token: session.token });
+        keepSession({ email, token: session.token });
       } catch (error) {
-        accountName = null;
+        accountEmail = null;
         accountError = accountMessage(error);
         throw new Error(accountError);
       }
@@ -428,7 +428,7 @@ function registerHandlers(): void {
   ipcMain.handle('account:signOut', async () => {
     await account?.signOut();
     forgetSession();
-    accountName = null;
+    accountEmail = null;
     accountError = null;
 
     // The machines stay trusted. They were paired, and signing out is not a statement that

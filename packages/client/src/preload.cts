@@ -30,15 +30,15 @@ const api: PrismApi = {
 
   accountState: (): Promise<AccountState> => ipcRenderer.invoke('account:state'),
 
-  accountRegister: (name: string, password: string): Promise<AccountEnrolmentView> =>
-    ipcRenderer.invoke('account:register', name, password),
+  accountRegister: (email: string, password: string): Promise<AccountEnrolmentView> =>
+    ipcRenderer.invoke('account:register', email, password),
 
   accountSignIn: (
-    name: string,
+    email: string,
     password: string,
     code: string,
     label: string,
-  ): Promise<AccountState> => ipcRenderer.invoke('account:signIn', name, password, code, label),
+  ): Promise<AccountState> => ipcRenderer.invoke('account:signIn', email, password, code, label),
 
   accountSignOut: (): Promise<AccountState> => ipcRenderer.invoke('account:signOut'),
 

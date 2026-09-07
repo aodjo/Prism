@@ -43,8 +43,8 @@ export interface AccountEnrolment {
  * A request the account server refused.
  *
  * Carries the status because the three that matter are told apart by it and by nothing else:
- * the server deliberately says the same thing for a wrong password, a wrong code and a name
- * that does not exist.
+ * the server deliberately says the same thing for a wrong password, a wrong code and an
+ * address with no account behind it.
  */
 export class AccountError extends Error {
   /** The HTTP status the server answered with. */
@@ -142,19 +142,20 @@ export class AccountClient {
    * only what it needs to check codes, which is not enough to show the secret a second time.
    *
    * @async
-   * @param {string} name - What to sign in as.
+   * @param {string} email - The address to sign in with.
    * @param {string} password - The password, which is never sent.
    * @returns {Promise<AccountEnrolment>} The second factor, once.
-   * @throws {AccountError} If the name is taken or malformed, or the server cannot be reached.
+   * @throws {AccountError} If the address already has an account or is malformed, or the
+   *   server cannot be reached.
    */
-  async register(name: string, password: string): Promise<AccountEnrolment> {
-    const salt = await this.saltFor(name);
+  async register(email: string, password: string): Promise<AccountEnrolment> {
+    const salt = await this.saltFor(email);
     const auth = await this.deriveAuth(password, salt);
 
     const body = await this.send<{ totp_uri: string; totp_secret: string }>(
       'POST',
       '/v1/accounts',
-      { name, salt, auth, sealed_key: '' },
+      { email, salt, auth, sealed_key: '' },
     );
 
     return { totpUri: body.totp_uri, totpSecret: body.totp_secret };
@@ -164,21 +165,21 @@ export class AccountClient {
    * Signs in, and remembers the session for later calls.
    *
    * @async
-   * @param {string} name - The account name.
+   * @param {string} email - The address the account is under.
    * @param {string} password - The password, which is never sent.
    * @param {string} code - The six digits from an authenticator app.
    * @returns {Promise<AccountSession>} The session and the machines on the account.
    * @throws {AccountError} If any of the three is wrong, which is reported as one failure.
    */
-  async signIn(name: string, password: string, code: string): Promise<AccountSession> {
-    const salt = await this.saltFor(name);
+  async signIn(email: string, password: string, code: string): Promise<AccountSession> {
+    const salt = await this.saltFor(email);
     const auth = await this.deriveAuth(password, salt);
 
     const body = await this.send<{
       token: string;
       devices: { public_key: string; label: string; added_unix: number }[];
       relay_allowed: boolean;
-    }>('POST', '/v1/sessions', { name, auth, code: Number(code) });
+    }>('POST', '/v1/sessions', { email, auth, code: Number(code) });
 
     this.token = body.token;
 
@@ -199,23 +200,23 @@ export class AccountClient {
    *
    * @async
    * @param {string} token - What was stored the last time somebody signed in.
-   * @returns {Promise<AccountSession & {name: string} | null>} The session, or `null` if the
+   * @returns {Promise<AccountSession & {email: string} | null>} The session, or `null` if the
    *   token is no longer good.
    * @throws {AccountError} If the server could not be reached, which is not the same as the
    *   token being bad and must not throw the token away.
    */
-  async resume(token: string): Promise<(AccountSession & { name: string }) | null> {
+  async resume(token: string): Promise<(AccountSession & { email: string }) | null> {
     this.token = token;
 
     try {
       const body = await this.send<{
-        name: string;
+        email: string;
         devices: { public_key: string; label: string; added_unix: number }[];
         relay_allowed: boolean;
       }>('GET', '/v1/session');
 
       return {
-        name: body.name,
+        email: body.email,
         token,
         devices: body.devices.map(toDevice),
         relayAllowed: body.relay_allowed,
@@ -287,19 +288,19 @@ export class AccountClient {
   /**
    * Fetches the salt a password must be hashed with.
    *
-   * Every name gets an answer, including one that does not exist — otherwise this call would
-   * be a way to find out which accounts are real, and a name is half of what somebody guessing
-   * needs.
+   * Every address gets an answer, including one with no account — otherwise this call would be
+   * a way to find out which addresses are registered, and an address is half of what somebody
+   * guessing needs.
    *
    * @async
-   * @param {string} name - The account name.
+   * @param {string} email - The address the account is under.
    * @returns {Promise<string>} The salt, as hex.
    * @throws {AccountError} If the server cannot be reached.
    */
-  private async saltFor(name: string): Promise<string> {
+  private async saltFor(email: string): Promise<string> {
     const body = await this.send<{ salt: string }>(
       'GET',
-      `/v1/salt?name=${encodeURIComponent(name)}`,
+      `/v1/salt?email=${encodeURIComponent(email)}`,
     );
 
     return body.salt;

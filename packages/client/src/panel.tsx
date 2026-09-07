@@ -27,7 +27,7 @@ const prism = window.prism;
 /** Nothing is known yet. */
 const UNKNOWN: AccountState = {
   server: '',
-  name: null,
+  email: null,
   publicKey: '',
   devices: [],
   relayAllowed: false,
@@ -83,7 +83,7 @@ function Panel(): JSX.Element {
   const [account, setAccount] = useState<AccountState>(UNKNOWN);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
-  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -149,7 +149,7 @@ function Panel(): JSX.Element {
       setTrouble(null);
 
       try {
-        setAccount(await prism.accountSignIn(name.trim(), password, code.trim(), label()));
+        setAccount(await prism.accountSignIn(email.trim(), password, code.trim(), label()));
         setPassword('');
         setCode('');
       } catch (error) {
@@ -166,7 +166,7 @@ function Panel(): JSX.Element {
       setTrouble(null);
 
       try {
-        setEnrolment(await prism.accountRegister(name.trim(), password));
+        setEnrolment(await prism.accountRegister(email.trim(), password));
       } catch (error) {
         setTrouble(reason(error));
       } finally {
@@ -248,20 +248,22 @@ function Panel(): JSX.Element {
                   </button>
                 </Row>
               </div>
-            ) : account.name === null ? (
+            ) : account.email === null ? (
               <>
                 <p className="mb-3 max-w-[42ch] text-tiny leading-normal text-dim">
                   Sign in and your machines find each other. Without an account they still pair,
                   by reading a code off one screen.
                 </p>
-                <Row label="Name">
+                <Row label="Email">
                   <input
-                    type="text"
+                    type="email"
                     spellCheck={false}
+                    autoComplete="username"
+                    placeholder="you@example.com"
                     className={FIELD}
-                    value={name}
+                    value={email}
                     onChange={(event) => {
-                      setName(event.target.value);
+                      setEmail(event.target.value);
                     }}
                   />
                 </Row>
@@ -304,7 +306,7 @@ function Panel(): JSX.Element {
               </>
             ) : (
               <>
-                <Row label={account.name}>
+                <Row label={account.email}>
                   <button
                     type="button"
                     className="btn-secondary"

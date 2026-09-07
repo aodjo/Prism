@@ -49,8 +49,12 @@ pub struct Device {
 /// Everything the server keeps about one account.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
-    /// What the person signs in as.
-    pub name: String,
+    /// The email address the person signs in with.
+    ///
+    /// Read under its old name too, so a store written before accounts were addressed by
+    /// email is still a store this server can open.
+    #[serde(alias = "name")]
+    pub email: String,
     /// The salt their password was hashed with, as hex.
     ///
     /// Handed out before sign-in, because deriving the secret needs it. That is not a leak:
@@ -72,23 +76,18 @@ pub struct Account {
 /// Why something could not be done to an account.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AccountError {
-    /// The name is already taken.
-    #[error("that name is already in use")]
-    NameTaken,
-    /// The name is not one an account may have.
-    #[error("a name must be {min} to {max} characters of letters, digits, dot, dash or underscore")]
-    BadName {
-        /// Shortest allowed.
-        min: usize,
-        /// Longest allowed.
-        max: usize,
-    },
+    /// Somebody already registered that address.
+    #[error("that email address already has an account")]
+    EmailTaken,
+    /// What was given is not an address anything could be delivered to.
+    #[error("that does not look like an email address")]
+    BadEmail,
     /// The sign-in did not succeed.
     ///
     /// One error for every reason: no such account, wrong password, wrong code. Telling them
     /// apart tells somebody guessing which half they got right, and whether a name exists at
     /// all.
-    #[error("the name, password or code is wrong")]
+    #[error("the email, password or code is wrong")]
     Refused,
     /// A field was not the length it has to be.
     #[error("{field} is malformed")]
@@ -106,17 +105,17 @@ pub enum AccountError {
     },
 }
 
-/// Shortest an account name may be.
-pub const MIN_NAME: usize = 3;
+/// Shortest an address this server will take, which is `a@b.c`.
+pub const MIN_EMAIL: usize = 5;
 
-/// Longest an account name may be.
-pub const MAX_NAME: usize = 32;
+/// Longest, which is what the standard allows a whole address to be.
+pub const MAX_EMAIL: usize = 254;
 
 /// What a new account is created from.
 #[derive(Debug, Clone)]
 pub struct Registration {
-    /// What the person will sign in as.
-    pub name: String,
+    /// The email address they will sign in with.
+    pub email: String,
     /// The salt their client hashed the password with.
     pub salt: [u8; SALT_LEN],
     /// The authentication secret their client derived.
@@ -134,7 +133,7 @@ struct Stored {
 /// The accounts, and the file they are kept in.
 #[derive(Debug)]
 pub struct Accounts {
-    by_name: HashMap<String, Account>,
+    by_email: HashMap<String, Account>,
     path: PathBuf,
     /// Makes the salt handed out for an unknown name look like a real one.
     ///
@@ -178,10 +177,10 @@ impl Accounts {
         })?;
 
         Ok(Self {
-            by_name: stored
+            by_email: stored
                 .accounts
                 .into_iter()
-                .map(|account| (account.name.clone(), account))
+                .map(|account| (account.email.clone(), account))
                 .collect(),
             path,
             decoy,
@@ -191,13 +190,13 @@ impl Accounts {
     /// How many accounts exist.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.by_name.len()
+        self.by_email.len()
     }
 
     /// Whether there are none.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
+        self.by_email.is_empty()
     }
 
     /// Creates an account and returns the second factor's secret, once.
@@ -208,16 +207,16 @@ impl Accounts {
     ///
     /// # Errors
     ///
-    /// Returns [`AccountError::NameTaken`], [`AccountError::BadName`], or
+    /// Returns [`AccountError::EmailTaken`], [`AccountError::BadEmail`], or
     /// [`AccountError::Store`] if the file cannot be written.
     pub fn register(
         &mut self,
         registration: Registration,
     ) -> Result<[u8; totp::SECRET_LEN], AccountError> {
-        check_name(&registration.name)?;
+        check_email(&registration.email)?;
 
-        if self.by_name.contains_key(&registration.name) {
-            return Err(AccountError::NameTaken);
+        if self.by_email.contains_key(&registration.email) {
+            return Err(AccountError::EmailTaken);
         }
 
         let totp_secret = totp::new_secret().map_err(|err| AccountError::Store {
@@ -225,10 +224,10 @@ impl Accounts {
             reason: err.to_string(),
         })?;
 
-        self.by_name.insert(
-            registration.name.clone(),
+        self.by_email.insert(
+            registration.email.clone(),
             Account {
-                name: registration.name,
+                email: registration.email,
                 salt: hex(&registration.salt),
                 verifier: hex(&prism_core::account::secret::auth_verifier(
                     &registration.auth,
@@ -254,8 +253,8 @@ impl Accounts {
     /// answer either way, and the same answer every time, so neither the shape of the reply nor
     /// its repetition says whether anybody is there.
     #[must_use]
-    pub fn salt_for(&self, name: &str) -> [u8; SALT_LEN] {
-        if let Some(account) = self.by_name.get(name)
+    pub fn salt_for(&self, email: &str) -> [u8; SALT_LEN] {
+        if let Some(account) = self.by_email.get(email)
             && let Some(salt) = unhex_array::<SALT_LEN>(&account.salt)
         {
             return salt;
@@ -265,7 +264,7 @@ impl Accounts {
         let mut hasher = Sha256::new();
         hasher.update(b"prism-decoy-salt-v1");
         hasher.update(self.decoy);
-        hasher.update(name.as_bytes());
+        hasher.update(email.as_bytes());
 
         let digest = hasher.finalize();
         let mut salt = [0u8; SALT_LEN];
@@ -286,12 +285,12 @@ impl Accounts {
     /// not exist.
     pub fn sign_in(
         &self,
-        name: &str,
+        email: &str,
         auth: &[u8; SECRET_LEN],
         code: u32,
         now_unix: u64,
     ) -> Result<&Account, AccountError> {
-        let account = self.by_name.get(name);
+        let account = self.by_email.get(email);
 
         let password_right = account
             .and_then(|account| unhex_array::<SECRET_LEN>(&account.verifier))
@@ -310,8 +309,8 @@ impl Accounts {
 
     /// Returns an account by name, for a caller that has already established who they are.
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&Account> {
-        self.by_name.get(name)
+    pub fn get(&self, email: &str) -> Option<&Account> {
+        self.by_email.get(email)
     }
 
     /// Adds a machine to an account, or renames one already there.
@@ -326,13 +325,13 @@ impl Accounts {
     /// [`AccountError::Malformed`] if the key is not a public key.
     pub fn add_device(
         &mut self,
-        name: &str,
+        email: &str,
         public_key: &[u8; KEY_LEN],
         label: &str,
         now_unix: u64,
     ) -> Result<(), AccountError> {
         let key = hex(public_key);
-        let account = self.by_name.get_mut(name).ok_or(AccountError::Refused)?;
+        let account = self.by_email.get_mut(email).ok_or(AccountError::Refused)?;
 
         if let Some(existing) = account
             .devices
@@ -359,11 +358,11 @@ impl Accounts {
     /// [`AccountError::Store`] if the change cannot be written.
     pub fn remove_device(
         &mut self,
-        name: &str,
+        email: &str,
         public_key: &[u8; KEY_LEN],
     ) -> Result<(), AccountError> {
         let key = hex(public_key);
-        let account = self.by_name.get_mut(name).ok_or(AccountError::Refused)?;
+        let account = self.by_email.get_mut(email).ok_or(AccountError::Refused)?;
 
         account.devices.retain(|device| device.public_key != key);
 
@@ -381,12 +380,12 @@ impl Accounts {
     /// Returns [`AccountError::Refused`] if no such account exists.
     pub fn replace_key(
         &mut self,
-        name: &str,
+        email: &str,
         salt: &[u8; SALT_LEN],
         auth: &[u8; SECRET_LEN],
         sealed_key: &[u8],
     ) -> Result<(), AccountError> {
-        let account = self.by_name.get_mut(name).ok_or(AccountError::Refused)?;
+        let account = self.by_email.get_mut(email).ok_or(AccountError::Refused)?;
 
         account.salt = hex(salt);
         account.verifier = hex(&prism_core::account::secret::auth_verifier(auth));
@@ -400,8 +399,8 @@ impl Accounts {
     /// # Errors
     ///
     /// Returns [`AccountError::Refused`] if no such account exists.
-    pub fn set_relay_allowed(&mut self, name: &str, allowed: bool) -> Result<(), AccountError> {
-        let account = self.by_name.get_mut(name).ok_or(AccountError::Refused)?;
+    pub fn set_relay_allowed(&mut self, email: &str, allowed: bool) -> Result<(), AccountError> {
+        let account = self.by_email.get_mut(email).ok_or(AccountError::Refused)?;
         account.relay_allowed = allowed;
 
         self.save()
@@ -415,7 +414,7 @@ impl Accounts {
     /// merely wrong.
     fn save(&self) -> Result<(), AccountError> {
         let stored = Stored {
-            accounts: self.by_name.values().cloned().collect(),
+            accounts: self.by_email.values().cloned().collect(),
         };
 
         let json = serde_json::to_vec_pretty(&stored).map_err(|err| AccountError::Store {
@@ -444,21 +443,27 @@ fn write_then_rename(temporary: &Path, final_path: &Path, bytes: &[u8]) -> io::R
 }
 
 /// Whether a name is one an account may have.
-fn check_name(name: &str) -> Result<(), AccountError> {
-    let length = name.chars().count();
+fn check_email(email: &str) -> Result<(), AccountError> {
+    let length = email.chars().count();
 
-    let shaped = (MIN_NAME..=MAX_NAME).contains(&length)
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    // Deliberately loose. The only claim worth making here is that this could be delivered to;
+    // the address is proved by a code arriving at it, not by a pattern, and a stricter rule
+    // would mostly reject addresses that are perfectly real.
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err(AccountError::BadEmail);
+    };
+
+    let shaped = (MIN_EMAIL..=MAX_EMAIL).contains(&length)
+        && !local.is_empty()
+        && !email.contains(char::is_whitespace)
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.');
 
     if shaped {
         Ok(())
     } else {
-        Err(AccountError::BadName {
-            min: MIN_NAME,
-            max: MAX_NAME,
-        })
+        Err(AccountError::BadEmail)
     }
 }
 
@@ -488,7 +493,7 @@ fn unhex_array<const N: usize>(text: &str) -> Option<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountError, Accounts, MAX_NAME, MIN_NAME, Registration};
+    use super::{AccountError, Accounts, MAX_EMAIL, Registration};
     use prism_core::account::secret::{SALT_LEN, SECRET_LEN};
     use prism_core::account::totp;
     use prism_core::net::handshake::KEY_LEN;
@@ -504,9 +509,9 @@ mod tests {
         (Accounts::open(&path).expect("opens"), path)
     }
 
-    fn registration(name: &str) -> Registration {
+    fn registration(email: &str) -> Registration {
         Registration {
-            name: name.to_owned(),
+            email: email.to_owned(),
             salt: [1; SALT_LEN],
             auth: [2; SECRET_LEN],
             sealed_key: vec![3; 60],
@@ -517,7 +522,7 @@ mod tests {
     fn a_registered_account_can_sign_in() {
         let (mut accounts, path) = store("signin");
         let secret = accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
         let now = 1_700_000_000;
@@ -525,7 +530,7 @@ mod tests {
 
         assert!(
             accounts
-                .sign_in("someone", &[2; SECRET_LEN], code, now)
+                .sign_in("someone@example.com", &[2; SECRET_LEN], code, now)
                 .is_ok()
         );
         let _ = std::fs::remove_file(path);
@@ -535,7 +540,7 @@ mod tests {
     fn the_wrong_password_is_refused_even_with_the_right_code() {
         let (mut accounts, path) = store("wrongpass");
         let secret = accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
         let now = 1_700_000_000;
@@ -543,7 +548,7 @@ mod tests {
 
         assert_eq!(
             accounts
-                .sign_in("someone", &[9; SECRET_LEN], code, now)
+                .sign_in("someone@example.com", &[9; SECRET_LEN], code, now)
                 .unwrap_err(),
             AccountError::Refused
         );
@@ -555,12 +560,12 @@ mod tests {
         // The whole point of a second factor. A stolen password should not be a session.
         let (mut accounts, path) = store("nocode");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(
             accounts
-                .sign_in("someone", &[2; SECRET_LEN], 0, 1_700_000_000)
+                .sign_in("someone@example.com", &[2; SECRET_LEN], 0, 1_700_000_000)
                 .unwrap_err(),
             AccountError::Refused
         );
@@ -573,7 +578,7 @@ mod tests {
         // guessing needs, handed over for free.
         let (mut accounts, path) = store("unknown");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(
@@ -604,10 +609,10 @@ mod tests {
     fn a_real_account_gets_the_salt_it_registered_with() {
         let (mut accounts, path) = store("realsalt");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
-        assert_eq!(accounts.salt_for("someone"), [1; SALT_LEN]);
+        assert_eq!(accounts.salt_for("someone@example.com"), [1; SALT_LEN]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -615,28 +620,36 @@ mod tests {
     fn the_same_name_cannot_be_taken_twice() {
         let (mut accounts, path) = store("taken");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(
-            accounts.register(registration("someone")).unwrap_err(),
-            AccountError::NameTaken
+            accounts
+                .register(registration("someone@example.com"))
+                .unwrap_err(),
+            AccountError::EmailTaken
         );
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn a_name_has_to_be_a_name() {
-        let (mut accounts, path) = store("badname");
+    fn an_account_has_to_be_addressed_by_something_deliverable() {
+        let (mut accounts, path) = store("bademail");
 
-        for name in ["", "ab", "has space", "slash/es", &"x".repeat(MAX_NAME + 1)] {
+        for address in [
+            "",
+            "nobody",
+            "no domain@",
+            "@nolocal.com",
+            "has space@example.com",
+            "trailing@dot.",
+            "no.dot@localhost",
+            &format!("{}@example.com", "x".repeat(MAX_EMAIL)),
+        ] {
             assert_eq!(
-                accounts.register(registration(name)).unwrap_err(),
-                AccountError::BadName {
-                    min: MIN_NAME,
-                    max: MAX_NAME
-                },
-                "{name:?} was accepted"
+                accounts.register(registration(address)).unwrap_err(),
+                AccountError::BadEmail,
+                "{address:?} was accepted"
             );
         }
         let _ = std::fs::remove_file(path);
@@ -648,13 +661,25 @@ mod tests {
         // should quietly arrive holding.
         let (mut accounts, path) = store("relay");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
-        assert!(!accounts.get("someone").expect("exists").relay_allowed);
+        assert!(
+            !accounts
+                .get("someone@example.com")
+                .expect("exists")
+                .relay_allowed
+        );
 
-        accounts.set_relay_allowed("someone", true).expect("allows");
-        assert!(accounts.get("someone").expect("exists").relay_allowed);
+        accounts
+            .set_relay_allowed("someone@example.com", true)
+            .expect("allows");
+        assert!(
+            accounts
+                .get("someone@example.com")
+                .expect("exists")
+                .relay_allowed
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -662,17 +687,17 @@ mod tests {
     fn signing_in_twice_on_one_machine_lists_it_once() {
         let (mut accounts, path) = store("devices");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
         accounts
-            .add_device("someone", &[7; KEY_LEN], "laptop", 100)
+            .add_device("someone@example.com", &[7; KEY_LEN], "laptop", 100)
             .expect("adds");
         accounts
-            .add_device("someone", &[7; KEY_LEN], "the laptop", 200)
+            .add_device("someone@example.com", &[7; KEY_LEN], "the laptop", 200)
             .expect("renames");
 
-        let devices = &accounts.get("someone").expect("exists").devices;
+        let devices = &accounts.get("someone@example.com").expect("exists").devices;
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].label, "the laptop");
         assert_eq!(devices[0].added_unix, 100, "re-adding reset the date");
@@ -683,17 +708,23 @@ mod tests {
     fn a_device_can_be_removed() {
         let (mut accounts, path) = store("remove");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
         accounts
-            .add_device("someone", &[7; KEY_LEN], "laptop", 100)
+            .add_device("someone@example.com", &[7; KEY_LEN], "laptop", 100)
             .expect("adds");
 
         accounts
-            .remove_device("someone", &[7; KEY_LEN])
+            .remove_device("someone@example.com", &[7; KEY_LEN])
             .expect("removes");
 
-        assert!(accounts.get("someone").expect("exists").devices.is_empty());
+        assert!(
+            accounts
+                .get("someone@example.com")
+                .expect("exists")
+                .devices
+                .is_empty()
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -702,10 +733,10 @@ mod tests {
         // The entire point of writing them down.
         let (mut accounts, path) = store("persist");
         let secret = accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
         accounts
-            .add_device("someone", &[7; KEY_LEN], "laptop", 100)
+            .add_device("someone@example.com", &[7; KEY_LEN], "laptop", 100)
             .expect("adds");
         drop(accounts);
 
@@ -713,11 +744,18 @@ mod tests {
         let now = 1_700_000_000;
 
         assert_eq!(reopened.len(), 1);
-        assert_eq!(reopened.get("someone").expect("exists").devices.len(), 1);
+        assert_eq!(
+            reopened
+                .get("someone@example.com")
+                .expect("exists")
+                .devices
+                .len(),
+            1
+        );
         assert!(
             reopened
                 .sign_in(
-                    "someone",
+                    "someone@example.com",
                     &[2; SECRET_LEN],
                     totp::code_at_time(&secret, now),
                     now
@@ -732,11 +770,14 @@ mod tests {
         // The server cannot check it and must not change it. A byte lost here is a key lost.
         let (mut accounts, path) = store("sealed");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(
-            accounts.get("someone").expect("exists").sealed_key,
+            accounts
+                .get("someone@example.com")
+                .expect("exists")
+                .sealed_key,
             "03".repeat(60)
         );
         let _ = std::fs::remove_file(path);
@@ -748,27 +789,37 @@ mod tests {
         // can sign in to, including its owner.
         let (mut accounts, path) = store("rekey");
         accounts
-            .register(registration("someone"))
+            .register(registration("someone@example.com"))
             .expect("registers");
 
         accounts
-            .replace_key("someone", &[8; SALT_LEN], &[9; SECRET_LEN], &[4; 60])
+            .replace_key(
+                "someone@example.com",
+                &[8; SALT_LEN],
+                &[9; SECRET_LEN],
+                &[4; 60],
+            )
             .expect("replaces");
 
         let now = 1_700_000_000;
-        let secret =
-            super::unhex(&accounts.get("someone").expect("exists").totp_secret).expect("hex");
+        let secret = super::unhex(
+            &accounts
+                .get("someone@example.com")
+                .expect("exists")
+                .totp_secret,
+        )
+        .expect("hex");
         let code = totp::code_at_time(&secret, now);
 
-        assert_eq!(accounts.salt_for("someone"), [8; SALT_LEN]);
+        assert_eq!(accounts.salt_for("someone@example.com"), [8; SALT_LEN]);
         assert!(
             accounts
-                .sign_in("someone", &[9; SECRET_LEN], code, now)
+                .sign_in("someone@example.com", &[9; SECRET_LEN], code, now)
                 .is_ok()
         );
         assert_eq!(
             accounts
-                .sign_in("someone", &[2; SECRET_LEN], code, now)
+                .sign_in("someone@example.com", &[2; SECRET_LEN], code, now)
                 .unwrap_err(),
             AccountError::Refused,
             "the old password still works"

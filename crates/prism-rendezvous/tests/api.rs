@@ -94,7 +94,7 @@ async fn register(router: &axum::Router, name: &str) -> Vec<u8> {
         post(
             "/v1/accounts",
             json!({
-                "name": name,
+                "email": name,
                 "salt": hex(&[1u8; SALT_LEN]),
                 "auth": hex(&[2u8; SECRET_LEN]),
                 "sealed_key": hex(&[3u8; 60]),
@@ -147,7 +147,7 @@ async fn sign_in(router: &axum::Router, name: &str, secret: &[u8]) -> String {
         post(
             "/v1/sessions",
             json!({
-                "name": name,
+                "email": name,
                 "auth": hex(&[2u8; SECRET_LEN]),
                 "code": totp::code_at_time(secret, now),
             }),
@@ -163,8 +163,8 @@ async fn sign_in(router: &axum::Router, name: &str, secret: &[u8]) -> String {
 #[tokio::test]
 async fn an_account_can_be_made_and_signed_in_to() {
     let (router, path) = service("roundtrip");
-    let secret = register(&router, "someone").await;
-    let token = sign_in(&router, "someone", &secret).await;
+    let secret = register(&router, "someone@example.com").await;
+    let token = sign_in(&router, "someone@example.com", &secret).await;
 
     assert!(!token.is_empty());
     let _ = std::fs::remove_file(path);
@@ -178,7 +178,7 @@ async fn registering_hands_back_something_an_authenticator_can_read() {
         post(
             "/v1/accounts",
             json!({
-                "name": "someone",
+                "email": "someone@example.com",
                 "salt": hex(&[1u8; SALT_LEN]),
                 "auth": hex(&[2u8; SECRET_LEN]),
                 "sealed_key": hex(&[3u8; 60]),
@@ -188,7 +188,10 @@ async fn registering_hands_back_something_an_authenticator_can_read() {
     .await;
 
     let uri = body["totp_uri"].as_str().expect("a uri");
-    assert!(uri.starts_with("otpauth://totp/Prism:someone?"), "{uri}");
+    assert!(
+        uri.starts_with("otpauth://totp/Prism:someone@example.com?"),
+        "{uri}"
+    );
     let _ = std::fs::remove_file(path);
 }
 
@@ -196,7 +199,7 @@ async fn registering_hands_back_something_an_authenticator_can_read() {
 async fn the_sealed_key_comes_back_exactly_as_it_went_in() {
     // A byte lost here is a key lost, and the server cannot check it for itself.
     let (router, path) = service("sealed");
-    let secret = register(&router, "someone").await;
+    let secret = register(&router, "someone@example.com").await;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -208,7 +211,7 @@ async fn the_sealed_key_comes_back_exactly_as_it_went_in() {
         post(
             "/v1/sessions",
             json!({
-                "name": "someone",
+                "email": "someone@example.com",
                 "auth": hex(&[2u8; SECRET_LEN]),
                 "code": totp::code_at_time(&secret, now),
             }),
@@ -223,14 +226,14 @@ async fn the_sealed_key_comes_back_exactly_as_it_went_in() {
 #[tokio::test]
 async fn a_wrong_code_is_refused() {
     let (router, path) = service("wrongcode");
-    register(&router, "someone").await;
+    register(&router, "someone@example.com").await;
 
     let (status, _) = send(
         &router,
         post(
             "/v1/sessions",
             json!({
-                "name": "someone",
+                "email": "someone@example.com",
                 "auth": hex(&[2u8; SECRET_LEN]),
                 "code": 0,
             }),
@@ -246,7 +249,7 @@ async fn a_wrong_code_is_refused() {
 async fn an_unknown_name_is_refused_the_same_way_a_wrong_password_is() {
     // Same status, same body. Anything else is an oracle for which names exist.
     let (router, path) = service("sameway");
-    let secret = register(&router, "someone").await;
+    let secret = register(&router, "someone@example.com").await;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("a clock")
@@ -257,7 +260,7 @@ async fn an_unknown_name_is_refused_the_same_way_a_wrong_password_is() {
         &router,
         post(
             "/v1/sessions",
-            json!({ "name": "nobody", "auth": hex(&[2u8; SECRET_LEN]), "code": code }),
+            json!({ "email": "nobody@example.com", "auth": hex(&[2u8; SECRET_LEN]), "code": code }),
         ),
     )
     .await;
@@ -266,7 +269,7 @@ async fn an_unknown_name_is_refused_the_same_way_a_wrong_password_is() {
         &router,
         post(
             "/v1/sessions",
-            json!({ "name": "someone", "auth": hex(&[9u8; SECRET_LEN]), "code": code }),
+            json!({ "email": "someone@example.com", "auth": hex(&[9u8; SECRET_LEN]), "code": code }),
         ),
     )
     .await;
@@ -281,12 +284,12 @@ async fn asking_for_a_salt_does_not_say_whether_the_account_exists() {
     // The reply has to look the same for a name that is there and one that is not, or this
     // endpoint is a way to enumerate accounts.
     let (router, path) = service("saltprobe");
-    register(&router, "someone").await;
+    register(&router, "someone@example.com").await;
 
     let real = send(
         &router,
         Request::builder()
-            .uri("/v1/salt?name=someone")
+            .uri("/v1/salt?email=someone")
             .body(Body::empty())
             .unwrap(),
     )
@@ -295,7 +298,7 @@ async fn asking_for_a_salt_does_not_say_whether_the_account_exists() {
     let fake = send(
         &router,
         Request::builder()
-            .uri("/v1/salt?name=nobody")
+            .uri("/v1/salt?email=nobody")
             .body(Body::empty())
             .unwrap(),
     )
@@ -315,14 +318,14 @@ async fn asking_for_a_salt_does_not_say_whether_the_account_exists() {
 #[tokio::test]
 async fn the_same_name_cannot_be_registered_twice() {
     let (router, path) = service("twice");
-    register(&router, "someone").await;
+    register(&router, "someone@example.com").await;
 
     let (status, _) = send(
         &router,
         post(
             "/v1/accounts",
             json!({
-                "name": "someone",
+                "email": "someone@example.com",
                 "salt": hex(&[1u8; SALT_LEN]),
                 "auth": hex(&[2u8; SECRET_LEN]),
                 "sealed_key": hex(&[3u8; 60]),
@@ -340,7 +343,7 @@ async fn every_signed_in_endpoint_refuses_without_a_token() {
     // The mistake that matters most here, and the easiest one to make by adding a route and
     // forgetting the line that checks who is asking.
     let (router, path) = service("notoken");
-    register(&router, "someone").await;
+    register(&router, "someone@example.com").await;
 
     let attempts = [
         Request::builder()
@@ -395,8 +398,8 @@ async fn a_token_kept_from_a_previous_run_still_says_who_it_belongs_to() {
     // is opened. It has to hand back the same picture signing in did, or the window would show
     // less after a restart than it did before one.
     let (router, path) = service("resume");
-    let secret = register(&router, "someone").await;
-    let token = sign_in(&router, "someone", &secret).await;
+    let secret = register(&router, "someone@example.com").await;
+    let token = sign_in(&router, "someone@example.com", &secret).await;
 
     let key = hex(&[5u8; KEY_LEN]);
     send(
@@ -413,7 +416,7 @@ async fn a_token_kept_from_a_previous_run_still_says_who_it_belongs_to() {
     let (status, body) = send(&router, authed("GET", "/v1/session", &token, Value::Null)).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["name"], "someone");
+    assert_eq!(body["email"], "someone@example.com");
     assert_eq!(body["relay_allowed"], false);
     assert_eq!(body["devices"][0]["public_key"], key);
     assert_eq!(body["devices"][0]["label"], "a laptop");
@@ -427,8 +430,8 @@ async fn a_token_kept_from_a_previous_run_still_says_who_it_belongs_to() {
 #[tokio::test]
 async fn signing_out_stops_the_token_working() {
     let (router, path) = service("signout");
-    let secret = register(&router, "someone").await;
-    let token = sign_in(&router, "someone", &secret).await;
+    let secret = register(&router, "someone@example.com").await;
+    let token = sign_in(&router, "someone@example.com", &secret).await;
 
     let (status, _) = send(
         &router,
@@ -445,7 +448,7 @@ async fn signing_out_stops_the_token_working() {
 #[tokio::test]
 async fn a_made_up_token_is_refused() {
     let (router, path) = service("faketoken");
-    register(&router, "someone").await;
+    register(&router, "someone@example.com").await;
 
     let (status, _) = send(
         &router,
@@ -460,8 +463,8 @@ async fn a_made_up_token_is_refused() {
 #[tokio::test]
 async fn devices_can_be_listed_added_and_removed() {
     let (router, path) = service("devices");
-    let secret = register(&router, "someone").await;
-    let token = sign_in(&router, "someone", &secret).await;
+    let secret = register(&router, "someone@example.com").await;
+    let token = sign_in(&router, "someone@example.com", &secret).await;
 
     let key = hex(&[7u8; KEY_LEN]);
 
@@ -495,11 +498,11 @@ async fn devices_can_be_listed_added_and_removed() {
 async fn one_account_cannot_see_or_touch_another_ones_devices() {
     // The failure that turns an account system into a way to read other people's machines.
     let (router, path) = service("isolation");
-    let mine = register(&router, "someone").await;
-    let theirs = register(&router, "another").await;
+    let mine = register(&router, "someone@example.com").await;
+    let theirs = register(&router, "another@example.com").await;
 
-    let my_token = sign_in(&router, "someone", &mine).await;
-    let their_token = sign_in(&router, "another", &theirs).await;
+    let my_token = sign_in(&router, "someone@example.com", &mine).await;
+    let their_token = sign_in(&router, "another@example.com", &theirs).await;
 
     send(
         &router,
@@ -528,8 +531,8 @@ async fn one_account_cannot_see_or_touch_another_ones_devices() {
 #[tokio::test]
 async fn changing_the_password_takes_effect_and_the_old_one_stops_working() {
     let (router, path) = service("rekey");
-    let secret = register(&router, "someone").await;
-    let token = sign_in(&router, "someone", &secret).await;
+    let secret = register(&router, "someone@example.com").await;
+    let token = sign_in(&router, "someone@example.com", &secret).await;
 
     let (status, _) = send(
         &router,
@@ -557,7 +560,7 @@ async fn changing_the_password_takes_effect_and_the_old_one_stops_working() {
         &router,
         post(
             "/v1/sessions",
-            json!({ "name": "someone", "auth": hex(&[2u8; SECRET_LEN]), "code": code }),
+            json!({ "email": "someone@example.com", "auth": hex(&[2u8; SECRET_LEN]), "code": code }),
         ),
     )
     .await;
@@ -571,7 +574,7 @@ async fn changing_the_password_takes_effect_and_the_old_one_stops_working() {
         &router,
         post(
             "/v1/sessions",
-            json!({ "name": "someone", "auth": hex(&[9u8; SECRET_LEN]), "code": code }),
+            json!({ "email": "someone@example.com", "auth": hex(&[9u8; SECRET_LEN]), "code": code }),
         ),
     )
     .await;
@@ -591,7 +594,7 @@ async fn malformed_hex_is_refused_rather_than_stored() {
         post(
             "/v1/accounts",
             json!({
-                "name": "someone",
+                "email": "someone@example.com",
                 "salt": "not hex",
                 "auth": hex(&[2u8; SECRET_LEN]),
                 "sealed_key": hex(&[3u8; 60]),
@@ -608,7 +611,7 @@ async fn malformed_hex_is_refused_rather_than_stored() {
 async fn the_relay_is_off_for_a_new_account() {
     // It costs bandwidth somebody pays for.
     let (router, path) = service("relay");
-    let secret = register(&router, "someone").await;
+    let secret = register(&router, "someone@example.com").await;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -620,7 +623,7 @@ async fn the_relay_is_off_for_a_new_account() {
         post(
             "/v1/sessions",
             json!({
-                "name": "someone",
+                "email": "someone@example.com",
                 "auth": hex(&[2u8; SECRET_LEN]),
                 "code": totp::code_at_time(&secret, now),
             }),

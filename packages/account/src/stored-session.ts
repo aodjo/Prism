@@ -16,8 +16,8 @@ import { dirname, join } from 'node:path';
 
 /** What was signed in as, and with what. */
 export interface StoredSession {
-  /** The account name, so the window can say who is signed in before the server answers. */
-  readonly name: string;
+  /** The address, so the window can say who is signed in before the server answers. */
+  readonly email: string;
   /** The token that proves it. */
   readonly token: string;
 }
@@ -69,7 +69,7 @@ export function storedSession(): StoredSession | null {
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
-      typeof (parsed as StoredSession).name !== 'string' ||
+      typeof (parsed as StoredSession).email !== 'string' ||
       typeof (parsed as StoredSession).token !== 'string'
     ) {
       return null;

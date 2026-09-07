@@ -141,8 +141,8 @@ impl From<AccountError> for ApiError {
     fn from(error: AccountError) -> Self {
         match error {
             AccountError::Refused => ApiError::Refused,
-            AccountError::NameTaken => ApiError::Conflict("that name is already in use".to_owned()),
-            AccountError::BadName { .. } => ApiError::Conflict(error.to_string()),
+            AccountError::EmailTaken => ApiError::Conflict(error.to_string()),
+            AccountError::BadEmail => ApiError::Conflict(error.to_string()),
             AccountError::Malformed { field } => ApiError::Malformed(field),
             AccountError::Store { .. } => ApiError::Unavailable,
         }
@@ -165,7 +165,7 @@ struct Health {
 /// Which name a salt is being asked for.
 #[derive(Debug, Deserialize)]
 struct SaltQuery {
-    name: String,
+    email: String,
 }
 
 /// The salt to hash a password with.
@@ -177,7 +177,7 @@ struct SaltBody {
 /// What creating an account needs.
 #[derive(Debug, Deserialize)]
 struct RegisterBody {
-    name: String,
+    email: String,
     salt: String,
     auth: String,
     sealed_key: String,
@@ -193,7 +193,7 @@ struct RegisteredBody {
 /// What signing in needs.
 #[derive(Debug, Deserialize)]
 struct SignInBody {
-    name: String,
+    email: String,
     auth: String,
     code: u32,
 }
@@ -213,7 +213,7 @@ struct SessionBody {
 /// sending it back would put a credential in one more reply for no reason.
 #[derive(Debug, Serialize)]
 struct ResumedBody {
-    name: String,
+    email: String,
     sealed_key: String,
     devices: Vec<Device>,
     relay_allowed: bool,
@@ -278,7 +278,7 @@ async fn salt(
     let accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
 
     Ok(Json(SaltBody {
-        salt: hex(&accounts.salt_for(&query.name)),
+        salt: hex(&accounts.salt_for(&query.email)),
     }))
 }
 
@@ -293,14 +293,14 @@ async fn register(
 
     let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
     let secret = accounts.register(Registration {
-        name: body.name.clone(),
+        email: body.email.clone(),
         salt,
         auth,
         sealed_key,
     })?;
 
     Ok(Json(RegisteredBody {
-        totp_uri: totp::provisioning_uri(&secret, &body.name),
+        totp_uri: totp::provisioning_uri(&secret, &body.email),
         totp_secret: totp::to_base32(&secret),
     }))
 }
@@ -314,7 +314,7 @@ async fn sign_in(
 
     let (sealed_key, devices, relay_allowed) = {
         let accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
-        let account = accounts.sign_in(&body.name, &auth, body.code, now_unix())?;
+        let account = accounts.sign_in(&body.email, &auth, body.code, now_unix())?;
 
         (
             account.sealed_key.clone(),
@@ -324,7 +324,7 @@ async fn sign_in(
     };
 
     Ok(Json(SessionBody {
-        token: service.issue(&body.name)?,
+        token: service.issue(&body.email)?,
         sealed_key,
         devices,
         relay_allowed,
@@ -341,12 +341,12 @@ async fn resume(
     State(service): State<Arc<Service>>,
     headers: HeaderMap,
 ) -> Result<Json<ResumedBody>, ApiError> {
-    let name = bearer(&service, &headers)?;
+    let email = bearer(&service, &headers)?;
     let accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
-    let account = accounts.get(&name).ok_or(ApiError::Refused)?;
+    let account = accounts.get(&email).ok_or(ApiError::Refused)?;
 
     Ok(Json(ResumedBody {
-        name: name.clone(),
+        email: email.clone(),
         sealed_key: account.sealed_key.clone(),
         devices: account.devices.clone(),
         relay_allowed: account.relay_allowed,
@@ -373,12 +373,12 @@ async fn list_devices(
     State(service): State<Arc<Service>>,
     headers: HeaderMap,
 ) -> Result<Json<DevicesBody>, ApiError> {
-    let name = bearer(&service, &headers)?;
+    let email = bearer(&service, &headers)?;
     let accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
 
     Ok(Json(DevicesBody {
         devices: accounts
-            .get(&name)
+            .get(&email)
             .ok_or(ApiError::Refused)?
             .devices
             .clone(),
@@ -391,15 +391,15 @@ async fn add_device(
     headers: HeaderMap,
     Json(body): Json<DeviceBody>,
 ) -> Result<Json<DevicesBody>, ApiError> {
-    let name = bearer(&service, &headers)?;
+    let email = bearer(&service, &headers)?;
     let key = unhex_array::<KEY_LEN>(&body.public_key).ok_or(ApiError::Malformed("public key"))?;
 
     let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
-    accounts.add_device(&name, &key, &body.label, now_unix())?;
+    accounts.add_device(&email, &key, &body.label, now_unix())?;
 
     Ok(Json(DevicesBody {
         devices: accounts
-            .get(&name)
+            .get(&email)
             .ok_or(ApiError::Refused)?
             .devices
             .clone(),
@@ -412,15 +412,15 @@ async fn remove_device(
     headers: HeaderMap,
     Path(public_key): Path<String>,
 ) -> Result<Json<DevicesBody>, ApiError> {
-    let name = bearer(&service, &headers)?;
+    let email = bearer(&service, &headers)?;
     let key = unhex_array::<KEY_LEN>(&public_key).ok_or(ApiError::Malformed("public key"))?;
 
     let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
-    accounts.remove_device(&name, &key)?;
+    accounts.remove_device(&email, &key)?;
 
     Ok(Json(DevicesBody {
         devices: accounts
-            .get(&name)
+            .get(&email)
             .ok_or(ApiError::Refused)?
             .devices
             .clone(),
@@ -433,14 +433,14 @@ async fn replace_key(
     headers: HeaderMap,
     Json(body): Json<RekeyBody>,
 ) -> Result<StatusCode, ApiError> {
-    let name = bearer(&service, &headers)?;
+    let email = bearer(&service, &headers)?;
 
     let salt = unhex_array::<SALT_LEN>(&body.salt).ok_or(ApiError::Malformed("salt"))?;
     let auth = unhex_array::<SECRET_LEN>(&body.auth).ok_or(ApiError::Malformed("auth"))?;
     let sealed_key = unhex(&body.sealed_key).ok_or(ApiError::Malformed("sealed key"))?;
 
     let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
-    accounts.replace_key(&name, &salt, &auth, &sealed_key)?;
+    accounts.replace_key(&email, &salt, &auth, &sealed_key)?;
 
     Ok(StatusCode::NO_CONTENT)
 }

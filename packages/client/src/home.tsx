@@ -126,8 +126,8 @@ function Home(): JSX.Element {
   const [ownKey, setOwnKey] = useState('');
   const [machines, setMachines] = useState<readonly string[]>([]);
   const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
-  const [account, setAccount] = useState<{ name: string | null; relay: boolean }>({
-    name: null,
+  const [account, setAccount] = useState<{ email: string | null; relay: boolean }>({
+    email: null,
     relay: false,
   });
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -188,7 +188,7 @@ function Home(): JSX.Element {
       setOwnKey(identity.publicKey);
       setSettings(stored);
       setDevices(signedIn.devices);
-      setAccount({ name: signedIn.name, relay: signedIn.relayAllowed });
+      setAccount({ email: signedIn.email, relay: signedIn.relayAllowed });
 
       // Both sources, minus this machine: one arrives by pairing and the other by signing in,
       // and which of the two brought a machine here is not something anybody wants to read two
@@ -373,10 +373,10 @@ function Home(): JSX.Element {
           <img src="assets/avatar.svg" alt="" className="block size-[26px] flex-none" />
           <span className="flex min-w-0 flex-1 flex-col gap-px">
             <span className="truncate text-note-2 font-medium text-ink">
-              {account.name ?? 'Not signed in'}
+              {account.email ?? 'Not signed in'}
             </span>
             <span className="text-tiny-2 text-dim">
-              {account.name ? (account.relay ? 'Relay allowed' : 'Direct only') : 'This machine only'}
+              {account.email ? (account.relay ? 'Relay allowed' : 'Direct only') : 'This machine only'}
             </span>
           </span>
           <span className="flex-none text-note text-dim">⚙</span>
