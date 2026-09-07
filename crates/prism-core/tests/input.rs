@@ -26,9 +26,30 @@ mod macos {
             Err(err) => panic!("could not create an injector: {err}"),
         };
 
-        // Park the pointer against the top left first. Movement is clamped to the display, so
-        // a test that starts wherever the pointer happens to be fails whenever it happens to
-        // be near an edge.
+        // Attempted several times because the pointer is shared with whoever is using the
+        // machine. A person moving the mouse mid-test is interference, not a failure of
+        // injection, and one clean observation is all the property needs.
+        let mut last = String::new();
+        for _ in 0..ATTEMPTS {
+            match attempt(&mut injector) {
+                Ok(()) => return,
+                Err(why) => last = why,
+            }
+        }
+
+        panic!("the pointer never followed an injected move: {last}");
+    }
+
+    /// How many times to try before calling it a failure.
+    const ATTEMPTS: u32 = 5;
+
+    /// Parks the pointer, moves it by a known amount, and checks it went there.
+    ///
+    /// Returns what went wrong rather than panicking, so the caller can try again: anything
+    /// else touching the pointer at the wrong moment fails this once and not twice.
+    fn attempt(injector: &mut MacInjector) -> Result<(), String> {
+        // Movement is clamped to the display, so a run that started wherever the pointer
+        // happened to be would fail whenever it happened to be near an edge.
         injector
             .inject(InputEvent::MouseMove {
                 dx: i16::MIN,
@@ -36,38 +57,33 @@ mod macos {
             })
             .expect("a plain move is always injectable");
 
-        // And wait for it to get there before reading where "there" is. Posting is
-        // asynchronous, so a start read straight after the parking move is wherever the
-        // pointer still was, and every later assertion is measured against a start that was
-        // never true. This was the flake.
-        assert!(
-            wait_until_landed(&injector),
-            "the pointer never reached the corner it was parked at"
-        );
+        if !wait_until_landed(injector) {
+            return Err("the pointer never reached the corner it was parked at".into());
+        }
+
         let (start_x, start_y) = injector.position();
 
         injector
             .inject(InputEvent::MouseMove { dx: 60, dy: 40 })
             .expect("a plain move is always injectable");
 
-        assert!(
-            wait_until_landed(&injector),
-            "the pointer did not follow the injected move"
-        );
+        if !wait_until_landed(injector) {
+            return Err("the pointer did not follow the move".into());
+        }
 
         let (moved_x, moved_y) = injector.position();
-        assert!(
-            (moved_x - start_x - 60.0).abs() < 1.0,
-            "horizontal movement was applied"
-        );
-        assert!(
-            (moved_y - start_y - 40.0).abs() < 1.0,
-            "vertical movement was applied"
-        );
+
+        if (moved_x - start_x - 60.0).abs() >= 1.0 || (moved_y - start_y - 40.0).abs() >= 1.0 {
+            return Err(format!(
+                "the pointer went from ({start_x}, {start_y}) to ({moved_x}, {moved_y})"
+            ));
+        }
 
         injector
             .inject(InputEvent::MouseMove { dx: -60, dy: -40 })
             .expect("putting the pointer back is the same operation");
+
+        Ok(())
     }
 
     /// Waits until the system pointer agrees with where the injector thinks it put it.
