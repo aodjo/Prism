@@ -189,10 +189,13 @@
   }
 
   /* A button that is only a sentence. Used where the action is the one somebody takes when
-     they do not want the one beside it. */
+     they do not want the one beside it.
+     
+     Quiet, but not to the point of being missed: these sit over the brightest part of the
+     aurora on more than one screen, and at the dim end of the scale they disappear into it. */
   .btn-ghost {
-    @apply bg-none px-0.5 py-[3px] text-control text-dim transition-colors
-      hover:not-disabled:text-muted;
+    @apply bg-none px-0.5 py-[3px] text-control text-muted transition-colors
+      hover:not-disabled:text-ink;
   }
 
   /* A grant that has already been given is stated, not offered. */

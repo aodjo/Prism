@@ -521,7 +521,13 @@ function Setup(): JSX.Element {
               the settings window rather than ending setup: this flow is what pairs this
               machine and asks for the grants it needs, and neither has happened yet however
               many machines the account already knows about. */}
-          <button type="button" className="btn-ghost no-drag mt-7" onClick={prism.openSettings}>
+          {/* Directly over the brightest part of the aurora, which is the one place on any of
+              these screens where even the muted end of the scale washes out. */}
+          <button
+            type="button"
+            className="btn-ghost no-drag mt-7 text-ink-3 hover:text-ink"
+            onClick={prism.openSettings}
+          >
             Already using PRISM? Sign in
           </button>
         </section>
