@@ -119,13 +119,9 @@ impl HostAudio {
         let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        // Only when both sides agreed to it. Sending audio a client never asked for spends
-        // bandwidth on packets it will decode and drop.
-        let wanted = config
-            .audio_bitrate_bps
-            .filter(|_| sender.agreed().is_none_or(|agreed| agreed.audio));
-
-        let thread = wanted.and_then(|bitrate| {
+        // Whether the client agreed to carry audio is checked by the core, alongside every
+        // other reason a source might not start.
+        let thread = config.audio_bitrate_bps.and_then(|bitrate| {
             prism_core::control::host::spawn_audio(sender, bitrate, &sent, &stop)
                 .ok()
                 .flatten()
@@ -423,8 +419,9 @@ fn drain_one(
 
 /// Captures the screen, encodes it, and sends the result.
 ///
-/// The capture timestamp is taken when the compositor hands the frame over, so the
-/// latency the client measures covers everything from that moment onward.
+/// The pipeline is [`prism_core::encode::pump::ScreenPump`], the same one the window
+/// application drives. This function is what the command line adds around it: a frame budget
+/// so a run describes a fixed amount of work, and a summary at the end.
 ///
 /// # Errors
 ///
@@ -438,63 +435,36 @@ pub fn run_captured(
     width: u32,
     height: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use prism_core::encode::pump::{PumpConfig, Pumped, ScreenPump};
+
     let config = &run.session;
     // A measurement run always has a budget; the command line supplies one by default. A
     // session with none runs until it is stopped, which on the command line means until the
     // process is.
     let budget = config.frames.unwrap_or(u32::MAX);
-    use prism_core::capture::CaptureConfig;
-    use prism_core::capture::screencapturekit::ScreenCapture;
-    use prism_core::encode::videotoolbox::VideoToolboxEncoder;
 
-    let mut capture = ScreenCapture::start(CaptureConfig {
-        fps: config.fps,
-        width,
-        height,
-        ..CaptureConfig::default()
-    })?;
-
-    let (width, height) = (capture.width(), capture.height());
-
-    // The session opens before the encoder is built, because what the encoder is built for is
-    // what the two machines agreed. Building it first and hoping would mean sending a stream
-    // the client cannot decode, whose symptom is a black window with nothing reporting an
-    // error anywhere.
+    // The session opens before the pipeline starts, because what the encoder is built for is
+    // what the two machines agreed.
     let mut sender = open(run.session.clone(), keys)?;
-
-    let encoder_config = prism_core::encode::EncoderConfig {
-        codec: sender
-            .agreed()
-            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
-                agreed.codec
-            }),
-        width,
-        height,
-        fps: config.fps,
-        bitrate_bps,
-        max_slice_bytes: bitrate_bps / 8 / config.fps.max(1) / 4,
-    };
-
-    // Built for the codec the session agreed, not the one the command line guessed. A host
-    // that encodes one thing and says another produces a client that decodes nothing and
-    // reports no error, because a decoder looking for parameter sets it will never see has
-    // nothing to complain about.
-    let encoder_config = prism_core::encode::EncoderConfig {
-        codec: sender
-            .agreed()
-            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
-                agreed.codec
-            }),
-        ..encoder_config
-    };
-
-    let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     // Pacing, the return path and parity are set up by the core when the session opens.
     // Loss injection is not: it exists only to make a measurement reproducible.
     if run.loss_ppm > 0 {
         sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
 
+    let codec = sender
+        .agreed()
+        .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+            agreed.codec
+        });
+    let mut pump = ScreenPump::start(PumpConfig {
+        fps: config.fps,
+        bitrate_bps,
+        width,
+        height,
+        codec,
+    })?;
+    let (width, height) = pump.size();
     let audio = HostAudio::start(&sender, config);
 
     println!(
@@ -502,45 +472,34 @@ pub fn run_captured(
         config.fps,
         bitrate_bps / 1000
     );
+    if !pump.slicing_supported() {
+        println!(
+            "host: this encoder emits one slice per frame, so transmission cannot start early"
+        );
+    }
 
     let start = Instant::now();
-    let mut sent_frames = 0u32;
-    let mut submitted = 0u32;
     let mut dropped = 0u32;
     let mut idle = 0u32;
-    // Captured frames the encoder may still be reading. Holding them is the whole reason
-    // this is a queue: the compositor's buffer belongs to the frame it came with, and
-    // releasing it while the encoder is mid-frame is a use-after-free with a picture in it.
-    let mut in_flight = std::collections::VecDeque::with_capacity(ENCODE_IN_FLIGHT);
 
-    while sent_frames < budget {
-        let Some(captured) = capture.poll(Duration::from_millis(500)) else {
-            idle += 1;
-            if idle > 20 {
-                return Err("the compositor stopped delivering frames".into());
+    while pump.sent() < budget {
+        match pump.pump(&mut sender, config.adaptive)? {
+            Pumped::Idle => {
+                idle += 1;
+                if idle > 20 {
+                    return Err("the compositor stopped delivering frames".into());
+                }
             }
-            continue;
-        };
-        idle = 0;
-        sender.send_cursor()?;
-        follow_target(&mut encoder, &sender);
-
-        let capture_ts_us = captured.capture_ts_us;
-        let force_idr = submitted == 0 || sender.take_keyframe_request();
-        encoder.encode(captured.pixel_buffer(), capture_ts_us, force_idr)?;
-        in_flight.push_back(captured);
-        submitted += 1;
-
-        // Nothing has finished yet while the pipeline is still filling.
-        if in_flight.len() < ENCODE_IN_FLIGHT {
-            continue;
+            Pumped::Dropped => {
+                idle = 0;
+                dropped += 1;
+            }
+            Pumped::PeerGone => {
+                println!("host: the client disconnected");
+                break;
+            }
+            Pumped::Filling | Pumped::Sent => idle = 0,
         }
-
-        if !drain_one(&mut encoder, &mut sender, sent_frames)? {
-            dropped += 1;
-        }
-        in_flight.pop_front();
-        sent_frames += 1;
     }
 
     audio.finish();

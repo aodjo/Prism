@@ -585,6 +585,13 @@ pub fn spawn_audio(
     use crate::audio::codec::AudioEncoder;
     use crate::audio::{Pulled, SystemAudio};
 
+    // Only when the client asked for it. Sending audio nobody agreed to spends bandwidth on
+    // packets the far side decodes and throws away, which is exactly what the window
+    // application was doing until a session was run headless and counted them.
+    if sender.agreed().is_some_and(|agreed| !agreed.audio) {
+        return Ok(None);
+    }
+
     let mut sender = sender.audio_sender()?;
     let sent = Arc::clone(sent);
     let stop = Arc::clone(stop);
@@ -750,6 +757,10 @@ fn keep_going(config: &HostConfig, stop: &AtomicBool, frames: u64) -> bool {
 }
 
 /// Captures, encodes and sends until the session ends.
+///
+/// The pipeline itself lives in [`crate::encode::pump`], shared with the command line. Five
+/// copies of it had grown across this repository and this one had fallen behind two of the
+/// fixes the others carried, with nothing to say so.
 #[cfg(target_os = "macos")]
 fn stream(
     config: &HostConfig,
@@ -757,73 +768,42 @@ fn stream(
     shared: &Shared,
     stop: &AtomicBool,
 ) -> Result<(), String> {
-    use crate::capture::CaptureConfig;
-    use crate::capture::screencapturekit::ScreenCapture;
-    use crate::encode::videotoolbox::VideoToolboxEncoder;
+    use crate::encode::pump::{PumpConfig, Pumped, ScreenPump};
 
-    let mut capture = ScreenCapture::start(CaptureConfig {
-        fps: config.fps,
-        ..CaptureConfig::default()
-    })
-    .map_err(|err| err.to_string())?;
-
-    let encoder_config = crate::encode::EncoderConfig {
-        // Whatever the two machines agreed. A host that encoded something else would send a
-        // stream the client cannot decode, and the symptom is a black window with no error.
-        codec: agreed_codec(&sender),
-        width: capture.width(),
-        height: capture.height(),
+    let mut pump = ScreenPump::start(PumpConfig {
         fps: config.fps,
         bitrate_bps: config.bitrate_bps,
-        max_slice_bytes: config.bitrate_bps / 8 / config.fps.max(1) / 4,
-    };
-
-    let mut encoder = VideoToolboxEncoder::new(encoder_config).map_err(|err| err.to_string())?;
+        // The display's own size. A window application has nobody to ask for a smaller one,
+        // and the client's offer has already capped what the negotiation agreed.
+        width: 0,
+        height: 0,
+        codec: agreed_codec(&sender),
+    })
+    .map_err(|err| err.to_string())?;
 
     let started = Instant::now();
     let mut frames = 0u64;
     let mut idle = 0u32;
 
     while keep_going(config, stop, frames) {
-        let Some(captured) = capture.poll(Duration::from_millis(500)) else {
-            idle += 1;
-            if idle > 20 {
-                return Err("the compositor stopped delivering frames".into());
+        match pump.pump(&mut sender, config.adaptive)? {
+            Pumped::Idle => {
+                // A still screen produces no frames at all, so this is ordinary. Twenty in a
+                // row is ten seconds of a compositor that has stopped, which is not.
+                idle += 1;
+                if idle > 20 {
+                    return Err("the compositor stopped delivering frames".into());
+                }
+                continue;
             }
-            continue;
-        };
-        idle = 0;
-
-        sender.send_cursor().map_err(|err| err.to_string())?;
-        if config.adaptive {
-            follow_target(&mut encoder, &sender);
-        }
-
-        let capture_ts_us = captured.capture_ts_us;
-        encoder
-            .encode(captured.pixel_buffer(), capture_ts_us, frames == 0)
-            .map_err(|err| err.to_string())?;
-
-        let Some(frame) = encoder.poll(Duration::from_millis(200)) else {
-            continue;
-        };
-
-        let frame_id = frames as u32;
-        sender.note_capture(frame_id, capture_ts_us);
-
-        let last = frame.slices.len().saturating_sub(1);
-        for slice_id in 0..frame.slices.len() {
-            let data = frame.slice(slice_id).expect("slice index is in range");
-            sender
-                .send_slice(
-                    frame_id,
-                    slice_id as u16,
-                    data,
-                    frame.pts_us,
-                    frame.is_idr,
-                    slice_id == last,
-                )
-                .map_err(|err| err.to_string())?;
+            Pumped::Filling | Pumped::Dropped => {
+                idle = 0;
+                continue;
+            }
+            // Ordinary: somebody closed their client. Ending here rather than reporting a
+            // failure is what stops the tray showing an error after most sessions.
+            Pumped::PeerGone => return Ok(()),
+            Pumped::Sent => idle = 0,
         }
 
         frames += 1;
@@ -831,23 +811,6 @@ fn stream(
     }
 
     Ok(())
-}
-
-/// Points the encoder at whatever bitrate the congestion controller currently wants.
-///
-/// The pacer follows the controller on its own, but pacing is not an actuator: slowing the
-/// wire while the encoder keeps producing the same bytes moves the queue into the host instead
-/// of removing it. This is the half that changes how much there is to send.
-#[cfg(target_os = "macos")]
-fn follow_target(
-    encoder: &mut crate::encode::videotoolbox::VideoToolboxEncoder,
-    sender: &SliceSender,
-) {
-    // A refusal is ignored rather than reported. A session that keeps running at the old rate
-    // is a worse picture than asked for; a session that stops is no picture at all.
-    if let Some(target) = sender.target_bps() {
-        let _ = encoder.set_bitrate_bps(target);
-    }
 }
 
 /// Captures, encodes and sends until the session ends.

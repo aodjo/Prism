@@ -739,6 +739,18 @@ impl SliceSender {
             loop {
                 let bytes = match receiver.recv_into(&mut recv_buf) {
                     Ok(bytes) => bytes,
+                    // A connected UDP socket reports the far machine having nothing listening
+                    // as a refused connection, which is what an ordinary disconnection looks
+                    // like from here. Ending quietly, because a line of error text after every
+                    // normal session is a line nobody reads by the time it matters.
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+                        ) =>
+                    {
+                        return;
+                    }
                     Err(err) => {
                         eprintln!("host: return path recv failed: {err} ({:?})", err.kind());
                         return;

@@ -12,8 +12,12 @@
 
 #[cfg(target_os = "windows")]
 pub mod nv12;
+
 #[cfg(target_os = "windows")]
 pub mod nvenc;
+/// The screen's path from the compositor to the wire, shared by every macOS host.
+#[cfg(target_os = "macos")]
+pub mod pump;
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
 
