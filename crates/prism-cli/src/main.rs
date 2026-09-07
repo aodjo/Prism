@@ -309,6 +309,15 @@ enum Command {
         /// file rather than asserted.
         #[arg(long)]
         hevc: bool,
+
+        /// How many frames may be inside the encoder at once.
+        ///
+        /// One waits for each frame before painting the next, so the rate it measures is
+        /// paint and encode added together rather than overlapped. Raising it is what the
+        /// plan means by encoding asynchronously, and is how to tell a frame rate bounded by
+        /// the encoder's latency from one bounded by its throughput.
+        #[arg(long, default_value_t = 1)]
+        in_flight: usize,
     },
 }
 
@@ -705,6 +714,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             slice_bytes,
             source_out,
             hevc,
+            in_flight,
         } => {
             #[cfg(target_os = "macos")]
             {
@@ -712,6 +722,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     out,
                     source_out,
                     frames,
+                    in_flight,
                     encoder: prism_core::encode::EncoderConfig {
                         codec: codec_of(hevc),
                         width,
@@ -735,6 +746,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     slice_bytes,
                     source_out,
                     hevc,
+                    in_flight,
                 );
                 Err("encoding is not implemented on this platform yet".into())
             }
