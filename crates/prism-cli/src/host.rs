@@ -152,6 +152,10 @@ pub fn run(run: HostRun, keys: &HostKeys) -> io::Result<()> {
         // producing less. Sending a shorter prefix of each slice rather than rebuilding it
         // keeps the frame path free of allocation.
         let budget = frame_budget(sender.target_bps(), config.fps, run.frame_bytes);
+        // No encoder here, so nothing actually changes about the bytes. The flag is still
+        // answered, because this is the path the loss gate runs on and a request that goes
+        // unanswered here would look like the client asking into the void.
+        let is_idr = frame_id == 0 || sender.take_keyframe_request();
 
         for (slice_id, slice) in slices.iter().enumerate() {
             let bytes = slice_prefix(slice, slice_id, slices.len(), budget);
@@ -160,7 +164,7 @@ pub fn run(run: HostRun, keys: &HostKeys) -> io::Result<()> {
                 slice_id as u16,
                 bytes,
                 capture_ts_us,
-                frame_id == 0,
+                is_idr,
                 slice_id + 1 == slices.len(),
             )?;
         }
@@ -240,7 +244,8 @@ pub fn run_encoded(
 
         crate::pattern::paint(&mut picture, frame_id as usize)?;
         let capture_ts_us = now_us();
-        encoder.encode(picture.pixel_buffer(), capture_ts_us, frame_id == 0)?;
+        let force_idr = frame_id == 0 || sender.take_keyframe_request();
+        encoder.encode(picture.pixel_buffer(), capture_ts_us, force_idr)?;
 
         let Some(frame) = encoder.poll(Duration::from_millis(200)) else {
             dropped += 1;
@@ -370,7 +375,8 @@ pub fn run_captured(
         follow_target(&mut encoder, &sender);
 
         let capture_ts_us = captured.capture_ts_us;
-        encoder.encode(captured.pixel_buffer(), capture_ts_us, sent_frames == 0)?;
+        let force_idr = sent_frames == 0 || sender.take_keyframe_request();
+        encoder.encode(captured.pixel_buffer(), capture_ts_us, force_idr)?;
 
         let Some(frame) = encoder.poll(Duration::from_millis(200)) else {
             continue;
@@ -602,7 +608,8 @@ pub fn run_windows(
         follow_target_nvenc(&mut encoder, &sender);
 
         converter.convert(&bgra, &target)?;
-        let frame = encoder.encode(capture_ts_us, sent == 0)?;
+        let force_idr = sent == 0 || sender.take_keyframe_request();
+        let frame = encoder.encode(capture_ts_us, force_idr)?;
 
         let last = frame.slices.len().saturating_sub(1);
         for index in 0..frame.slices.len() {

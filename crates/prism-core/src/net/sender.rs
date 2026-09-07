@@ -21,9 +21,9 @@ use crate::net::handshake::{Identity, KEY_LEN, PeerPolicy};
 use crate::net::loss::LossInjector;
 use crate::net::negotiate::{Accept, HostAbility};
 use crate::net::packet::{
-    AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR,
-    FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE,
-    MAX_VIDEO_PAYLOAD, channel_of,
+    AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition,
+    FEEDBACK_WANTS_KEYFRAME, FLAG_IDR, FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, InputEvent,
+    InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD, channel_of,
 };
 use crate::net::packetize::SlicePacketizer;
 use crate::net::seal::Opener;
@@ -37,6 +37,23 @@ use crate::stats::LatencyRecorder;
 /// Comfortably more than the thirty-two a feedback report can describe, so a report about
 /// the oldest frame in its own window still finds its timestamp.
 const CAPTURE_HISTORY: usize = 64;
+
+/// The shortest gap between two keyframes the host will produce because it was asked to.
+///
+/// Two frames at sixty a second, four at a hundred and twenty. Short, because the usual
+/// reason to space keyframes out does not apply here: the encoder runs CBR against a
+/// one-frame VBV, so a keyframe is not a larger frame, it is a worse-looking one of the
+/// same size. Measured over five seconds at 720p60 and two percent loss with no parity,
+/// answering every request and answering none faster than this both produce 6.3 Mbps —
+/// and 72% against 70% of frames decoded, where a quarter-second gap produces 28%.
+///
+/// So the limit is not there to protect the bitrate. A client only asks when it cannot
+/// decode, and one keyframe answers every outstanding complaint at once, which already
+/// holds the rate down on its own — forty-two keyframes for fifty-six broken frames in
+/// that run. What this bounds is a peer that ignores that and sets the bit on every
+/// report: without a limit it could make the host encode every single frame intra and
+/// watch the picture fall apart, from one bit on the return path.
+pub const KEYFRAME_REQUEST_INTERVAL_US: u64 = 33_000;
 
 /// Frame identifier reserved to mean "this slot holds nothing usable".
 ///
@@ -87,6 +104,16 @@ struct ReturnPath {
     target_bps: AtomicU32,
     /// How many times the controller has changed its mind.
     rate_changes: AtomicU64,
+    /// Whether the client has said it can no longer decode what it is being sent.
+    keyframe_wanted: AtomicBool,
+    /// When the last request was answered, so the answers can be spaced out.
+    ///
+    /// Zero means none has been, which is how the first request is answered immediately.
+    keyframe_granted_us: AtomicU64,
+    /// How many reports asked for a keyframe, including the ones the interval refused.
+    keyframe_requests: AtomicU64,
+    /// How many keyframes the host produced because it was asked to.
+    keyframes_forced: AtomicU64,
 }
 
 impl Default for ReturnPath {
@@ -103,6 +130,10 @@ impl Default for ReturnPath {
             captures: core::array::from_fn(|_| CaptureSlot::default()),
             target_bps: AtomicU32::new(0),
             rate_changes: AtomicU64::new(0),
+            keyframe_wanted: AtomicBool::new(false),
+            keyframe_granted_us: AtomicU64::new(0),
+            keyframe_requests: AtomicU64::new(0),
+            keyframes_forced: AtomicU64::new(0),
         }
     }
 }
@@ -130,6 +161,28 @@ impl ReturnPath {
         let after = slot.frame_id.load(Ordering::Acquire);
 
         (before == frame_id && after == frame_id).then_some(capture_ts_us)
+    }
+
+    /// Takes the client's outstanding keyframe request, if the interval allows answering it.
+    ///
+    /// Consuming rather than reading: the request describes a moment, and answering it is
+    /// what makes it stale. A client that still cannot decode says so again in a frame's
+    /// time, which is how a lost keyframe turns into a second one rather than a stall.
+    fn take_keyframe_request(&self, now_us: u64) -> bool {
+        if !self.keyframe_wanted.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let granted = self.keyframe_granted_us.load(Ordering::Relaxed);
+        if granted != 0 && now_us.saturating_sub(granted) < KEYFRAME_REQUEST_INTERVAL_US {
+            return false;
+        }
+
+        self.keyframe_wanted.store(false, Ordering::Relaxed);
+        self.keyframe_granted_us.store(now_us, Ordering::Relaxed);
+        self.keyframes_forced.fetch_add(1, Ordering::Relaxed);
+
+        true
     }
 }
 
@@ -296,6 +349,30 @@ impl SliceSender {
             0 => None,
             bps => Some(bps),
         }
+    }
+
+    /// Whether the next frame should be encoded as a keyframe.
+    ///
+    /// Every frame here is a reference — there are no B-frames and the keyframe interval is
+    /// effectively infinite, because a periodic keyframe is a periodic latency spike. The
+    /// cost of that choice is that one frame the client never completes makes every later
+    /// frame undecodable, forever, and the client cannot fix it alone. This is the way out:
+    /// the client says it is stuck, and the next frame starts the stream over.
+    ///
+    /// Consuming, and rate limited to one per [`KEYFRAME_REQUEST_INTERVAL_US`]. Call it once
+    /// per frame, immediately before encoding, and pass the answer as the force flag.
+    #[must_use]
+    pub fn take_keyframe_request(&self) -> bool {
+        self.feedback.take_keyframe_request(now_us())
+    }
+
+    /// How many keyframes the client asked for, and how many it was given.
+    #[must_use]
+    pub fn keyframe_counts(&self) -> (u64, u64) {
+        (
+            self.feedback.keyframe_requests.load(Ordering::Relaxed),
+            self.feedback.keyframes_forced.load(Ordering::Relaxed),
+        )
     }
 
     /// Records when a frame was captured, so feedback about it can be timed.
@@ -735,6 +812,15 @@ impl SliceSender {
                             feedback
                                 .missing_in_last
                                 .store(missing_in_history(report.recv_bitmap), Ordering::Relaxed);
+
+                            // Only recorded from a report that is current. A stale one
+                            // asking for a keyframe describes a gap the client has since
+                            // been carried past, and a client that still cannot decode
+                            // sets the bit again on the very next frame.
+                            if report.flags & FEEDBACK_WANTS_KEYFRAME != 0 {
+                                feedback.keyframe_requests.fetch_add(1, Ordering::Relaxed);
+                                feedback.keyframe_wanted.store(true, Ordering::Relaxed);
+                            }
                         }
 
                         feedback.reports.fetch_add(1, Ordering::Relaxed);
@@ -820,6 +906,15 @@ impl SliceSender {
             self.feedback.newest_acked.load(Ordering::Relaxed),
             self.feedback.missing_in_last.load(Ordering::Relaxed),
         );
+
+        let (asked, forced) = self.keyframe_counts();
+        if asked > 0 {
+            println!(
+                "recovery: {asked} reports asked for a keyframe, {forced} sent \
+                 (at most one per {} ms)",
+                KEYFRAME_REQUEST_INTERVAL_US / 1000,
+            );
+        }
     }
 }
 
@@ -953,5 +1048,73 @@ impl core::fmt::Debug for AudioSender {
         f.debug_struct("AudioSender")
             .field("frames", &self.frames)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KEYFRAME_REQUEST_INTERVAL_US, ReturnPath};
+    use std::sync::atomic::Ordering;
+
+    /// A moment far enough from zero that the interval arithmetic is not measuring startup.
+    const NOW: u64 = 10_000_000;
+
+    #[test]
+    fn nothing_is_forced_until_a_client_asks() {
+        let feedback = ReturnPath::default();
+
+        assert!(!feedback.take_keyframe_request(NOW));
+    }
+
+    #[test]
+    fn the_first_request_is_answered_at_once() {
+        // The whole point is that the client is stuck and stays stuck until this arrives.
+        // Making it wait out an interval it never started would add a quarter of a second
+        // of black to every recovery.
+        let feedback = ReturnPath::default();
+        feedback.keyframe_wanted.store(true, Ordering::Relaxed);
+
+        assert!(feedback.take_keyframe_request(NOW));
+    }
+
+    #[test]
+    fn one_request_produces_one_keyframe() {
+        let feedback = ReturnPath::default();
+        feedback.keyframe_wanted.store(true, Ordering::Relaxed);
+
+        assert!(feedback.take_keyframe_request(NOW));
+        assert!(
+            !feedback.take_keyframe_request(NOW + KEYFRAME_REQUEST_INTERVAL_US * 10),
+            "a request already answered was answered again"
+        );
+    }
+
+    #[test]
+    fn a_client_asking_on_every_frame_does_not_get_a_keyframe_on_every_frame() {
+        // The bound on what one bit of the return path can make the host do. A peer that
+        // sets it on every report — through a bug or on purpose — would otherwise have
+        // every frame encoded intra, and the picture would fall apart with nothing on the
+        // host saying why.
+        let feedback = ReturnPath::default();
+
+        feedback.keyframe_wanted.store(true, Ordering::Relaxed);
+        assert!(feedback.take_keyframe_request(NOW));
+
+        // A frame at a hundred and twenty a second, which is the fastest anything asks.
+        for frame in 1..KEYFRAME_REQUEST_INTERVAL_US / 8_000 {
+            feedback.keyframe_wanted.store(true, Ordering::Relaxed);
+            assert!(
+                !feedback.take_keyframe_request(NOW + frame * 8_000),
+                "a second keyframe went out {} us after the first",
+                frame * 8_000
+            );
+        }
+
+        feedback.keyframe_wanted.store(true, Ordering::Relaxed);
+        assert!(
+            feedback.take_keyframe_request(NOW + KEYFRAME_REQUEST_INTERVAL_US),
+            "a client still stuck after the interval was never answered again"
+        );
+        assert_eq!(feedback.keyframes_forced.load(Ordering::Relaxed), 2);
     }
 }

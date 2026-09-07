@@ -25,8 +25,8 @@ use prism_core::net::handshake::{Identity, KEY_LEN};
 use prism_core::net::negotiate::Offer;
 use prism_core::net::packet::{
     AudioPacket, CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
-    FEEDBACK_PACKET_LEN, FecPacket, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE,
-    VideoPacket, channel_of, control_type_of,
+    FEEDBACK_PACKET_LEN, FEEDBACK_WANTS_KEYFRAME, FecPacket, INPUT_PACKET_LEN, InputEvent,
+    InputPacket, MAX_PACKET_SIZE, VideoPacket, channel_of, control_type_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::secure::{SecureReceiver, SecureSender};
@@ -64,8 +64,12 @@ pub type PictureSink = SyncSender<()>;
 
 /// How many frames may wait for the decoder before the newest is dropped.
 ///
-/// Two, because a frame that has queued behind another has already missed its moment.
-const DECODE_QUEUE_DEPTH: usize = 2;
+/// Deeper than it looks like it needs to be, and deliberately. Every frame this pipeline
+/// sends is a reference for the ones after it, so a frame dropped here is not one late
+/// picture — it is every picture until the next keyframe. Eight covers a decoder that stalls
+/// for a hundred milliseconds, which is far longer than any stall measured here, and costs
+/// nothing when it does not.
+const DECODE_QUEUE_DEPTH: usize = 8;
 
 /// How often to ask the host for a clock synchronisation exchange.
 ///
@@ -417,6 +421,12 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut acks = AckTracker::new();
     let mut reports_sent = 0u64;
     let mut reports_failed = 0u64;
+    // Set when this side has lost a frame, and cleared once the host has answered with a
+    // keyframe. Until then every report carries the request, because a single one can be lost
+    // and the stream stays black until one arrives.
+    let mut wants_keyframe = false;
+    let mut lost_frames = 0u64;
+    let mut queued_behind = 0u32;
 
     let mut sender = SecureSender::new(transport.try_clone()?, established.session.sealer);
     let mut receiver = SecureReceiver::new(transport.try_clone()?, established.session.opener);
@@ -514,6 +524,12 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             continue;
         }
 
+        if reassembler.stats().dropped_incomplete > lost_frames || behind > queued_behind {
+            lost_frames = reassembler.stats().dropped_incomplete;
+            queued_behind = behind;
+            wants_keyframe = true;
+        }
+
         let Some(frame) = reassembler.take_completed() else {
             continue;
         };
@@ -523,7 +539,20 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         // lost, and every microsecond it waits is a microsecond the encoder spends choosing
         // a reference it did not have to.
         acks.received(frame.frame_id);
-        if let Some(report) = acks.report(now_us()) {
+        // A frame that never completed is a frame every later one refers to. Nothing decodes
+        // again until a keyframe arrives, so this is where it is asked for. Read before the
+        // completed frame is taken, because taking it borrows the reassembler.
+        if frame.is_idr {
+            wants_keyframe = false;
+        }
+
+        let flags = if wants_keyframe {
+            FEEDBACK_WANTS_KEYFRAME
+        } else {
+            0
+        };
+
+        if let Some(report) = acks.report(now_us(), flags) {
             let mut buf = [0u8; FEEDBACK_PACKET_LEN];
             if report.encode_into(&mut buf).is_ok() {
                 match sender.send(&buf) {

@@ -35,7 +35,21 @@ export const MAX_PLAINTEXT_SIZE = MAX_PACKET_SIZE - SEAL_OVERHEAD;
 export const MAX_VIDEO_PAYLOAD = MAX_PLAINTEXT_SIZE - VIDEO_HEADER_LEN;
 
 /** Exact byte length of a feedback packet; it carries no variable-length payload. */
-export const FEEDBACK_PACKET_LEN = 17;
+export const FEEDBACK_PACKET_LEN = 18;
+
+/**
+ * Feedback flag: the client cannot decode what it is being sent and needs a fresh start.
+ *
+ * Set when a frame never completes or the decoder refuses one. Every frame is a reference,
+ * so one gap makes every later frame undecodable until a keyframe arrives, and the client
+ * cannot produce one by itself. The host rate limits its answer, because a keyframe is a
+ * bitrate spike and a client that asked on every frame would turn the stream into a
+ * sequence of them.
+ */
+export const FEEDBACK_WANTS_KEYFRAME = 0x01;
+
+/** Feedback flag bits that carry no meaning yet; a packet setting one is rejected. */
+export const FEEDBACK_FLAGS_RESERVED_MASK = 0xfe;
 
 /** Byte length of a control packet header: the channel tag and the message type. */
 export const CONTROL_HEADER_LEN = 2;
