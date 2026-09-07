@@ -19,6 +19,8 @@ pub mod videotoolbox;
 
 use core::ops::Range;
 
+use crate::net::negotiate::Codec;
+
 /// Four-byte Annex B start code prefixed to every NAL unit.
 ///
 /// The three-byte form is legal too, but a fixed four-byte prefix keeps the offset
@@ -33,6 +35,12 @@ pub const START_CODE: [u8; 4] = [0, 0, 0, 1];
 /// them off would only ever be used by mistake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderConfig {
+    /// Which codec to encode with.
+    ///
+    /// Whatever the two machines agreed in the handshake. An encoder asked for a codec the
+    /// hardware refuses fails to start, which is the right outcome: it means the negotiation
+    /// was told something about this machine that is not true.
+    pub codec: Codec,
     /// Frame width in pixels.
     pub width: u32,
     /// Frame height in pixels.
@@ -59,7 +67,9 @@ impl EncoderConfig {
     ///
     /// ```
     /// # use prism_core::encode::EncoderConfig;
+    /// # use prism_core::net::negotiate::Codec;
     /// let config = EncoderConfig {
+    ///     codec: Codec::H264,
     ///     width: 1920, height: 1080, fps: 60,
     ///     bitrate_bps: 24_000_000, max_slice_bytes: 0,
     /// };

@@ -294,6 +294,21 @@ enum Command {
         /// Soft ceiling on bytes per slice; zero leaves slicing to the encoder.
         #[arg(long, default_value_t = 12_000)]
         slice_bytes: u32,
+
+        /// Also write the frames that went in, as raw NV12.
+        ///
+        /// What makes a quality comparison possible: two codecs at one bitrate can only be
+        /// told apart against the thing they were both trying to reproduce.
+        #[arg(long)]
+        source_out: Option<PathBuf>,
+
+        /// Encode HEVC rather than H.264.
+        ///
+        /// Worth about half the bitrate for the same picture, which is what makes it the
+        /// codec to want over the internet. This is how the claim gets checked against a
+        /// file rather than asserted.
+        #[arg(long)]
+        hevc: bool,
     },
 }
 
@@ -339,6 +354,18 @@ fn main() -> ExitCode {
             eprintln!("prism-cli: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Turns the encoder probe's flag into a codec.
+///
+/// Only the platform with an encoder to probe has a caller for it.
+#[cfg(target_os = "macos")]
+fn codec_of(hevc: bool) -> prism_core::net::negotiate::Codec {
+    if hevc {
+        prism_core::net::negotiate::Codec::Hevc
+    } else {
+        prism_core::net::negotiate::Codec::H264
     }
 }
 
@@ -459,6 +486,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     run,
                     &keys,
                     prism_core::encode::EncoderConfig {
+                        // The measurement paths configure the encoder before a session
+                        // exists, so there is nothing agreed yet. H.264 is what both sides
+                        // advertise anyway.
+                        codec: prism_core::net::negotiate::Codec::H264,
                         width,
                         height,
                         fps,
@@ -474,6 +505,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 #[cfg(target_os = "windows")]
                 {
                     let encoder_config = prism_core::encode::EncoderConfig {
+                        // Replaced with whatever the session agreed, once it has opened.
+                        codec: prism_core::net::negotiate::Codec::H264,
                         width,
                         height,
                         fps,
@@ -644,13 +677,17 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             fps,
             bitrate,
             slice_bytes,
+            source_out,
+            hevc,
         } => {
             #[cfg(target_os = "macos")]
             {
                 encode::run(encode::EncodeConfig {
                     out,
+                    source_out,
                     frames,
                     encoder: prism_core::encode::EncoderConfig {
+                        codec: codec_of(hevc),
                         width,
                         height,
                         fps,
@@ -662,7 +699,17 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
 
             #[cfg(not(target_os = "macos"))]
             {
-                let _ = (out, frames, width, height, fps, bitrate, slice_bytes);
+                let _ = (
+                    out,
+                    frames,
+                    width,
+                    height,
+                    fps,
+                    bitrate,
+                    slice_bytes,
+                    source_out,
+                    hevc,
+                );
                 Err("encoding is not implemented on this platform yet".into())
             }
         }

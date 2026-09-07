@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use prism_core::encode::EncoderConfig;
 use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
+use prism_core::net::negotiate::Codec;
 
 /// Frame size for the probes. Small so the tests are quick; the properties do not depend
 /// on resolution.
@@ -19,6 +20,7 @@ const HEIGHT: u32 = 360;
 /// Builds an encoder and a picture to feed it.
 fn session(bitrate_bps: u32) -> (VideoToolboxEncoder, Nv12Frame) {
     let config = EncoderConfig {
+        codec: Codec::H264,
         width: WIDTH,
         height: HEIGHT,
         fps: 60,

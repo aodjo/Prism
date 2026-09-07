@@ -22,6 +22,12 @@ pub struct EncodeConfig {
     pub frames: u32,
     /// Encoder settings.
     pub encoder: EncoderConfig,
+    /// Where to also write the frames that went in, as raw NV12.
+    ///
+    /// The pattern is deterministic, so this is what makes a quality comparison possible at
+    /// all: two codecs at the same bitrate can only be told apart against the thing they were
+    /// both trying to reproduce.
+    pub source_out: Option<PathBuf>,
 }
 
 /// Encodes `config.frames` synthetic frames and writes the result to disk.
@@ -38,6 +44,11 @@ pub fn run(config: EncodeConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut encoder = VideoToolboxEncoder::new(config.encoder)?;
     let mut source = Nv12Frame::new(config.encoder.width, config.encoder.height)?;
     let mut out = BufWriter::new(File::create(&config.out)?);
+    let mut source_out = config
+        .source_out
+        .as_ref()
+        .map(|path| File::create(path).map(BufWriter::new))
+        .transpose()?;
 
     let mut latency = LatencyRecorder::new(4096);
     let mut bytes_written = 0u64;
@@ -68,6 +79,24 @@ pub fn run(config: EncodeConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     for frame_id in 0..config.frames {
         crate::pattern::paint(&mut source, frame_id as usize)?;
+
+        if let Some(writer) = source_out.as_mut() {
+            // Planar, exactly as the encoder will see it, and with the row padding removed so
+            // the file is what every tool means by NV12 at this size.
+            source.read(|luma, luma_stride, chroma, chroma_stride| {
+                let width = config.encoder.width as usize;
+                let height = config.encoder.height as usize;
+
+                for y in 0..height {
+                    writer.write_all(&luma[y * luma_stride..y * luma_stride + width])?;
+                }
+                for y in 0..height / 2 {
+                    writer.write_all(&chroma[y * chroma_stride..y * chroma_stride + width])?;
+                }
+
+                Ok::<(), std::io::Error>(())
+            })??;
+        }
 
         let started = Instant::now();
         encoder.encode(

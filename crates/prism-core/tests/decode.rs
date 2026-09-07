@@ -51,6 +51,7 @@ mod round_trip {
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
     use prism_core::encode::EncoderConfig;
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
+    use prism_core::net::negotiate::Codec;
 
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 360;
@@ -58,6 +59,7 @@ mod round_trip {
     /// Returns a modest encoder configuration that runs quickly on a shared machine.
     fn config() -> EncoderConfig {
         EncoderConfig {
+            codec: Codec::H264,
             width: WIDTH,
             height: HEIGHT,
             fps: 30,

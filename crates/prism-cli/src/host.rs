@@ -294,7 +294,19 @@ pub fn run_captured(
     })?;
 
     let (width, height) = (capture.width(), capture.height());
+
+    // The session opens before the encoder is built, because what the encoder is built for is
+    // what the two machines agreed. Building it first and hoping would mean sending a stream
+    // the client cannot decode, whose symptom is a black window with nothing reporting an
+    // error anywhere.
+    let mut sender = open(run.session.clone(), keys)?;
+
     let encoder_config = prism_core::encode::EncoderConfig {
+        codec: sender
+            .agreed()
+            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+                agreed.codec
+            }),
         width,
         height,
         fps: config.fps,
@@ -303,7 +315,6 @@ pub fn run_captured(
     };
 
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
-    let mut sender = open(run.session.clone(), keys)?;
     // Pacing, the return path and parity are set up by the core when the session opens.
     // Loss injection is not: it exists only to make a measurement reproducible.
     if run.loss_ppm > 0 {
@@ -509,7 +520,16 @@ pub fn run_windows(
     let target = Nv12Texture::new(device, width, height)?;
     let converter = Bgra2Nv12::new(device)?;
 
+    // The session opens before the encoder is built, because what the encoder is built for is
+    // what the two machines agreed.
+    let mut sender = open(run.session.clone(), keys)?;
+
     let encoder_config = prism_core::encode::EncoderConfig {
+        codec: sender
+            .agreed()
+            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+                agreed.codec
+            }),
         width,
         height,
         ..encoder_config
@@ -519,8 +539,6 @@ pub fn run_windows(
     // end of this function.
     let mut encoder =
         unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), encoder_config) }?;
-
-    let mut sender = open(run.session.clone(), keys)?;
     // Pacing, the return path and parity are set up by the core when the session opens.
     // Loss injection is not: it exists only to make a measurement reproducible.
     if run.loss_ppm > 0 {

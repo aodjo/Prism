@@ -611,6 +611,17 @@ fn spawn_audio(
     Ok(None)
 }
 
+/// Returns the codec the two machines agreed on.
+///
+/// A session opened without negotiating — which the measurement paths do — falls back to
+/// H.264, the one codec every machine here can do.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn agreed_codec(sender: &SliceSender) -> crate::net::negotiate::Codec {
+    sender
+        .agreed()
+        .map_or(crate::net::negotiate::Codec::H264, |agreed| agreed.codec)
+}
+
 /// Records the counters a watcher reads, once per frame.
 ///
 /// Only compiled where there is a capture loop to call it. A helper left behind a platform
@@ -659,6 +670,9 @@ fn stream(
     .map_err(|err| err.to_string())?;
 
     let encoder_config = crate::encode::EncoderConfig {
+        // Whatever the two machines agreed. A host that encoded something else would send a
+        // stream the client cannot decode, and the symptom is a black window with no error.
+        codec: agreed_codec(&sender),
         width: capture.width(),
         height: capture.height(),
         fps: config.fps,
@@ -766,6 +780,7 @@ fn stream(
     let converter = Bgra2Nv12::new(device).map_err(|err| err.to_string())?;
 
     let encoder_config = crate::encode::EncoderConfig {
+        codec: agreed_codec(&sender),
         width,
         height,
         fps: config.fps,
