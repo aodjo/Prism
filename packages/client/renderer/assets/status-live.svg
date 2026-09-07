@@ -1,16 +1,16 @@
-<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="23" height="23" viewBox="0 0 23 23" fill="none" xmlns="http://www.w3.org/2000/svg">
-<g id="status" filter="url(#filter0_d_0_45)">
-<circle cx="11.5" cy="11.5" r="3.5" fill="#4DE8B0"/>
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="25" height="25" viewBox="0 0 25 25" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="status" filter="url(#filter0_d_0_6)">
+<circle cx="12.5" cy="12.5" r="3.5" fill="#4DE8B0"/>
 </g>
 <defs>
-<filter id="filter0_d_0_45" x="0" y="0" width="23" height="23" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<filter id="filter0_d_0_6" x="0" y="0" width="25" height="25" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
 <feFlood flood-opacity="0" result="BackgroundImageFix"/>
 <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
 <feOffset/>
-<feGaussianBlur stdDeviation="4"/>
+<feGaussianBlur stdDeviation="4.5"/>
 <feColorMatrix type="matrix" values="0 0 0 0 0.301961 0 0 0 0 0.909804 0 0 0 0 0.690196 0 0 0 0.65 0"/>
-<feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_45"/>
-<feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_45" result="shape"/>
+<feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_6"/>
+<feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_6" result="shape"/>
 </filter>
 </defs>
 </svg>

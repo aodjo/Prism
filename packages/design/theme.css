@@ -111,10 +111,11 @@
   --text-label-2--letter-spacing: 1.3px;
 
   /* The radii the design uses that Tailwind's own scale does not have. `rounded-2xl` is
-     already the 16px the cards want, so only these four need naming. */
+     already the 16px some cards want, so only these five need naming. */
   --radius-tile: 10px;
   --radius-badge: 11px;
   --radius-panel: 14px;
+  --radius-card: 18px;
   --radius-stage: 20px;
   --radius-pill: 999px;
 }
@@ -160,6 +161,14 @@
   .btn-primary {
     @apply inline-flex items-center gap-3 rounded-pill bg-light py-4 pr-6 pl-8
       text-lead-2 font-medium text-on-light transition-colors
+      hover:not-disabled:bg-white disabled:opacity-45;
+  }
+
+  /* The size between the two: the one action on a page that is a page of many things, rather
+     than the one action on a screen that exists to ask for it. */
+  .btn-primary-md {
+    @apply inline-flex items-center gap-2.5 rounded-pill bg-light py-3.5 pr-5 pl-[26px]
+      text-[15px] font-medium text-on-light transition-colors
       hover:not-disabled:bg-white disabled:opacity-45;
   }
 

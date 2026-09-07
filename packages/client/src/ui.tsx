@@ -70,13 +70,13 @@ export const STEP_SKY: readonly BlobShape[] = [
 export const HOME_SKY: readonly BlobShape[] = [
   {
     src: 'aurora-home1.svg',
-    box: 'left-[33.33%] top-[-46.67%] w-[69.44%] h-[80%]',
-    bleed: 'inset-y-[-33.33%] inset-x-[-24%]',
+    box: 'left-[36.11%] top-[-28.89%] w-[69.44%] h-[80%]',
+    bleed: 'inset-y-[-27.78%] inset-x-[-20%]',
   },
   {
     src: 'aurora-home2.svg',
-    box: 'left-[-20.83%] top-[62.22%] w-[55.56%] h-[71.11%]',
-    bleed: 'inset-y-[-39.06%] inset-x-[-31.25%]',
+    box: 'left-[-19.44%] top-[46.67%] w-[56.94%] h-[73.33%]',
+    bleed: 'inset-y-[-30.3%] inset-x-[-24.39%]',
   },
 ];
 
