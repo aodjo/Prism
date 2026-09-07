@@ -286,10 +286,10 @@ enum Command {
     ///
     /// Everything that stops a Mac's sound reaching the wire produces one symptom:
     /// ScreenCaptureKit starts, delivers buffers on schedule, and fills every one with
-    /// zeroes. A denied Screen Recording grant does that, an output routed somewhere the mix
-    /// is not tapped does that, and so does a quiet room. Nothing downstream can tell them
-    /// apart, because a five byte Opus frame is the correct encoding of silence. This reads
-    /// the samples, which is the only place the three differ.
+    /// zeroes. A denied Screen Recording grant does that, a misconfigured capture does that,
+    /// and so does a quiet room. Nothing downstream can tell them apart, because a five byte
+    /// Opus frame is the correct encoding of silence — no error is raised anywhere along the
+    /// way. This reads the samples, which is the only place they differ.
     Audio {
         /// How long to listen, in seconds.
         #[arg(long, default_value_t = 3)]
@@ -498,14 +498,13 @@ fn listen(secs: u64, bitrate_bps: u32) -> Result<(), Box<dyn Error>> {
 
     if peak <= SILENCE_FLOOR {
         return Err(
-            "audio arrived on schedule but every sample was zero, which has three causes and \
-             they look identical from here. The machine may simply be silent — play something \
-             and try again. The output may be routed to a device whose mix is not tapped: \
-             observed with Bluetooth headphones, where switching back to the built-in speakers \
-             restores it. Or this binary may not hold the Screen Recording grant that system \
-             audio is behind, which is refused by delivering empty buffers rather than by \
-             failing, and is granted per binary in System Settings, Privacy & Security, \
-             Screen Recording."
+            "audio arrived on schedule but every sample was zero, which is either a quiet \
+             machine or a capture that has come adrift from the mix. Play something and try \
+             again first. If it stays silent, check that the application which launched this \
+             holds the Screen Recording grant that system audio is behind — a refused grant \
+             delivers empty buffers rather than failing, and the grant belongs to the \
+             launching application rather than to this binary, so a command line tool \
+             inherits the terminal's."
                 .into(),
         );
     }

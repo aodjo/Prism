@@ -16,12 +16,22 @@
 //! its own thread specifically to avoid. The cost is a video stream nobody reads, held to two
 //! pixels at one frame a second.
 //!
-//! # The machine's own playback is excluded
+//! # Nothing is excluded from the mix
 //!
-//! `excludesCurrentProcessAudio` keeps this process's own sound out of the mix. It matters
-//! most in a loopback test, where host and client are the same machine and the captured mix
-//! would otherwise include what the client just played — a feedback loop that builds until it
-//! is the only thing anybody can hear.
+//! `excludesCurrentProcessAudio` is deliberately off. It reads as harmless — a host plays no
+//! sound of its own, so there should be nothing of its own to exclude — but "current process"
+//! here means the *responsible* process, the application at the top of the launching chain,
+//! not this executable. Everything started from the same place is excluded with it.
+//!
+//! Measured: with the flag on, a tone played by another program launched from the same shell
+//! is captured as samples of exactly zero. Turning it off, and changing nothing else, captures
+//! it at -28.8 dBFS and encodes 82-byte Opus frames. A remote desktop exists to send what the
+//! machine is playing, and this flag silently decides that some of that does not count.
+//!
+//! The cost is a feedback loop when host and client run on one machine, since the client's
+//! playback is then part of the mix the host captures. The flag never prevented that anyway —
+//! the client is a separate process — and the answer to it is not to run both ends on one
+//! machine with sound on.
 
 #![cfg(target_os = "macos")]
 
@@ -277,7 +287,9 @@ impl SystemAudioCapture {
             stream_config.setCapturesAudio(true);
             stream_config.setSampleRate(SAMPLE_RATE as isize);
             stream_config.setChannelCount(CHANNELS as isize);
-            stream_config.setExcludesCurrentProcessAudio(true);
+            // Off deliberately; see the note at the top of this file. On, it silently drops
+            // audio from every process sharing this one's responsible process.
+            stream_config.setExcludesCurrentProcessAudio(false);
 
             // The picture this stream will not be read for. One frame a second rather than
             // none, because a stream configured to deliver no video at all is refused.
