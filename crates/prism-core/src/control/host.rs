@@ -839,10 +839,12 @@ fn keep_going(config: &HostConfig, stop: &AtomicBool, frames: u64) -> bool {
 
 /// Captures, encodes and sends until the session ends.
 ///
-/// The pipeline itself lives in [`crate::encode::pump`], shared with the command line. Five
-/// copies of it had grown across this repository and this one had fallen behind two of the
-/// fixes the others carried, with nothing to say so.
-#[cfg(target_os = "macos")]
+/// One function for every platform that can host, because the pipeline underneath it is
+/// [`crate::encode::pump::ScreenPump`] whichever machine this is. Five copies of this loop had
+/// grown across the repository and each had fallen behind a different fix, with nothing to say
+/// so; what differs between platforms is how a frame is captured and encoded, and that is the
+/// only thing left with two implementations.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn stream(
     config: &HostConfig,
     mut sender: SliceSender,
@@ -892,107 +894,6 @@ fn stream(
     }
 
     Ok(())
-}
-
-/// Captures, encodes and sends until the session ends.
-#[cfg(target_os = "windows")]
-fn stream(
-    config: &HostConfig,
-    mut sender: SliceSender,
-    shared: &Shared,
-    stop: &AtomicBool,
-) -> Result<(), String> {
-    use crate::capture::CaptureConfig;
-    use crate::capture::wgc::ScreenCapture;
-    use crate::encode::nv12::{Bgra2Nv12, Nv12Texture};
-    use crate::encode::nvenc::NvencEncoder;
-    use windows::core::Interface;
-
-    let mut capture = ScreenCapture::start(CaptureConfig {
-        fps: config.fps,
-        ..CaptureConfig::default()
-    })
-    .map_err(|err| err.to_string())?;
-
-    // Even dimensions, because NV12 subsamples chroma by two in both directions.
-    let (width, height) = (capture.width() & !1, capture.height() & !1);
-    let device = capture.device();
-
-    let target = Nv12Texture::new(device, width, height).map_err(|err| err.to_string())?;
-    let converter = Bgra2Nv12::new(device).map_err(|err| err.to_string())?;
-
-    let encoder_config = crate::encode::EncoderConfig {
-        codec: agreed_codec(&sender),
-        width,
-        height,
-        fps: config.fps,
-        bitrate_bps: config.bitrate_bps,
-        // NVENC counts slices rather than bytes, so this is the slice count.
-        max_slice_bytes: 4,
-    };
-
-    // SAFETY: the device and the texture both outlive the encoder, which is dropped when this
-    // function returns.
-    let mut encoder =
-        unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), encoder_config) }
-            .map_err(|err| err.to_string())?;
-
-    let started = Instant::now();
-    let interval = Duration::from_nanos(1_000_000_000 / u64::from(config.fps.max(1)));
-    let mut frames = 0u64;
-    let mut idle = 0u32;
-
-    while keep_going(config, stop, frames) {
-        let Some(captured) = capture.poll(interval) else {
-            idle += 1;
-            if idle > 200 {
-                return Err("the compositor stopped delivering frames".into());
-            }
-            continue;
-        };
-        idle = 0;
-
-        let Ok(bgra) = captured.texture() else {
-            continue;
-        };
-
-        let capture_ts_us = crate::clock::now_us();
-        let frame_id = frames as u32;
-
-        sender.note_capture(frame_id, capture_ts_us);
-        sender.send_cursor().map_err(|err| err.to_string())?;
-        if config.adaptive {
-            follow_target(&mut encoder, &sender);
-        }
-
-        converter
-            .convert(&bgra, &target)
-            .map_err(|err| err.to_string())?;
-        let frame = encoder
-            .encode(capture_ts_us, frames == 0)
-            .map_err(|err| err.to_string())?;
-
-        let last = frame.slices.len().saturating_sub(1);
-        for index in 0..frame.slices.len() {
-            let data = frame.slice(index).expect("slice index is in range");
-            sender
-                .send_slice(frame_id, data, capture_ts_us, frame.is_idr, index == last)
-                .map_err(|err| err.to_string())?;
-        }
-
-        frames += 1;
-        note(shared, &sender, frames, started);
-    }
-
-    Ok(())
-}
-
-/// Points NVENC at whatever bitrate the congestion controller currently wants.
-#[cfg(target_os = "windows")]
-fn follow_target(encoder: &mut crate::encode::nvenc::NvencEncoder, sender: &SliceSender) {
-    if let Some(target) = sender.target_bps() {
-        let _ = encoder.set_bitrate_bps(target);
-    }
 }
 
 /// Refuses to stream on a platform with no host implementation yet.
