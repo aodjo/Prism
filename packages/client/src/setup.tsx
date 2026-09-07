@@ -231,6 +231,10 @@ function Stage({
  */
 function Setup(): JSX.Element {
   const [step, setStep] = useState<Step>('welcome');
+  /** The screen on its way out, kept mounted only as long as it takes to leave. */
+  const [leaving, setLeaving] = useState<Step | null>(null);
+  /** Whether the move was backwards, which is the side both screens travel towards. */
+  const [back, setBack] = useState(false);
   const [version, setVersion] = useState('');
   const [settings, setSettings] = useState<Settings | null>(null);
   const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
@@ -290,7 +294,7 @@ function Setup(): JSX.Element {
   // The last screen is reached by the connection working, not by anybody pressing anything.
   useEffect(() => {
     if (step === 'connecting' && stream.phase === 'streaming' && (stream.stats?.frames ?? 0) > 0) {
-      setStep('ready');
+      go('ready');
     }
 
     if (step === 'connecting' && stream.phase === 'failed' && stream.log.length > 0) {
@@ -318,16 +322,32 @@ function Setup(): JSX.Element {
   // main process already carries for the same reason.
   useEffect(() => {
     Object.defineProperty(window, 'prismSetup', {
-      value: { show: setStep, draw: setStream, aim: setTarget },
+      value: { show: go, draw: setStream, aim: setTarget },
       configurable: true,
     });
   }, []);
+
+  /**
+   * Moves to another screen, and starts the one being left on its way out.
+   *
+   * Both are mounted for as long as the move takes, which is what makes it a move rather than
+   * a replacement.
+   */
+  const go = (next: Step): void => {
+    if (next === step) {
+      return;
+    }
+
+    setBack(STEPS.indexOf(next) < STEPS.indexOf(step));
+    setLeaving(step);
+    setStep(next);
+  };
 
   const advance = (): void => {
     const next = STEPS[STEPS.indexOf(step) + 1];
 
     if (next) {
-      setStep(next);
+      go(next);
     }
   };
 
@@ -341,7 +361,7 @@ function Setup(): JSX.Element {
   const open = async (host: string, where: string): Promise<void> => {
     setConnectError(null);
     setTarget(host);
-    setStep('connecting');
+    go('connecting');
 
     try {
       setStream(await prism.connect(host, where));
@@ -364,15 +384,362 @@ function Setup(): JSX.Element {
     };
   }, [step]);
 
+  /**
+   * Builds one screen.
+   *
+   * Takes which screen rather than reading the current one, because during a move there
+   * are two of them on the page and only one of them is current.
+   *
+   * @param {Step} which - The screen to build.
+   * @param {string} cls - What to lay it out with, which is how it is told to animate.
+   * @returns {JSX.Element} The screen.
+   */
+  const screenFor = (which: Step, cls: string): JSX.Element => (
+    <>
+      {which === 'welcome' && (
+        <section className={cls}>
+          <h1 className="max-w-[min(1040px,72.2vw)] text-hero font-semibold">
+            Your desktop.
+            <br />
+            Everywhere.
+          </h1>
+          <p className="mt-7 max-w-[min(700px,48.6vw)] text-lead text-muted">
+            Low-latency remote access for macOS, Windows, and Linux.
+          </p>
+          <div className="mt-7">
+            <Primary trailing="→" onClick={advance}>
+              Begin
+            </Primary>
+          </div>
+          {/* Somebody who already has machines does not need to be told what the product
+              is. What they need is the window their machines are in. */}
+          <button type="button" className="btn-ghost no-drag mt-7" onClick={finish}>
+            Already using PRISM? Restore my devices
+          </button>
+        </section>
+      )}
+
+      {which === 'intro' && (
+        <section className={cls}>
+          <PrismArt />
+          <h2 className="mt-4 max-w-[min(640px,44.4vw)] text-display font-semibold">
+            One machine, every screen.
+          </h2>
+          <p className="mt-4 max-w-[min(520px,36.1vw)] text-body text-muted">
+            PRISM streams your desktop to any other device you own — with latency low enough
+            that you stop noticing it&rsquo;s remote.
+          </p>
+        </section>
+      )}
+
+      {which === 'permissions' && (
+        <section className={cls}>
+          <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
+            A few permissions first
+          </h2>
+          <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
+            PRISM needs these to capture and control this machine.
+            <br />
+            Nothing is sent outside your own network.
+          </p>
+          <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
+            {GRANTS.map((grant) => {
+              // Local Network is stated as given rather than checked. There is no
+              // interface for asking the system about it, and by the time this screen is
+              // on a display the application has already used the network to draw it — so
+              // reporting anything else would be reporting a guess.
+              const has =
+                grant.id === 'screen'
+                  ? (held?.screen ?? false)
+                  : grant.id === 'input'
+                    ? (held?.input ?? false)
+                    : true;
+
+              return (
+                <div
+                  key={grant.id}
+                  className="flex items-center gap-4 py-5 pr-[18px] pl-[22px] not-first:border-t not-first:border-line-1"
+                >
+                  <span
+                    className={`flex size-[38px] flex-none items-center justify-center rounded-badge border text-body-2 font-medium ${grant.tint}`}
+                  >
+                    {grant.glyph}
+                  </span>
+                  <span className="flex min-w-0 flex-1 flex-col gap-1">
+                    <span className="text-body-2 font-medium">{grant.name}</span>
+                    <span className="text-note text-muted-2">{grant.why}</span>
+                  </span>
+                  {has ? (
+                    <span className="tag-granted">
+                      <span className="text-fine">✓</span>
+                      <span>Granted</span>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-secondary no-drag"
+                      onClick={() => {
+                        void (async () => {
+                          try {
+                            await prism.requestPermission(grant.id);
+                          } finally {
+                            // Redrawn either way. The system may have granted it, refused
+                            // it, or opened its own settings pane — and only the check
+                            // afterwards says which.
+                            setHeld(await prism.permissions());
+                          }
+                        })();
+                      }}
+                    >
+                      Allow
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-4 text-note text-dim">
+            You can change these later in Settings → Privacy.
+          </p>
+        </section>
+      )}
+
+      {which === 'device' && (
+        <section className={cls}>
+          <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
+            Add your first device
+          </h2>
+          <p className="mt-3.5 max-w-[min(580px,40.3vw)] text-body-2 text-muted">
+            Install PRISM on the machine you want to reach, then type the six characters it
+            shows on screen.
+          </p>
+
+          <CodeBoxes
+            disabled={pairing}
+            onComplete={(code) => {
+              void (async () => {
+                if (address.trim() === '') {
+                  setPairError('Type where that machine is, as address:port');
+                  return;
+                }
+
+                setPairError(null);
+                setPairing(true);
+
+                try {
+                  const paired = await prism.pair(address.trim(), code);
+
+                  // Remembered so that connecting does not ask for the same address a
+                  // second line later.
+                  const next = await prism.setSettings({
+                    addresses: { ...settings?.addresses, [paired.peer]: address.trim() },
+                  });
+                  setSettings(next);
+                  await open(paired.peer, address.trim());
+                } catch (error) {
+                  setPairError(reason(error));
+                } finally {
+                  setPairing(false);
+                }
+              })();
+            }}
+          />
+
+          {/* Where a machine is, for the case the design does not draw: pairing needs an
+              address, and there is none to be had until a rendezvous server is configured.
+              Kept quiet and out of the way of the code, which is what is being asked for. */}
+          <div className="mt-[18px] flex items-center gap-2.5">
+            <label htmlFor="pair-address" className="text-note-2 text-dim">
+              Showing that code at
+            </label>
+            <input
+              id="pair-address"
+              type="text"
+              spellCheck={false}
+              placeholder="192.168.0.14:47100"
+              value={address}
+              onChange={(event) => {
+                setAddress(event.target.value);
+              }}
+              className="no-drag w-60 rounded-pill border border-line-2 bg-wash-1 px-3 py-[7px] text-center text-note-2 text-ink-3 placeholder:text-dim-2 focus:border-[rgba(124,92,255,0.6)] focus:text-ink focus:outline-none"
+            />
+          </div>
+
+          <div className="mt-[34px] flex w-[min(620px,43.1vw)] items-center gap-4 text-note-2 text-dim before:h-px before:flex-1 before:bg-line-2 before:content-[''] after:h-px after:flex-1 after:bg-line-2 after:content-['']">
+            or pick one nearby
+          </div>
+
+          <div className="mt-8 flex w-[min(620px,43.1vw)] flex-col gap-2.5 text-left">
+            {known.length === 0 ? (
+              <div className="py-[18px] text-center text-note text-dim">
+                Nothing yet — a code above is how the first one arrives
+              </div>
+            ) : (
+              known.map((key) => {
+                const where = settings?.addresses[key] ?? '';
+
+                return (
+                  <div
+                    key={key}
+                    className="flex items-center gap-3.5 rounded-panel border border-line-2 bg-wash-1 py-3.5 pr-3.5 pl-[18px]"
+                  >
+                    <img
+                      src={where ? 'assets/status-live-04.svg' : 'assets/status-idle-04.svg'}
+                      alt=""
+                      className="block size-2 flex-none overflow-visible"
+                    />
+                    <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
+                      <span className="text-row font-medium">{machineName(key)}</span>
+                      <span className="text-fine-2 leading-tight text-muted-2">
+                        {where || 'through the rendezvous server'}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-secondary no-drag"
+                      onClick={() => {
+                        void open(key, where);
+                      }}
+                    >
+                      Connect
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <Trouble message={pairError} className="mt-4" />
+        </section>
+      )}
+
+      {which === 'connecting' && (
+        <section className={cls}>
+          <Pulse />
+          <h2 className="mt-5 max-w-[min(700px,48.6vw)] text-title font-semibold">
+            Connecting to {machineName(target ?? '')}
+          </h2>
+          <p className="mt-2.5 whitespace-pre-wrap text-fine text-muted-2">
+            {settings?.addresses[target ?? '']
+              ? `${settings.addresses[target ?? '']}  ·  direct on your LAN  ·  no relay`
+              : 'through the rendezvous server'}
+          </p>
+          <div className="mt-[59px] w-[min(500px,34.7vw)] overflow-hidden rounded-panel border border-line-2 bg-wash-1 text-left">
+            <Stage
+              state={stream.terms !== null || stream.phase === 'streaming' ? 'done' : 'doing'}
+              what="Secure handshake"
+              detail="Ed25519"
+            />
+            <Stage
+              state={
+                stream.terms !== null
+                  ? 'done'
+                  : stream.phase === 'streaming'
+                    ? 'doing'
+                    : 'waiting'
+              }
+              what="Negotiating codec"
+              detail={
+                stream.terms
+                  ? stream.stats
+                    ? `${stream.terms.codec} · ${stream.stats.mbps.toFixed(0)} Mbps`
+                    : stream.terms.codec
+                  : '—'
+              }
+            />
+            <Stage
+              state={
+                (stream.stats?.frames ?? 0) > 0
+                  ? 'done'
+                  : stream.terms !== null
+                    ? 'doing'
+                    : 'waiting'
+              }
+              what="Opening video stream"
+              detail={
+                stream.terms
+                  ? stream.terms.width
+                    ? `${stream.terms.width} × ${stream.terms.height} @ ${stream.terms.fps} Hz`
+                    : `the host's screen @ ${stream.terms.fps} Hz`
+                  : '—'
+              }
+            />
+          </div>
+          <button
+            type="button"
+            className="btn-ghost no-drag mt-[22px]"
+            onClick={() => {
+              void (async () => {
+                setStream(await prism.disconnect());
+                go('device');
+              })();
+            }}
+          >
+            Cancel
+          </button>
+          <Trouble message={connectError} className="mt-4" />
+        </section>
+      )}
+
+      {which === 'ready' && (
+        <section className={cls}>
+          <span className="inline-flex items-center gap-2 rounded-pill border border-[rgba(77,232,176,0.24)] bg-[rgba(77,232,176,0.12)] py-2 pr-4 pl-3.5 text-note-2 font-medium tracking-[0.3px] text-mint">
+            <img src="assets/dot-ready.svg" alt="" className="block size-[7px] overflow-visible" />
+            Connected
+          </span>
+          <h2 className="mt-[19px] max-w-[min(760px,52.8vw)] text-triumph font-semibold">
+            You&rsquo;re all set.
+          </h2>
+          <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
+            {machineName(stream.host ?? target ?? '')} is live. Press ⌘↵ from anywhere to
+            jump straight back in.
+          </p>
+          <div className="card mt-[26px] flex w-[min(560px,38.9vw)]">
+            <Figure
+              label="LATENCY"
+              tone="text-mint"
+              value={stream.stats ? `${latency(stream.stats.rttMs)} ms` : '—'}
+            />
+            <Figure label="CODEC" tone="text-cyan" value={stream.terms?.codec ?? '—'} />
+            <Figure
+              label="DISPLAY"
+              tone="text-violet"
+              value={
+                stream.terms
+                  ? stream.terms.height
+                    ? `${stream.terms.height}p · ${stream.terms.fps} Hz`
+                    : `${stream.terms.fps} Hz`
+                  : '—'
+              }
+            />
+          </div>
+          <div className="mt-[23px]">
+            <Primary trailing="⌘↵" onClick={finish}>
+              Enter PRISM
+            </Primary>
+          </div>
+        </section>
+      )}
+    </>
+  );
+
   const dots = STEP_DOTS[step];
 
   return (
     <>
       <div className="drag fixed inset-x-0 top-0 z-[3] h-11" />
+      {/* Both skies are always on the page and one of them is faded out. Swapping the images
+          instead would pop the whole backdrop at the moment the screens are halfway through
+          moving, which is the one moment nobody is looking at the aurora. */}
       <Backdrop
-        key={step === 'welcome' ? 'welcome' : 'steps'}
-        sky={step === 'welcome' ? WELCOME_SKY : STEP_SKY}
+        sky={WELCOME_SKY}
         vignette
+        className={`transition-opacity duration-700 ${step === 'welcome' ? 'opacity-100' : 'opacity-0'}`}
+      />
+      <Backdrop
+        sky={STEP_SKY}
+        vignette
+        className={`transition-opacity duration-700 ${step === 'welcome' ? 'opacity-0' : 'opacity-100'}`}
       />
 
       {/* The comp insets its four corners by different amounts — the wordmark sits further in
@@ -390,334 +757,37 @@ function Setup(): JSX.Element {
           )}
         </div>
 
-        <div className="flex min-h-0 flex-1 items-center justify-center">
-          {step === 'welcome' && (
-            <section className={SCREEN}>
-              <h1 className="max-w-[min(1040px,72.2vw)] text-hero font-semibold">
-                Your desktop.
-                <br />
-                Everywhere.
-              </h1>
-              <p className="mt-7 max-w-[min(700px,48.6vw)] text-lead text-muted">
-                Low-latency remote access for macOS, Windows, and Linux.
-              </p>
-              <div className="mt-7">
-                <Primary trailing="→" onClick={advance}>
-                  Begin
-                </Primary>
-              </div>
-              {/* Somebody who already has machines does not need to be told what the product
-                  is. What they need is the window their machines are in. */}
-              <button type="button" className="btn-ghost no-drag mt-7" onClick={finish}>
-                Already using PRISM? Restore my devices
-              </button>
-            </section>
+        {/* Both screens are in the same cell while one is arriving and the other leaving, so
+            the move is a move rather than a jump through an empty page. */}
+        <div className="grid min-h-0 flex-1 place-items-center overflow-hidden">
+          {leaving !== null && (
+            <div
+              key={`leaving-${leaving}`}
+              aria-hidden
+              className={`pointer-events-none col-start-1 row-start-1 ${
+                back ? 'animate-[slide-out-back_260ms_ease-in_both]' : 'animate-[slide-out-forward_260ms_ease-in_both]'
+              }`}
+              onAnimationEnd={() => {
+                setLeaving(null);
+              }}
+            >
+              {screenFor(leaving, SCREEN)}
+            </div>
           )}
-
-          {step === 'intro' && (
-            <section className={SCREEN}>
-              <PrismArt />
-              <h2 className="mt-4 max-w-[min(640px,44.4vw)] text-display font-semibold">
-                One machine, every screen.
-              </h2>
-              <p className="mt-4 max-w-[min(520px,36.1vw)] text-body text-muted">
-                PRISM streams your desktop to any other device you own — with latency low enough
-                that you stop noticing it&rsquo;s remote.
-              </p>
-            </section>
-          )}
-
-          {step === 'permissions' && (
-            <section className={SCREEN}>
-              <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-                A few permissions first
-              </h2>
-              <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
-                PRISM needs these to capture and control this machine.
-                <br />
-                Nothing is sent outside your own network.
-              </p>
-              <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
-                {GRANTS.map((grant) => {
-                  // Local Network is stated as given rather than checked. There is no
-                  // interface for asking the system about it, and by the time this screen is
-                  // on a display the application has already used the network to draw it — so
-                  // reporting anything else would be reporting a guess.
-                  const has =
-                    grant.id === 'screen'
-                      ? (held?.screen ?? false)
-                      : grant.id === 'input'
-                        ? (held?.input ?? false)
-                        : true;
-
-                  return (
-                    <div
-                      key={grant.id}
-                      className="flex items-center gap-4 py-5 pr-[18px] pl-[22px] not-first:border-t not-first:border-line-1"
-                    >
-                      <span
-                        className={`flex size-[38px] flex-none items-center justify-center rounded-badge border text-body-2 font-medium ${grant.tint}`}
-                      >
-                        {grant.glyph}
-                      </span>
-                      <span className="flex min-w-0 flex-1 flex-col gap-1">
-                        <span className="text-body-2 font-medium">{grant.name}</span>
-                        <span className="text-note text-muted-2">{grant.why}</span>
-                      </span>
-                      {has ? (
-                        <span className="tag-granted">
-                          <span className="text-fine">✓</span>
-                          <span>Granted</span>
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn-secondary no-drag"
-                          onClick={() => {
-                            void (async () => {
-                              try {
-                                await prism.requestPermission(grant.id);
-                              } finally {
-                                // Redrawn either way. The system may have granted it, refused
-                                // it, or opened its own settings pane — and only the check
-                                // afterwards says which.
-                                setHeld(await prism.permissions());
-                              }
-                            })();
-                          }}
-                        >
-                          Allow
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <p className="mt-4 text-note text-dim">
-                You can change these later in Settings → Privacy.
-              </p>
-            </section>
-          )}
-
-          {step === 'device' && (
-            <section className={SCREEN}>
-              <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-                Add your first device
-              </h2>
-              <p className="mt-3.5 max-w-[min(580px,40.3vw)] text-body-2 text-muted">
-                Install PRISM on the machine you want to reach, then type the six characters it
-                shows on screen.
-              </p>
-
-              <CodeBoxes
-                disabled={pairing}
-                onComplete={(code) => {
-                  void (async () => {
-                    if (address.trim() === '') {
-                      setPairError('Type where that machine is, as address:port');
-                      return;
-                    }
-
-                    setPairError(null);
-                    setPairing(true);
-
-                    try {
-                      const paired = await prism.pair(address.trim(), code);
-
-                      // Remembered so that connecting does not ask for the same address a
-                      // second line later.
-                      const next = await prism.setSettings({
-                        addresses: { ...settings?.addresses, [paired.peer]: address.trim() },
-                      });
-                      setSettings(next);
-                      await open(paired.peer, address.trim());
-                    } catch (error) {
-                      setPairError(reason(error));
-                    } finally {
-                      setPairing(false);
-                    }
-                  })();
-                }}
-              />
-
-              {/* Where a machine is, for the case the design does not draw: pairing needs an
-                  address, and there is none to be had until a rendezvous server is configured.
-                  Kept quiet and out of the way of the code, which is what is being asked for. */}
-              <div className="mt-[18px] flex items-center gap-2.5">
-                <label htmlFor="pair-address" className="text-note-2 text-dim">
-                  Showing that code at
-                </label>
-                <input
-                  id="pair-address"
-                  type="text"
-                  spellCheck={false}
-                  placeholder="192.168.0.14:47100"
-                  value={address}
-                  onChange={(event) => {
-                    setAddress(event.target.value);
-                  }}
-                  className="no-drag w-60 rounded-pill border border-line-2 bg-wash-1 px-3 py-[7px] text-center text-note-2 text-ink-3 placeholder:text-dim-2 focus:border-[rgba(124,92,255,0.6)] focus:text-ink focus:outline-none"
-                />
-              </div>
-
-              <div className="mt-[34px] flex w-[min(620px,43.1vw)] items-center gap-4 text-note-2 text-dim before:h-px before:flex-1 before:bg-line-2 before:content-[''] after:h-px after:flex-1 after:bg-line-2 after:content-['']">
-                or pick one nearby
-              </div>
-
-              <div className="mt-8 flex w-[min(620px,43.1vw)] flex-col gap-2.5 text-left">
-                {known.length === 0 ? (
-                  <div className="py-[18px] text-center text-note text-dim">
-                    Nothing yet — a code above is how the first one arrives
-                  </div>
-                ) : (
-                  known.map((key) => {
-                    const where = settings?.addresses[key] ?? '';
-
-                    return (
-                      <div
-                        key={key}
-                        className="flex items-center gap-3.5 rounded-panel border border-line-2 bg-wash-1 py-3.5 pr-3.5 pl-[18px]"
-                      >
-                        <img
-                          src={where ? 'assets/status-live-04.svg' : 'assets/status-idle-04.svg'}
-                          alt=""
-                          className="block size-2 flex-none overflow-visible"
-                        />
-                        <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
-                          <span className="text-row font-medium">{machineName(key)}</span>
-                          <span className="text-fine-2 leading-tight text-muted-2">
-                            {where || 'through the rendezvous server'}
-                          </span>
-                        </span>
-                        <button
-                          type="button"
-                          className="btn-secondary no-drag"
-                          onClick={() => {
-                            void open(key, where);
-                          }}
-                        >
-                          Connect
-                        </button>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-
-              <Trouble message={pairError} className="mt-4" />
-            </section>
-          )}
-
-          {step === 'connecting' && (
-            <section className={SCREEN}>
-              <Pulse />
-              <h2 className="mt-5 max-w-[min(700px,48.6vw)] text-title font-semibold">
-                Connecting to {machineName(target ?? '')}
-              </h2>
-              <p className="mt-2.5 whitespace-pre-wrap text-fine text-muted-2">
-                {settings?.addresses[target ?? '']
-                  ? `${settings.addresses[target ?? '']}  ·  direct on your LAN  ·  no relay`
-                  : 'through the rendezvous server'}
-              </p>
-              <div className="mt-[59px] w-[min(500px,34.7vw)] overflow-hidden rounded-panel border border-line-2 bg-wash-1 text-left">
-                <Stage
-                  state={stream.terms !== null || stream.phase === 'streaming' ? 'done' : 'doing'}
-                  what="Secure handshake"
-                  detail="Ed25519"
-                />
-                <Stage
-                  state={
-                    stream.terms !== null
-                      ? 'done'
-                      : stream.phase === 'streaming'
-                        ? 'doing'
-                        : 'waiting'
-                  }
-                  what="Negotiating codec"
-                  detail={
-                    stream.terms
-                      ? stream.stats
-                        ? `${stream.terms.codec} · ${stream.stats.mbps.toFixed(0)} Mbps`
-                        : stream.terms.codec
-                      : '—'
-                  }
-                />
-                <Stage
-                  state={
-                    (stream.stats?.frames ?? 0) > 0
-                      ? 'done'
-                      : stream.terms !== null
-                        ? 'doing'
-                        : 'waiting'
-                  }
-                  what="Opening video stream"
-                  detail={
-                    stream.terms
-                      ? stream.terms.width
-                        ? `${stream.terms.width} × ${stream.terms.height} @ ${stream.terms.fps} Hz`
-                        : `the host's screen @ ${stream.terms.fps} Hz`
-                      : '—'
-                  }
-                />
-              </div>
-              <button
-                type="button"
-                className="btn-ghost no-drag mt-[22px]"
-                onClick={() => {
-                  void (async () => {
-                    setStream(await prism.disconnect());
-                    setStep('device');
-                  })();
-                }}
-              >
-                Cancel
-              </button>
-              <Trouble message={connectError} className="mt-4" />
-            </section>
-          )}
-
-          {step === 'ready' && (
-            <section className={SCREEN}>
-              <span className="inline-flex items-center gap-2 rounded-pill border border-[rgba(77,232,176,0.24)] bg-[rgba(77,232,176,0.12)] py-2 pr-4 pl-3.5 text-note-2 font-medium tracking-[0.3px] text-mint">
-                <img src="assets/dot-ready.svg" alt="" className="block size-[7px] overflow-visible" />
-                Connected
-              </span>
-              <h2 className="mt-[19px] max-w-[min(760px,52.8vw)] text-triumph font-semibold">
-                You&rsquo;re all set.
-              </h2>
-              <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
-                {machineName(stream.host ?? target ?? '')} is live. Press ⌘↵ from anywhere to
-                jump straight back in.
-              </p>
-              <div className="card mt-[26px] flex w-[min(560px,38.9vw)]">
-                <Figure
-                  label="LATENCY"
-                  tone="text-mint"
-                  value={stream.stats ? `${latency(stream.stats.rttMs)} ms` : '—'}
-                />
-                <Figure label="CODEC" tone="text-cyan" value={stream.terms?.codec ?? '—'} />
-                <Figure
-                  label="DISPLAY"
-                  tone="text-violet"
-                  value={
-                    stream.terms
-                      ? stream.terms.height
-                        ? `${stream.terms.height}p · ${stream.terms.fps} Hz`
-                        : `${stream.terms.fps} Hz`
-                      : '—'
-                  }
-                />
-              </div>
-              <div className="mt-[23px]">
-                <Primary trailing="⌘↵" onClick={finish}>
-                  Enter PRISM
-                </Primary>
-              </div>
-            </section>
-          )}
+          <div
+            key={step}
+            className={`col-start-1 row-start-1 ${
+              back ? 'animate-[slide-in-back_420ms_ease-out_both]' : 'animate-[slide-in-forward_420ms_ease-out_both]'
+            }`}
+          >
+            {screenFor(step, `${SCREEN} rise`)}
+          </div>
         </div>
 
-        <div className="flex h-14 flex-none items-center justify-between">
+        <div
+          key={`nav-${step}`}
+          className="flex h-14 flex-none animate-[fade-in_420ms_ease-out_both] items-center justify-between"
+        >
           {dots ? <img src={dots} alt="" className="block h-1.5 w-[70px]" /> : <span />}
           {step === 'welcome' && (
             <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>

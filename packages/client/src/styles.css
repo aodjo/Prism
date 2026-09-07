@@ -211,6 +211,45 @@
   .card {
     @apply overflow-hidden rounded-2xl border border-line-3 bg-wash-2;
   }
+
+  /* Every direct child of a screen rises, each one a beat after the one above it. Written
+     against position rather than given a class per element, so a screen that gains a line does
+     not also have to be told where that line sits in the order. */
+  .rise > * {
+    animation: rise 460ms cubic-bezier(0.22, 1.2, 0.36, 1) both;
+  }
+
+  .rise > *:nth-child(1) {
+    animation-delay: 120ms;
+  }
+
+  .rise > *:nth-child(2) {
+    animation-delay: 175ms;
+  }
+
+  .rise > *:nth-child(3) {
+    animation-delay: 230ms;
+  }
+
+  .rise > *:nth-child(4) {
+    animation-delay: 285ms;
+  }
+
+  .rise > *:nth-child(5) {
+    animation-delay: 340ms;
+  }
+
+  .rise > *:nth-child(6) {
+    animation-delay: 395ms;
+  }
+
+  .rise > *:nth-child(7) {
+    animation-delay: 450ms;
+  }
+
+  .rise > *:nth-child(n + 8) {
+    animation-delay: 505ms;
+  }
 }
 
 @layer utilities {
@@ -221,6 +260,57 @@
 
   .no-drag {
     -webkit-app-region: no-drag;
+  }
+}
+
+/* Moving between screens.
+   The page arrives from the side it came from, and what is on it lifts into place a beat
+   behind — a page that simply replaced the last one would leave somebody checking whether
+   anything happened. The lift overshoots very slightly and settles, which is what makes it
+   read as rising rather than as sliding up. */
+@keyframes slide-in-forward {
+  from {
+    transform: translateX(64px);
+  }
+}
+
+@keyframes slide-in-back {
+  from {
+    transform: translateX(-64px);
+  }
+}
+
+@keyframes slide-out-forward {
+  to {
+    opacity: 0;
+    transform: translateX(-64px);
+  }
+}
+
+@keyframes slide-out-back {
+  to {
+    opacity: 0;
+    transform: translateX(64px);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

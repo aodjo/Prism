@@ -89,17 +89,20 @@ export const HOME_SKY: readonly BlobShape[] = [
  * @param {object} props - What to draw.
  * @param {readonly BlobShape[]} props.sky - Which arrangement of shapes.
  * @param {boolean} [props.vignette] - Whether the light falls off at the edges.
+ * @param {string} [props.className] - Anything the window wants to add, such as a fade.
  * @returns {JSX.Element} The backdrop.
  */
 export function Backdrop({
   sky,
   vignette = false,
+  className = '',
 }: {
   sky: readonly BlobShape[];
   vignette?: boolean;
+  className?: string;
 }): JSX.Element {
   return (
-    <div className="dither pointer-events-none fixed inset-0 z-0 overflow-hidden">
+    <div className={`dither pointer-events-none fixed inset-0 z-0 overflow-hidden ${className}`}>
       {sky.map((blob) => (
         <div key={blob.src} className={`absolute mix-blend-screen ${blob.box}`}>
           <img src={`assets/${blob.src}`} alt="" className={`absolute block max-w-none ${blob.bleed}`} />
