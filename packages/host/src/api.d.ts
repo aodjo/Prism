@@ -15,6 +15,35 @@
  * double counts exactly, and a byte total that quietly starts rounding is a statistic that
  * lies rather than one that is merely imprecise.
  */
+/**
+ * One thing the system still has to allow.
+ *
+ * Reported rather than assumed because both grants fail quietly: capture without Screen
+ * Recording delivers black frames and silence, injection without Accessibility posts events
+ * that go nowhere, and neither raises an error. A host that did not ask first looks like one
+ * that is working and is not.
+ */
+export interface MissingGrant {
+  /** Which grant this is: `screen` or `input`. */
+  readonly id: string;
+  /** What the system's own settings call it. */
+  readonly name: string;
+  /** Why a host needs it, in one sentence. */
+  readonly purpose: string;
+  /** A link that opens the settings pane holding it. */
+  readonly settingsUrl: string;
+}
+
+/** What this machine currently allows a host to do. */
+export interface HostPermissions {
+  /** Whether the screen may be recorded, which also covers capturing its audio. */
+  readonly screen: boolean;
+  /** Whether this machine may be controlled. */
+  readonly input: boolean;
+  /** What is still missing, ready to show. */
+  readonly missing: readonly MissingGrant[];
+}
+
 export interface HostSnapshot {
   /** `opening`, `waiting`, `streaming`, `stopped` or `failed`. */
   readonly phase: string;
@@ -98,6 +127,26 @@ export interface PrismApi {
    * @returns {Promise<Identity>} The core's version, this machine's public key, and its peers.
    */
   identity(): Promise<Identity>;
+
+  /**
+   * Returns what the system allows, without prompting for anything.
+   *
+   * Safe to call whenever the panel redraws.
+   *
+   * @returns {Promise<HostPermissions>} What is held and what is missing.
+   */
+  permissions(): Promise<HostPermissions>;
+
+  /**
+   * Asks the system for one grant, opening its settings pane if the answer is already no.
+   *
+   * The system prompts at most once in the life of an application; after that only a person
+   * can change the answer, so a refusal here sends them where they can.
+   *
+   * @param {string} id - Which grant, as `MissingGrant.id`.
+   * @returns {Promise<HostPermissions>} What is held afterwards.
+   */
+  requestPermission(id: string): Promise<HostPermissions>;
 
   /**
    * Returns the stored settings.

@@ -95,6 +95,87 @@ pub fn generate_pairing_code() -> napi::Result<String> {
     Ok(Pin::generate().map_err(to_napi)?.to_display())
 }
 
+/// One thing the system still has to allow.
+#[napi(object)]
+pub struct MissingGrant {
+    /// Which grant this is: `screen` or `input`.
+    pub id: String,
+    /// What the system's own settings call it.
+    pub name: String,
+    /// Why a host needs it, in one sentence.
+    pub purpose: String,
+    /// A link that opens the settings pane holding it.
+    pub settings_url: String,
+}
+
+/// What this machine currently allows a host to do.
+#[napi(object)]
+pub struct HostPermissions {
+    /// Whether the screen may be recorded, which also covers capturing its audio.
+    pub screen: bool,
+    /// Whether this machine may be controlled.
+    pub input: bool,
+    /// What is still missing, ready to show.
+    pub missing: Vec<MissingGrant>,
+}
+
+/// Returns what the system allows, without prompting for anything.
+///
+/// Both grants fail quietly when missing — capture delivers black frames and silence,
+/// injection posts events that go nowhere — so an interface that did not ask would show a
+/// host that looks like it is working and is not.
+///
+/// `controlling` says whether the session will accept the client's input. A host that only
+/// shows its screen is not asked to justify wanting control of the machine.
+///
+/// Safe to call as often as a window redraws: nothing here prompts.
+#[napi]
+#[must_use]
+pub fn permissions(controlling: bool) -> HostPermissions {
+    let held = prism_core::control::permissions::check();
+
+    HostPermissions {
+        screen: held.screen,
+        input: held.input,
+        missing: held
+            .missing(controlling)
+            .into_iter()
+            .map(|grant| MissingGrant {
+                id: match grant {
+                    prism_core::control::permissions::Grant::Screen => "screen",
+                    prism_core::control::permissions::Grant::Input => "input",
+                }
+                .to_string(),
+                name: grant.name().to_string(),
+                purpose: grant.purpose().to_string(),
+                settings_url: grant.settings_url().to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// Asks the system for one grant, and reports whether it is now held.
+///
+/// The system prompts at most once in the life of an application. A `false` afterwards means
+/// the answer is standing and only a person can change it, in the pane `settingsUrl` names —
+/// so a caller that gets `false` should offer to open that rather than ask again.
+///
+/// # Errors
+///
+/// Fails if `id` is not a grant this build knows.
+#[napi]
+pub fn request_permission(id: String) -> napi::Result<bool> {
+    use prism_core::control::permissions::Grant;
+
+    let grant = match id.as_str() {
+        "screen" => Grant::Screen,
+        "input" => Grant::Input,
+        other => return Err(napi::Error::from_reason(format!("no such grant: {other}"))),
+    };
+
+    Ok(prism_core::control::permissions::request(grant))
+}
+
 /// Waits for one client to pair using `code`, and returns its public key as hex.
 ///
 /// The code is single use: whether the attempt succeeds or fails, this call is finished with

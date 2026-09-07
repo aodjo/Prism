@@ -9,7 +9,7 @@
  * in this context and no way to reach a key.
  */
 
-import type { HostSnapshot, PrismApi, Settings } from './api.js';
+import type { HostPermissions, HostSnapshot, PrismApi, Settings } from './api.js';
 
 declare global {
   interface Window {
@@ -326,7 +326,13 @@ function listen(): void {
   });
 
   input('inject').addEventListener('change', (event) => {
-    void save({ injectInput: (event.target as HTMLInputElement).checked });
+    void (async () => {
+      await save({ injectInput: (event.target as HTMLInputElement).checked });
+      // Accessibility is only needed by a host that accepts control, so turning that on is
+      // the moment it becomes worth asking for and turning it off is the moment it stops.
+      renderPermissions(await prism.permissions());
+      fit();
+    })();
   });
 
   input('autostart').addEventListener('change', (event) => {
@@ -350,6 +356,54 @@ function fit(): void {
 }
 
 /**
+ * Draws what the system still has to allow, and hides the section when it allows everything.
+ *
+ * Shown above the paired devices rather than below the settings, because a host missing a
+ * grant is not misconfigured — it is about to run and produce a black screen, and that is
+ * worth reading before anything else on this panel.
+ *
+ * @param {HostPermissions} held - What the system currently allows.
+ * @returns {void}
+ */
+function renderPermissions(held: HostPermissions): void {
+  const section = el('permissions-section');
+  const list = el('permissions');
+
+  section.hidden = held.missing.length === 0;
+  list.textContent = '';
+
+  for (const grant of held.missing) {
+    const row = document.createElement('div');
+    row.className = 'grant';
+
+    const text = document.createElement('div');
+    const name = document.createElement('div');
+    name.textContent = grant.name;
+    const why = document.createElement('div');
+    why.className = 'why';
+    why.textContent = `Needed ${grant.purpose}.`;
+    text.append(name, why);
+
+    const button = document.createElement('button');
+    button.className = 'primary';
+    button.textContent = 'Allow';
+    button.addEventListener('click', () => {
+      void (async () => {
+        // The system prompts once. If it has already been answered, the main process opens
+        // the settings pane instead, and the panel is redrawn when the window is next
+        // shown — a grant changed in Settings does not reach a running application.
+        button.disabled = true;
+        renderPermissions(await prism.requestPermission(grant.id));
+        fit();
+      })();
+    });
+
+    row.append(text, button);
+    list.append(row);
+  }
+}
+
+/**
  * Fills the panel in with what the machine currently is and is doing.
  *
  * @async
@@ -363,6 +417,7 @@ async function start(): Promise<void> {
   renderPeers(identity.peers);
 
   await loadSettings();
+  renderPermissions(await prism.permissions());
   render(await prism.snapshot());
   fit();
 }
