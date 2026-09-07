@@ -312,6 +312,22 @@ function Setup(): JSX.Element {
    * screen is drawn the question has been answered.
    */
   const [joining, setJoining] = useState(true);
+  /**
+   * Whether somebody signed in during this run of the flow.
+   *
+   * Separate from being signed in at all: arriving already signed in skips the screen, but
+   * having just typed a password into it deserves an answer rather than a screen that changes
+   * out from under you.
+   */
+  const [greeted, setGreeted] = useState(false);
+  /**
+   * Whether this run of the flow started with somebody already signed in.
+   *
+   * Whether to show the account screen is settled once, on arrival. Asking again after somebody
+   * signs in would take the screen they are standing on out of the count while they are still
+   * standing on it, and the dots would lose one under them.
+   */
+  const [arrivedSignedIn, setArrivedSignedIn] = useState(false);
   const [accountTrouble, setAccountTrouble] = useState<string | null>(null);
 
   /**
@@ -338,6 +354,7 @@ function Setup(): JSX.Element {
       setSettings(stored);
       setDevices(account.devices);
       setSignedIn(account.email);
+      setArrivedSignedIn(account.email !== null);
 
       // Both sources, minus this machine. A machine arrives here either by having been paired
       // with or by being on the account, and setup should offer whichever is already true.
@@ -411,7 +428,7 @@ function Setup(): JSX.Element {
    * Only the account screen ever does: somebody already signed in has answered it, and showing
    * them a page that says so and offers a button to leave is a page that wastes their time.
    */
-  const answered = (which: Step): boolean => which === 'account' && signedIn !== null;
+  const answered = (which: Step): boolean => which === 'account' && arrivedSignedIn;
 
   const advance = (): void => {
     for (let at = STEPS.indexOf(step) + 1; at < STEPS.length; at += 1) {
@@ -453,7 +470,7 @@ function Setup(): JSX.Element {
         );
         setPassword('');
         setTotp('');
-        advance();
+        setGreeted(true);
       } catch (error) {
         setAccountTrouble(reason(error));
       } finally {
@@ -579,17 +596,25 @@ function Setup(): JSX.Element {
       {which === 'account' && (
         <section className={cls}>
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-            {enrolment ? 'One more thing' : joining ? 'Create your account' : 'Welcome back'}
+            {greeted
+              ? `Hello, ${signedIn ?? ''}`
+              : enrolment
+                ? 'One more thing'
+                : joining
+                  ? 'Create your account'
+                  : 'Welcome back'}
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
-            {enrolment
-              ? 'Set up the second factor now. It is the only time it is shown.'
-              : joining
-                ? 'An account is how your machines find each other. Without one they still pair, by reading a code off the other screen.'
-                : 'Sign in and every machine on your account finds this one.'}
+            {greeted
+              ? 'Every machine on this account now knows about this one, and this one knows about them.'
+              : enrolment
+                ? 'Set up the second factor now. It is the only time it is shown.'
+                : joining
+                  ? 'An account is how your machines find each other. Without one they still pair, by reading a code off the other screen.'
+                  : 'Sign in and every machine on your account finds this one.'}
           </p>
 
-          {enrolment ? (
+          {greeted ? null : enrolment ? (
             <div className="card mt-9 w-[min(440px,30.6vw)] p-6">
               <p className="mx-auto max-w-[36ch] text-note leading-normal text-dim">
                 Scan this with an authenticator app. It is shown once — the server keeps only
@@ -690,7 +715,7 @@ function Setup(): JSX.Element {
 
           <Trouble message={accountTrouble} className="mt-4" />
 
-          {enrolment === null && (
+          {enrolment === null && !greeted && (
             <button
               type="button"
               className="btn-ghost no-drag mt-5"
@@ -706,7 +731,7 @@ function Setup(): JSX.Element {
 
           {/* An account is worth having and not worth being trapped by: a machine with none
               still pairs by code, which is what the device screen is for either way. */}
-          {enrolment === null && (
+          {enrolment === null && !greeted && (
             <button type="button" className="btn-ghost no-drag mt-2.5" onClick={advance}>
               Continue without an account
             </button>
@@ -1077,7 +1102,7 @@ function Setup(): JSX.Element {
           {step === 'welcome' && (
             <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>
           )}
-          {HAS_NEXT.has(step) && (
+          {(HAS_NEXT.has(step) || (step === 'account' && greeted)) && (
             <Primary trailing="→" onClick={advance}>
               Continue
             </Primary>
