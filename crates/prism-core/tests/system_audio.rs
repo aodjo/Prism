@@ -59,9 +59,9 @@ fn what_the_machine_is_playing_reaches_the_capture() {
     );
     assert!(
         peak > 0.001,
-        "audio arrived but every sample was zero. Either nothing was playing, or the output \
-         is routed somewhere the mix is not tapped — observed with Bluetooth headphones, \
-         where the built-in speakers work and AirPods do not"
+        "audio arrived but every sample was zero. Either nothing was playing, or the capture \
+         has come adrift from the mix — which is what `excludesCurrentProcessAudio` does when \
+         the sound comes from anything sharing this process's responsible process"
     );
 }
 
