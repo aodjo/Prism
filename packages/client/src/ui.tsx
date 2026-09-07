@@ -148,7 +148,8 @@ export function Wordmark({ size = 'lg' }: { size?: 'lg' | 'sm' }): JSX.Element {
  *
  * @param {object} props - What to draw.
  * @param {ReactNode} props.children - The label.
- * @param {string} [props.trailing] - The key or arrow shown in a chip after it.
+ * @param {string} [props.trailing] - The arrow shown after the label.
+ * @param {string} [props.keys] - The keystroke that does the same thing, shown as a key.
  * @param {boolean} [props.small] - The home window's size rather than the flow's.
  * @param {boolean} [props.disabled] - Whether it can be pressed.
  * @param {() => void} props.onClick - What it does.
@@ -157,12 +158,14 @@ export function Wordmark({ size = 'lg' }: { size?: 'lg' | 'sm' }): JSX.Element {
 export function Primary({
   children,
   trailing,
+  keys,
   small = false,
   disabled = false,
   onClick,
 }: {
   children: ReactNode;
   trailing?: string;
+  keys?: string;
   small?: boolean;
   disabled?: boolean;
   onClick: () => void;
@@ -176,6 +179,7 @@ export function Primary({
     >
       {children}
       {trailing !== undefined && <span className="btn-trailing">{trailing}</span>}
+      {keys !== undefined && <span className="btn-key">{keys}</span>}
     </button>
   );
 }

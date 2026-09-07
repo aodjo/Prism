@@ -873,7 +873,10 @@ function Setup(): JSX.Element {
           </div>
 
           <div className="mt-[34px] flex w-[min(620px,43.1vw)] items-center gap-4 text-note-2 text-dim before:h-px before:flex-1 before:bg-line-2 before:content-[''] after:h-px after:flex-1 after:bg-line-2 after:content-['']">
-            or pick one nearby
+            {/* Not "nearby". Nothing here scanned a network — these are the machines this one
+                has already paired with or that arrived with the account. Calling them nearby
+                would be claiming a capability the application does not have. */}
+            or one you already have
           </div>
 
           <div className="mt-8 flex w-[min(620px,43.1vw)] flex-col gap-2.5 text-left">
@@ -1028,7 +1031,7 @@ function Setup(): JSX.Element {
             />
           </div>
           <div className="mt-[23px]">
-            <Primary trailing="⌘↵" onClick={finish}>
+            <Primary keys="⌘↵" onClick={finish}>
               Enter PRISM
             </Primary>
           </div>

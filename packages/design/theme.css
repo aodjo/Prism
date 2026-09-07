@@ -169,9 +169,16 @@
       hover:not-disabled:bg-white disabled:opacity-45;
   }
 
-  /* The key or arrow that says what the button does when it is not clicked. Set in a chip so
-     it reads as a legend rather than as part of the label. */
+  /* What follows the label on a button: an arrow, or the keys that do the same thing.
+     
+     A keystroke is set in a chip because that is what a key looks like, and the shape is half
+     of what makes it read as one. An arrow is not a key and gets no chip — a box around it
+     only draws the eye to the box. */
   .btn-trailing {
+    @apply text-note font-medium text-[rgba(11,11,16,0.6)];
+  }
+
+  .btn-key {
     @apply rounded-[6px] bg-[rgba(11,11,16,0.09)] px-2 py-[3px] text-note font-medium
       text-[rgba(11,11,16,0.6)];
   }
