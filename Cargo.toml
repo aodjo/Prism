@@ -12,6 +12,7 @@ repository = "https://github.com/aodjo/Prism"
 [workspace.dependencies]
 prism-core = { path = "crates/prism-core" }
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [profile.release]
