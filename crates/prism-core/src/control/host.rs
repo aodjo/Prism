@@ -204,7 +204,9 @@ struct Shared {
     packets: AtomicU64,
     bytes: AtomicU64,
     bitrate_bps: AtomicU64,
-    audio_frames: AtomicU64,
+    /// Shared with the audio thread rather than written through this struct, because that
+    /// thread outlives no more than the session but is started from two different places.
+    audio_frames: Arc<AtomicU64>,
     /// Written once when each becomes known, so a lock costs nothing measurable.
     observed: Mutex<Option<SocketAddr>>,
     peer: Mutex<Option<[u8; KEY_LEN]>>,
@@ -368,9 +370,11 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<Atom
     // Audio runs on its own thread and its own clock. Interleaving it with the video loop
     // would tie a five millisecond cadence to a sixteen millisecond one, and whichever waited
     // for the other would be the one a person noticed.
-    let audio = config
-        .audio_bitrate_bps
-        .and_then(|bitrate| spawn_audio(&sender, bitrate, shared, stop).ok().flatten());
+    let audio = config.audio_bitrate_bps.and_then(|bitrate| {
+        spawn_audio(&sender, bitrate, &shared.audio_frames, stop)
+            .ok()
+            .flatten()
+    });
 
     let outcome = stream(&config, sender, shared, stop);
 
@@ -543,31 +547,61 @@ fn ready(mut sender: SliceSender, config: &HostConfig) -> io::Result<SliceSender
     Ok(sender)
 }
 
+/// Loudest sample still counted as digital silence.
+///
+/// Not zero, because a real mix that nobody is listening to still carries dither and the
+/// last bit of a fade. Well below anything a person would call quiet.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const SILENCE_FLOOR: f32 = 0.0001;
+
+/// How many frames of unbroken silence pass before the host says so.
+///
+/// Two hundred a second, so this is ten seconds. Long enough that a stream started before
+/// anybody made a sound does not accuse the machine of being broken, short enough to arrive
+/// while whoever started the session is still watching.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const SILENCE_PATIENCE_FRAMES: u64 = 2_000;
+
 /// Starts the thread that captures, encodes and sends this machine's audio.
+///
+/// Public because the command line drives its own send loop rather than going through
+/// [`HostService`], and audio that only one of the two could start would be audio only one of
+/// them could ever be shown to carry.
+///
+/// `sent` counts frames put on the wire, for whoever reports on the session. `stop` ends the
+/// thread; it is also ended by the source failing, which is reported and not retried.
 ///
 /// # Errors
 ///
 /// Returns the underlying [`io::Error`] if the socket cannot be duplicated for the audio
 /// thread's own sender.
-#[cfg(target_os = "windows")]
-fn spawn_audio(
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn spawn_audio(
     sender: &SliceSender,
     bitrate_bps: u32,
-    shared: &Arc<Shared>,
+    sent: &Arc<AtomicU64>,
     stop: &Arc<AtomicBool>,
 ) -> io::Result<Option<JoinHandle<()>>> {
     use crate::audio::codec::AudioEncoder;
-    use crate::audio::wasapi::LoopbackCapture;
+    use crate::audio::{Pulled, SystemAudio};
 
     let mut sender = sender.audio_sender()?;
-    let shared = Arc::clone(shared);
+    let sent = Arc::clone(sent);
     let stop = Arc::clone(stop);
 
     let thread = std::thread::Builder::new()
         .name("prism-host-audio".into())
         .spawn(move || {
-            let Ok(mut capture) = LoopbackCapture::start() else {
-                return;
+            let mut capture = match start_system_audio() {
+                Ok(capture) => capture,
+                Err(reason) => {
+                    // Said out loud rather than swallowed. The session has already agreed to
+                    // carry audio at this point, so a source that will not open leaves a
+                    // client waiting for sound that is never coming — and the only other
+                    // symptom is silence, which is also what a quiet machine sounds like.
+                    eprintln!("host: no audio will be sent — {reason}");
+                    return;
+                }
             };
             let Ok(mut encoder) = AudioEncoder::new(bitrate_bps) else {
                 return;
@@ -575,16 +609,37 @@ fn spawn_audio(
 
             let silence = [0.0f32; crate::audio::FRAME_INTERLEAVED];
             let mut sequence = 0u32;
+            let mut heard = false;
+            let mut mute_warned = false;
 
             while !stop.load(Ordering::Relaxed) {
-                // A silent machine delivers nothing at all, not zeroes. Sending silence in its
-                // place keeps the stream continuous, which is what stops the client's jitter
-                // buffer from having to fill from empty the moment something makes a sound.
+                // A silent machine may deliver nothing at all, not zeroes. Sending silence in
+                // its place keeps the stream continuous, which is what stops the client's
+                // jitter buffer from having to fill from empty the moment something makes a
+                // sound.
                 let frame = match capture.poll(Duration::from_millis(20)) {
-                    Ok(Some(samples)) => samples,
-                    Ok(None) => &silence,
-                    Err(_) => return,
+                    Pulled::Frame(samples) => samples,
+                    Pulled::Silence => &silence,
+                    Pulled::Stopped => return,
                 };
+
+                heard |= frame.iter().any(|sample| sample.abs() > SILENCE_FLOOR);
+
+                // Said once, when a source that opened has produced nothing but digital
+                // silence for long enough that it is no longer plausibly a quiet moment.
+                // Every way this goes wrong — a refused Screen Recording grant, an output
+                // routed somewhere the mix is not tapped — reaches the client as a continuous
+                // stream of correctly encoded silence, with nothing anywhere reporting a
+                // fault. Without this line the only symptom is that nobody can hear anything.
+                if !heard && !mute_warned && u64::from(sequence) > SILENCE_PATIENCE_FRAMES {
+                    mute_warned = true;
+                    eprintln!(
+                        "host: audio is being captured but every sample so far is silence. \
+                         If the machine is not simply quiet, check that this binary holds the \
+                         Screen Recording grant, and that the output is not routed to a \
+                         device whose mix is not tapped."
+                    );
+                }
 
                 let Ok(packet) = encoder.encode(frame) else {
                     continue;
@@ -598,30 +653,57 @@ fn spawn_audio(
                 }
 
                 sequence = sequence.wrapping_add(1);
-                shared
-                    .audio_frames
-                    .store(u64::from(sequence), Ordering::Relaxed);
+                sent.store(u64::from(sequence), Ordering::Relaxed);
             }
         })?;
 
     Ok(Some(thread))
 }
 
-/// Returns no audio thread, on a platform with no system audio capture yet.
+/// Opens this machine's system audio.
 ///
-/// macOS captures through ScreenCaptureKit and Linux through PipeWire; neither is written yet,
-/// so those hosts stream picture without sound. A stream with no audio is a lesser session,
-/// not a failed one.
+/// The two platforms that have a source differ only here: the thread that captures, encodes
+/// and sends is the same code for both. A failure ends the audio thread and nothing else — a
+/// stream with no sound is a lesser session, not a failed one — but it is reported, because
+/// the alternative symptom is silence and a quiet machine sounds exactly the same.
 ///
 /// # Errors
 ///
-/// Never fails. The signature matches the platform that can fail so the caller has one shape
+/// Returns what the platform said, already rendered, since there is nothing above this that
+/// could act on one kind of failure differently from another.
+#[cfg(target_os = "windows")]
+fn start_system_audio() -> Result<impl crate::audio::SystemAudio, String> {
+    crate::audio::wasapi::LoopbackCapture::start().map_err(|err| err.to_string())
+}
+
+/// Opens this machine's system audio.
+///
+/// See the Windows twin above.
+///
+/// # Errors
+///
+/// Returns what ScreenCaptureKit said, most often that Screen Recording is not granted.
+#[cfg(target_os = "macos")]
+fn start_system_audio() -> Result<impl crate::audio::SystemAudio, String> {
+    crate::audio::screencapturekit::SystemAudioCapture::start().map_err(|err| err.to_string())
+}
+
+/// Returns no audio thread, on a platform with no system audio capture yet.
+///
+/// Public for the same reason its twin is: the command line calls it too.
+///
+/// Linux captures through PipeWire, which is not written yet, so those hosts stream picture
+/// without sound. A stream with no audio is a lesser session, not a failed one.
+///
+/// # Errors
+///
+/// Never fails. The signature matches the platforms that can fail so the caller has one shape
 /// to handle rather than two.
-#[cfg(not(target_os = "windows"))]
-fn spawn_audio(
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn spawn_audio(
     _sender: &SliceSender,
     _bitrate_bps: u32,
-    _shared: &Arc<Shared>,
+    _sent: &Arc<AtomicU64>,
     _stop: &Arc<AtomicBool>,
 ) -> io::Result<Option<JoinHandle<()>>> {
     Ok(None)

@@ -38,13 +38,14 @@ undocumented_unsafe_blocks = "warn"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFDictionary", "CFString", "CFNumber", "CFArray"] }
-objc2-core-media = { version = "0.3", features = ["CMBase", "CMTime", "CMSampleBuffer", "CMFormatDescription", "CMBlockBuffer", "CMAttachment"] }
+objc2-core-media = { version = "0.3", features = ["CMBase", "CMTime", "CMSampleBuffer", "CMFormatDescription", "CMBlockBuffer", "CMAttachment", "objc2-core-audio-types"] }
 objc2-core-video = { version = "0.3", features = ["CVBase", "CVReturn", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVMetalTexture", "CVMetalTextureCache", "objc2-metal"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }
 objc2-metal = { version = "0.3", features = ["MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLResource", "MTLRenderPass", "MTLRenderCommandEncoder", "MTLPixelFormat", "MTLTypes", "MTLDrawable", "MTLBlitCommandEncoder"] }
 objc2-video-toolbox = { version = "0.3", features = ["VTBase", "VTErrors", "VTSession", "VTCompressionSession", "VTCompressionProperties", "VTDecompressionSession", "VTDecompressionProperties", "objc2-core-media", "objc2-core-video", "objc2"] }
 objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShareableContent", "SCError"] }
+objc2-core-audio-types = { version = "0.3.2", features = ["CoreAudioBaseTypes"] }
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 objc2-core-text = "0.3.2"
