@@ -9,7 +9,8 @@
     "build:css": "tailwindcss -i src/styles.css -o renderer/prism.css",
     "build:renderer": "esbuild src/setup.tsx src/home.tsx src/panel.tsx --bundle --format=esm --outdir=renderer --target=chrome124 --jsx=automatic --sourcemap --define:process.env.NODE_ENV=\\\"production\\\"",
     "start": "pnpm run build && electron .",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "start:setup": "pnpm run build && PRISM_WINDOW_PAGE=setup.html electron ."
   },
   "dependencies": {
     "@prism/account": "workspace:*",
