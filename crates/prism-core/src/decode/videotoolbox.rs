@@ -18,7 +18,8 @@ use std::time::Duration;
 use objc2_core_foundation::{CFRetained, CFString, CFType, kCFBooleanTrue};
 use objc2_core_media::{
     CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime, CMTimeFlags,
-    CMVideoFormatDescriptionCreateFromH264ParameterSets, kCMBlockBufferAssureMemoryNowFlag,
+    CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMVideoFormatDescriptionCreateFromHEVCParameterSets, kCMBlockBufferAssureMemoryNowFlag,
 };
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane,
@@ -30,7 +31,11 @@ use objc2_video_toolbox::{
     VTDecompressionSession, VTSession, VTSessionSetProperty, kVTDecompressionPropertyKey_RealTime,
 };
 
-use crate::decode::{DecodeError, NAL_PPS, NAL_SPS, nal_type, nal_units};
+use crate::decode::{
+    DecodeError, HEVC_NAL_PPS, HEVC_NAL_SPS, HEVC_NAL_VPS, NAL_PPS, NAL_SPS, hevc_nal_type,
+    nal_type, nal_units,
+};
+use crate::net::negotiate::Codec;
 
 /// How many decoded pictures may queue up before the decoder thread blocks.
 const OUTPUT_QUEUE_DEPTH: usize = 4;
@@ -119,10 +124,18 @@ struct CallbackContext {
 /// A VideoToolbox H.264 decompression session that follows the stream it is fed.
 #[derive(Debug)]
 pub struct VideoToolboxDecoder {
+    /// Which codec this decoder was built for.
+    ///
+    /// Told rather than inferred. The two numbering schemes do not overlap in meaning, so a
+    /// decoder that guessed wrong would read a parameter set as a slice and hand it over as a
+    /// picture — which fails as a black window with nothing reporting an error.
+    codec: Codec,
     session: Option<CFRetained<VTDecompressionSession>>,
     format: Option<CFRetained<CMFormatDescription>>,
-    sps: Vec<u8>,
-    pps: Vec<u8>,
+    /// The parameter sets in the order the format description wants them.
+    ///
+    /// Two for H.264 and three for HEVC, whose video parameter set comes first.
+    sets: Vec<Vec<u8>>,
     avcc: Vec<u8>,
     output: Receiver<DecodedFrame>,
     context: Box<CallbackContext>,
@@ -134,14 +147,14 @@ impl VideoToolboxDecoder {
     /// The session appears once the stream supplies a sequence and picture parameter set,
     /// which arrive with the first keyframe.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(codec: Codec) -> Self {
         let (tx, rx) = sync_channel(OUTPUT_QUEUE_DEPTH);
 
         Self {
+            codec,
             session: None,
             format: None,
-            sps: Vec::new(),
-            pps: Vec::new(),
+            sets: Vec::new(),
             avcc: Vec::new(),
             output: rx,
             context: Box::new(CallbackContext {
@@ -180,7 +193,7 @@ impl VideoToolboxDecoder {
 
         self.avcc.clear();
         for nal in nal_units(annexb) {
-            if matches!(nal_type(nal), Some(NAL_SPS | NAL_PPS)) {
+            if self.is_parameter_set(nal) {
                 continue;
             }
             self.avcc
@@ -240,31 +253,45 @@ impl VideoToolboxDecoder {
     /// Returns [`DecodeError::SessionCreate`] if VideoToolbox will not describe or decode
     /// the stream.
     fn absorb_parameter_sets(&mut self, annexb: &[u8]) -> Result<(), DecodeError> {
-        let mut sps = None;
-        let mut pps = None;
+        // In the order the format description wants them: for HEVC that is video, sequence,
+        // picture, and getting it wrong is refused by CoreMedia rather than silently wrong.
+        let wanted: &[u8] = match self.codec {
+            Codec::Hevc => &[HEVC_NAL_VPS, HEVC_NAL_SPS, HEVC_NAL_PPS],
+            _ => &[NAL_SPS, NAL_PPS],
+        };
+
+        let mut found: Vec<Option<&[u8]>> = vec![None; wanted.len()];
 
         for nal in nal_units(annexb) {
-            match nal_type(nal) {
-                Some(NAL_SPS) => sps = Some(nal),
-                Some(NAL_PPS) => pps = Some(nal),
-                _ => {}
+            let Some(kind) = self.type_of(nal) else {
+                continue;
+            };
+
+            if let Some(at) = wanted.iter().position(|&want| want == kind) {
+                found[at] = Some(nal);
             }
         }
 
-        let (Some(sps), Some(pps)) = (sps, pps) else {
+        let Some(sets) = found.into_iter().collect::<Option<Vec<_>>>() else {
+            // Not every set is here. A frame between keyframes carries none of them, which is
+            // the ordinary case rather than a problem.
             return Ok(());
         };
 
-        if sps == self.sps.as_slice() && pps == self.pps.as_slice() && self.session.is_some() {
+        if self.session.is_some()
+            && self.sets.len() == sets.len()
+            && self
+                .sets
+                .iter()
+                .zip(&sets)
+                .all(|(held, seen)| held.as_slice() == *seen)
+        {
             return Ok(());
         }
 
-        self.sps.clear();
-        self.sps.extend_from_slice(sps);
-        self.pps.clear();
-        self.pps.extend_from_slice(pps);
+        self.sets = sets.iter().map(|set| set.to_vec()).collect();
 
-        let format = create_format_description(&self.sps, &self.pps)?;
+        let format = create_format_description(self.codec, &self.sets)?;
         let session = create_session(&format, &self.context)?;
 
         self.format = Some(format);
@@ -272,12 +299,22 @@ impl VideoToolboxDecoder {
 
         Ok(())
     }
-}
 
-impl Default for VideoToolboxDecoder {
-    /// Creates a decoder with no session yet.
-    fn default() -> Self {
-        Self::new()
+    /// Returns a NAL unit's type in this decoder's codec.
+    fn type_of(&self, nal: &[u8]) -> Option<u8> {
+        match self.codec {
+            Codec::Hevc => hevc_nal_type(nal),
+            _ => nal_type(nal),
+        }
+    }
+
+    /// Returns whether a NAL unit is a parameter set rather than picture data.
+    fn is_parameter_set(&self, nal: &[u8]) -> bool {
+        match (self.codec, self.type_of(nal)) {
+            (Codec::Hevc, Some(kind)) => (HEVC_NAL_VPS..=HEVC_NAL_PPS).contains(&kind),
+            (_, Some(kind)) => matches!(kind, NAL_SPS | NAL_PPS),
+            _ => false,
+        }
     }
 }
 
@@ -298,32 +335,43 @@ impl Drop for VideoToolboxDecoder {
 ///
 /// Returns [`DecodeError::SessionCreate`] if CoreMedia cannot parse the parameter sets.
 fn create_format_description(
-    sps: &[u8],
-    pps: &[u8],
+    codec: Codec,
+    sets: &[Vec<u8>],
 ) -> Result<CFRetained<CMFormatDescription>, DecodeError> {
-    let pointers = [
-        NonNull::from(sps).cast::<u8>(),
-        NonNull::from(pps).cast::<u8>(),
-    ];
-    let sizes = [sps.len(), pps.len()];
+    let pointers: Vec<NonNull<u8>> = sets
+        .iter()
+        .map(|set| NonNull::from(set.as_slice()).cast::<u8>())
+        .collect();
+    let sizes: Vec<usize> = sets.iter().map(Vec::len).collect();
     let mut raw: *const CMFormatDescription = null();
 
-    // SAFETY: both parameter sets outlive the call, the arrays have the length declared,
+    // SAFETY: every parameter set outlives the call, both arrays have the declared length,
     // and CoreMedia writes a retained description into `raw` on success.
     let status = unsafe {
-        CMVideoFormatDescriptionCreateFromH264ParameterSets(
-            None,
-            2,
-            NonNull::from(&pointers).cast(),
-            NonNull::from(&sizes).cast(),
-            NAL_LENGTH_SIZE,
-            NonNull::from(&mut raw),
-        )
+        match codec {
+            Codec::Hevc => CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                None,
+                sets.len(),
+                NonNull::from(pointers.as_slice()).cast(),
+                NonNull::from(sizes.as_slice()).cast(),
+                NAL_LENGTH_SIZE,
+                None,
+                NonNull::from(&mut raw),
+            ),
+            _ => CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                None,
+                sets.len(),
+                NonNull::from(pointers.as_slice()).cast(),
+                NonNull::from(sizes.as_slice()).cast(),
+                NAL_LENGTH_SIZE,
+                NonNull::from(&mut raw),
+            ),
+        }
     };
 
     if status != 0 || raw.is_null() {
         return Err(DecodeError::SessionCreate {
-            reason: "CMVideoFormatDescriptionCreateFromH264ParameterSets",
+            reason: "CMVideoFormatDescriptionCreateFromParameterSets",
             status,
         });
     }

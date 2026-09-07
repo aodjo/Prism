@@ -198,6 +198,19 @@ pub fn run_encoded(
     if run.loss_ppm > 0 {
         sender.inject_loss(run.loss_ppm, run.loss_seed);
     }
+    // Built for the codec the session agreed, not the one the command line guessed. A host
+    // that encodes one thing and says another produces a client that decodes nothing and
+    // reports no error, because a decoder looking for parameter sets it will never see has
+    // nothing to complain about.
+    let encoder_config = prism_core::encode::EncoderConfig {
+        codec: sender
+            .agreed()
+            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+                agreed.codec
+            }),
+        ..encoder_config
+    };
+
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;
     let mut picture = Nv12Frame::new(encoder_config.width, encoder_config.height)?;
     let interval = frame_interval(config.fps);
@@ -312,6 +325,19 @@ pub fn run_captured(
         fps: config.fps,
         bitrate_bps,
         max_slice_bytes: bitrate_bps / 8 / config.fps.max(1) / 4,
+    };
+
+    // Built for the codec the session agreed, not the one the command line guessed. A host
+    // that encodes one thing and says another produces a client that decodes nothing and
+    // reports no error, because a decoder looking for parameter sets it will never see has
+    // nothing to complain about.
+    let encoder_config = prism_core::encode::EncoderConfig {
+        codec: sender
+            .agreed()
+            .map_or(prism_core::net::negotiate::Codec::H264, |agreed| {
+                agreed.codec
+            }),
+        ..encoder_config
     };
 
     let mut encoder = VideoToolboxEncoder::new(encoder_config)?;

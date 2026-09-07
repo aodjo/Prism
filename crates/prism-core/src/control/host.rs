@@ -91,19 +91,35 @@ impl Default for HostConfig {
             parity_loss: Some(0.05),
             inject_input: true,
             audio_bitrate_bps: Some(128_000),
-            // H.264 alone until each encoder's other codecs are wired up. Naming one that is
-            // not implemented would agree a session that never produces a frame.
-            codecs: prism_core_h264(),
+            codecs: host_codecs(),
         }
     }
 }
 
-/// The codec set a host advertises before anything better is wired up.
+/// Returns what this machine can encode.
 ///
-/// A function rather than a constant because `Codecs` is built by combination and a const
-/// expression for it would be less readable than the thing it replaces.
-fn prism_core_h264() -> Codecs {
-    Codecs::none().with(H264)
+/// A statement about the hardware, not a wish: a host that named a codec its encoder refuses
+/// would agree a session it then fails to send.
+///
+/// Public because the command line builds its configuration field by field rather than from
+/// the default, and a second answer to "what can this machine encode" is a second answer that
+/// drifts.
+#[must_use]
+pub fn host_codecs() -> Codecs {
+    #[cfg(target_os = "macos")]
+    {
+        // VideoToolbox encodes both in hardware on every Mac this runs on.
+        Codecs::none().with(H264).with(crate::net::negotiate::HEVC)
+    }
+
+    // NVENC reports HEVC and this project has measured that it offers it, but the encoder
+    // here is still configured through the H.264 half of NVENC's union — different offsets
+    // and a different structure. Advertising it before that is written would agree a session
+    // whose first frame fails.
+    #[cfg(not(target_os = "macos"))]
+    {
+        Codecs::none().with(H264)
+    }
 }
 
 /// What this machine is able and willing to send, as the negotiation sees it.

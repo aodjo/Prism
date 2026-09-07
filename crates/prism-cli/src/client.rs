@@ -392,9 +392,15 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
     let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
-    let decoder = config
-        .decode
-        .then(|| spawn_decoder(frames_rx, recycle_tx, pictures, Arc::clone(&offset)));
+    let decoder = config.decode.then(|| {
+        spawn_decoder(
+            frames_rx,
+            recycle_tx,
+            pictures,
+            Arc::clone(&offset),
+            agreed.codec,
+        )
+    });
 
     let mut reassembler = FrameReassembler::new(config.in_flight);
     let mut arrival = LatencyRecorder::new(4096);
@@ -621,6 +627,7 @@ fn spawn_decoder(
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
     offset: Arc<AtomicI64>,
+    codec: prism_core::net::negotiate::Codec,
 ) -> thread::JoinHandle<DecodeReport> {
     use prism_core::decode::DecodeError;
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
@@ -633,8 +640,15 @@ fn spawn_decoder(
     /// short enough that a stall cannot cascade.
     const POLL_TIMEOUT: Duration = Duration::from_millis(8);
 
+    // A developer affordance: writes exactly what is handed to the decoder, so a stream the
+    // decoder refuses can be put in front of an independent one. A bitstream that ffmpeg reads
+    // and this decoder does not is a different bug from one neither will touch, and there is no
+    // way to tell them apart without the bytes.
+    let mut dump =
+        std::env::var_os("PRISM_DUMP_BITSTREAM").and_then(|path| std::fs::File::create(path).ok());
+
     thread::spawn(move || {
-        let mut decoder = VideoToolboxDecoder::new();
+        let mut decoder = VideoToolboxDecoder::new(codec);
         let mut latency = LatencyRecorder::new(4096);
         let mut stage = LatencyRecorder::new(4096);
         let mut decoded = 0u32;
@@ -643,6 +657,11 @@ fn spawn_decoder(
 
         while let Ok(buf) = frames.recv() {
             let started = std::time::Instant::now();
+
+            if let Some(file) = dump.as_mut() {
+                use std::io::Write;
+                let _ = file.write_all(&buf.data);
+            }
 
             match decoder.decode(&buf.data, buf.capture_ts_us) {
                 Ok(()) | Err(DecodeError::NoParameterSets) => {}
@@ -693,8 +712,9 @@ fn spawn_decoder(
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
     offset: Arc<AtomicI64>,
+    codec: prism_core::net::negotiate::Codec,
 ) -> thread::JoinHandle<DecodeReport> {
-    let _ = (pictures, offset);
+    let _ = (pictures, offset, codec);
     thread::spawn(move || {
         while let Ok(buf) = frames.recv() {
             let _ = recycle.send(buf);

@@ -77,7 +77,7 @@ mod round_trip {
     }
 
     /// Paints the reference pattern into a frame.
-    fn paint(frame: &mut Nv12Frame, phase: usize) {
+    pub fn paint(frame: &mut Nv12Frame, phase: usize) {
         frame
             .fill(|luma, luma_stride, chroma, chroma_stride| {
                 for y in 0..HEIGHT as usize {
@@ -96,7 +96,7 @@ mod round_trip {
 
     #[test]
     fn a_decoder_refuses_to_start_before_it_has_parameter_sets() {
-        let mut decoder = VideoToolboxDecoder::new();
+        let mut decoder = VideoToolboxDecoder::new(Codec::H264);
 
         assert!(!decoder.is_ready());
         assert_eq!(
@@ -107,14 +107,38 @@ mod round_trip {
 
     #[test]
     fn a_painted_frame_survives_the_encoder_and_the_decoder() {
-        let mut encoder = VideoToolboxEncoder::new(config()).expect("session is creatable");
-        let mut decoder = VideoToolboxDecoder::new();
+        round_trip(Codec::H264);
+    }
+
+    #[test]
+    fn a_painted_frame_survives_hevc_too() {
+        // The reason the codec is negotiated at all. HEVC numbers its NAL units differently
+        // and carries a third parameter set, so a path that quietly assumed H.264 produces a
+        // black window with nothing reporting an error — which is exactly what the first
+        // HEVC stream out of this encoder did, until an independent decoder refused it.
+        round_trip(Codec::Hevc);
+    }
+
+    /// How many frames a round trip encodes.
+    ///
+    /// More than the sixty at which the encoder repeats its parameter sets, because a decoder
+    /// that only works on the frames carrying them looks perfect over a handful and fails on
+    /// every real session. That is exactly what the first HEVC stream did.
+    const FRAMES: usize = 90;
+
+    /// Encodes painted frames and checks each one comes back recognisable.
+    fn round_trip(codec: Codec) {
+        let mut settings = config();
+        settings.codec = codec;
+
+        let mut encoder = VideoToolboxEncoder::new(settings).expect("session is creatable");
+        let mut decoder = VideoToolboxDecoder::new(codec);
         let mut source = Nv12Frame::new(WIDTH, HEIGHT).expect("buffer is allocatable");
         let mut luma = Vec::new();
 
         let mut compared = 0;
 
-        for phase in 0..6usize {
+        for phase in 0..FRAMES {
             paint(&mut source, phase);
             encoder
                 .encode(source.pixel_buffer(), phase as u64 * 33_333, phase == 0)
@@ -151,13 +175,17 @@ mod round_trip {
             let error = mean_absolute_error(&luma, phase);
             assert!(
                 error < 12.0,
-                "phase {phase} decoded to a different picture, mean luma error {error:.1}"
+                "{codec:?} phase {phase} decoded to a different picture, mean luma error \
+                 {error:.1}"
             );
 
             compared += 1;
         }
 
-        assert!(compared >= 4, "only {compared} frames came back out of 6");
+        assert!(
+            compared * 4 >= FRAMES * 3,
+            "only {compared} of {FRAMES} {codec:?} frames came back"
+        );
         assert!(
             decoder.take_errors().is_empty(),
             "the decoder reported failures"
@@ -180,5 +208,132 @@ mod round_trip {
             .sum();
 
         total as f64 / f64::from(WIDTH * HEIGHT)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod through_the_wire {
+    use std::time::Duration;
+
+    use prism_core::decode::videotoolbox::VideoToolboxDecoder;
+    use prism_core::encode::EncoderConfig;
+    use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
+    use prism_core::net::negotiate::Codec;
+    use prism_core::net::packet::{FLAG_IDR, FLAG_LAST_OF_FRAME, MAX_PACKET_SIZE, VideoPacket};
+    use prism_core::net::packetize::SlicePacketizer;
+    use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
+
+    use crate::round_trip::paint;
+
+    const WIDTH: u32 = 1280;
+    const HEIGHT: u32 = 720;
+
+    /// How many frames to push through. More than the sixty at which parameter sets repeat,
+    /// because a path that only carries those looks perfect over a handful.
+    const FRAMES: usize = 90;
+
+    /// Encodes frames, packetises every slice, reassembles them, and decodes the result.
+    ///
+    /// The in-process round trip already proves the encoder and decoder agree. This proves
+    /// that what the network puts back together is the same thing — which is a separate
+    /// claim, and the one that was false: HEVC decoded perfectly frame to frame and failed on
+    /// every frame that crossed the wire.
+    fn wire_round_trip(codec: Codec) -> (usize, usize) {
+        let settings = EncoderConfig {
+            codec,
+            width: WIDTH,
+            height: HEIGHT,
+            fps: 60,
+            bitrate_bps: 8_000_000,
+            max_slice_bytes: 0,
+        };
+
+        let mut encoder = VideoToolboxEncoder::new(settings).expect("session is creatable");
+        let mut decoder = VideoToolboxDecoder::new(codec);
+        let mut source = Nv12Frame::new(WIDTH, HEIGHT).expect("buffer is allocatable");
+        let mut reassembler = FrameReassembler::new(4);
+        let mut buf = [0u8; MAX_PACKET_SIZE];
+
+        let mut decoded = 0;
+        let mut submitted = 0;
+
+        for phase in 0..FRAMES {
+            paint(&mut source, phase);
+            encoder
+                .encode(source.pixel_buffer(), phase as u64 * 16_667, phase == 0)
+                .expect("frame encodes");
+
+            let Some(frame) = encoder.poll(Duration::from_secs(5)) else {
+                continue;
+            };
+
+            let last = frame.slices.len() - 1;
+            let mut complete = None;
+
+            for index in 0..frame.slices.len() {
+                let data = frame.slice(index).expect("slice index is in range");
+                let mut flags = 0;
+                if frame.is_idr {
+                    flags |= FLAG_IDR;
+                }
+                if index == last {
+                    flags |= FLAG_LAST_OF_FRAME;
+                }
+
+                let packets =
+                    SlicePacketizer::new(phase as u32, index as u16, flags, frame.pts_us, data)
+                        .expect("an encoded slice is packetisable");
+
+                for packet in packets {
+                    let len = packet.encode_into(&mut buf).expect("packet fits");
+                    let parsed = VideoPacket::decode(&buf[..len]).expect("packet parses");
+
+                    if reassembler.push(&parsed) == PushOutcome::FrameComplete {
+                        complete = reassembler
+                            .take_completed()
+                            .map(|frame| (frame.data.to_vec(), frame.capture_ts_us));
+                    }
+                }
+            }
+
+            let Some((bitstream, pts_us)) = complete else {
+                continue;
+            };
+
+            // The bytes that came off the wire have to be the bytes that went on it.
+            assert_eq!(
+                bitstream, frame.data,
+                "{codec:?} frame {phase} was reassembled into something else"
+            );
+
+            submitted += 1;
+            if decoder.decode(&bitstream, pts_us).is_ok()
+                && decoder.poll(Duration::from_secs(2)).is_some()
+            {
+                decoded += 1;
+            }
+        }
+
+        (decoded, submitted)
+    }
+
+    #[test]
+    fn h264_survives_the_wire() {
+        let (decoded, submitted) = wire_round_trip(Codec::H264);
+
+        assert!(
+            decoded * 4 >= submitted * 3,
+            "only {decoded} of {submitted} frames decoded after crossing the wire"
+        );
+    }
+
+    #[test]
+    fn hevc_survives_the_wire() {
+        let (decoded, submitted) = wire_round_trip(Codec::Hevc);
+
+        assert!(
+            decoded * 4 >= submitted * 3,
+            "only {decoded} of {submitted} frames decoded after crossing the wire"
+        );
     }
 }

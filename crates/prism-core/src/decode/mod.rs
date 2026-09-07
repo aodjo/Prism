@@ -20,6 +20,19 @@ pub const NAL_PPS: u8 = 8;
 /// NAL unit type carried by an IDR slice.
 pub const NAL_IDR: u8 = 5;
 
+/// NAL unit type carried by an HEVC video parameter set.
+///
+/// HEVC has a third parameter set ahead of the other two, and reads its type from a different
+/// place: bits one to six of the first byte rather than the low five. A reader that assumed
+/// H.264 sees these as slice types and hands them to the decoder as pictures.
+pub const HEVC_NAL_VPS: u8 = 32;
+
+/// NAL unit type carried by an HEVC sequence parameter set.
+pub const HEVC_NAL_SPS: u8 = 33;
+
+/// NAL unit type carried by an HEVC picture parameter set.
+pub const HEVC_NAL_PPS: u8 = 34;
+
 /// Reason a frame could not be decoded.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
@@ -88,6 +101,24 @@ pub fn nal_units(stream: &[u8]) -> impl Iterator<Item = &[u8]> {
 #[must_use]
 pub fn nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|&byte| byte & 0x1f)
+}
+
+/// Returns the type of an HEVC NAL unit.
+///
+/// A separate function rather than a parameter on [`nal_type`], because the two numbering
+/// schemes do not overlap in meaning and a caller that got the wrong one would read a
+/// parameter set as a slice without anything failing.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::decode::{HEVC_NAL_VPS, hevc_nal_type};
+/// assert_eq!(hevc_nal_type(&[0x40, 0x01]), Some(HEVC_NAL_VPS));
+/// assert_eq!(hevc_nal_type(&[]), None);
+/// ```
+#[must_use]
+pub fn hevc_nal_type(nal: &[u8]) -> Option<u8> {
+    nal.first().map(|&byte| (byte >> 1) & 0x3f)
 }
 
 /// Iterator over the NAL units of an Annex B bitstream.

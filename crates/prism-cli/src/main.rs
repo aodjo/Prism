@@ -357,6 +357,27 @@ fn main() -> ExitCode {
     }
 }
 
+/// Returns what this machine can decode.
+///
+/// A statement about the hardware, not a wish: naming a codec that is not implemented would
+/// agree a session that never shows a frame, and the symptom is a black window with nothing
+/// reporting an error.
+fn client_codecs() -> Codecs {
+    #[cfg(target_os = "macos")]
+    {
+        Codecs::none()
+            .with(H264)
+            .with(prism_core::net::negotiate::HEVC)
+    }
+
+    // Every other platform decodes nothing yet, so it offers the floor and gets a session it
+    // can at least reassemble and measure.
+    #[cfg(not(target_os = "macos"))]
+    {
+        Codecs::none().with(H264)
+    }
+}
+
 /// Turns the encoder probe's flag into a codec.
 ///
 /// Only the platform with an encoder to probe has a caller for it.
@@ -463,7 +484,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     // The command line measures the video path. Audio would add a second
                     // stream to every number without being what any of them are about.
                     audio_bitrate_bps: None,
-                    codecs: Codecs::none().with(H264),
+                    // What this machine's encoder can actually produce, from the core rather
+                    // than restated here — a second answer to that question is a second answer
+                    // that drifts.
+                    codecs: prism_core::control::host::host_codecs(),
                 },
                 frame_bytes,
                 slices,
@@ -558,7 +582,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 // taught the others; naming a codec that is not implemented would agree a
                 // session that never shows a frame.
                 offer: Offer {
-                    codecs: Codecs::none().with(H264),
+                    // Both, on macOS: VideoToolbox decodes each in hardware, and the codec
+                    // that ends up being used is whichever the host can also produce.
+                    codecs: client_codecs(),
                     // The window the stream will be shown in, when there is one. A host
                     // sending more pixels than that is spending bitrate on pixels thrown
                     // away before anybody sees them. A run with no window is measuring the
