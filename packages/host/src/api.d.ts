@@ -20,6 +20,13 @@ export interface HostSnapshot {
   readonly phase: string;
   /** Where the rendezvous server sees this machine, once it has said. */
   readonly observed: string | null;
+  /**
+   * The address this machine is actually listening on.
+   *
+   * What somebody on the same network has to be told, and the only way to reach this host
+   * when no rendezvous server is configured.
+   */
+  readonly local: string | null;
   /** The connected client's public key as hex, once one has connected. */
   readonly peer: string | null;
   /** Frames captured, encoded and sent. */

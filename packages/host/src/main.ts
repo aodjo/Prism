@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, Tray } from 'el
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 import { TRAY_ICON } from './icon.js';
 import type { Settings } from './api.js';
@@ -326,6 +326,12 @@ void app.whenReady().then(() => {
     return;
   }
 
+  const drive = process.env['PRISM_PANEL_DRIVE'];
+  if (drive) {
+    void drivePanel(drive);
+    return;
+  }
+
   if (settings.autoStart) {
     try {
       startHosting();
@@ -361,6 +367,47 @@ async function capturePanel(path: string): Promise<void> {
 
   const text = await panel.webContents.executeJavaScript('document.body.innerText');
   process.stdout.write(`${String(text)}\n`);
+
+  app.quit();
+}
+
+/**
+ * Runs a script inside the panel and prints what it returned, then quits.
+ *
+ * The companion to the screenshot: that says what the panel looks like, this says whether it
+ * does anything. The script runs in the renderer, so it reaches the application exactly the
+ * way a person does — through the buttons in the markup and the surface the preload exposes,
+ * with no privileged access of its own. That is the point: a session opened any other way
+ * would prove the native code works and nothing about the application on top of it.
+ *
+ * A developer affordance, enabled only by an environment variable naming a file on this
+ * machine.
+ *
+ * @async
+ * @param {string} path - The script to run, as a file of JavaScript.
+ * @returns {Promise<void>}
+ */
+async function drivePanel(path: string): Promise<void> {
+  if (!panel) {
+    app.quit();
+    return;
+  }
+
+  panel.removeAllListeners('blur');
+  showPanel();
+
+  // Long enough for the renderer to have asked who this machine is and drawn the answer,
+  // which every script here starts from.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+
+  try {
+    const source = readFileSync(path, 'utf8');
+    const result: unknown = await panel.webContents.executeJavaScript(source, true);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } catch (error) {
+    process.stdout.write(`drive failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
 
   app.quit();
 }

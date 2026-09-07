@@ -146,6 +146,11 @@ pub struct HostSnapshot {
     pub phase: String,
     /// Where the rendezvous server sees this machine, once it has said.
     pub observed: Option<String>,
+    /// The address this machine is actually listening on.
+    ///
+    /// What somebody on the same network has to be told, and the only way to reach this host
+    /// when no rendezvous server is configured.
+    pub local: Option<String>,
     /// The connected client's public key as hex, once one has connected.
     pub peer: Option<String>,
     /// Frames captured, encoded and sent.

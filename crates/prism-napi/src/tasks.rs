@@ -142,6 +142,7 @@ pub fn describe(snapshot: &prism_core::control::host::Snapshot) -> crate::HostSn
         }
         .to_string(),
         observed: snapshot.observed.map(|address| address.to_string()),
+        local: snapshot.local.map(|address| address.to_string()),
         peer: snapshot.peer.as_ref().map(identity::to_hex),
         frames: snapshot.frames.into(),
         packets: snapshot.packets.into(),
@@ -157,6 +158,7 @@ pub fn stopped_snapshot() -> crate::HostSnapshot {
     crate::HostSnapshot {
         phase: "stopped".to_string(),
         observed: None,
+        local: None,
         peer: None,
         frames: 0u64.into(),
         packets: 0u64.into(),

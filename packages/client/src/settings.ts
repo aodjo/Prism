@@ -15,6 +15,7 @@ export const DEFAULTS: Settings = {
   rendezvous: '',
   control: true,
   smooth: false,
+  addresses: {},
 };
 
 /**

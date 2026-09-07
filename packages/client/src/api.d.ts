@@ -26,6 +26,15 @@ export interface Settings {
   control: boolean;
   /** Whether to even out arrival jitter at the cost of a little latency. */
   smooth: boolean;
+  /**
+   * Where each paired host can be reached directly, keyed by its public key.
+   *
+   * What a machine on the same network needs and a rendezvous server otherwise supplies. The
+   * host shows the address it is listening on; this is where it gets typed. Kept per host
+   * because a person with two machines has two answers, and retyping the right one every time
+   * is how the wrong one gets used.
+   */
+  addresses: Record<string, string>;
 }
 
 /**
