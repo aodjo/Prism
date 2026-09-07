@@ -171,18 +171,11 @@ function showError(id: string, error: unknown): void {
 function render(snapshot: HostSnapshot | null): void {
   phase = snapshot?.phase ?? 'idle';
 
-  const dot = el('dot');
-  dot.className = 'dot';
+  // The phase is an attribute rather than a set of classes, so the stylesheet decides what
+  // each state looks like in one place instead of the script deciding it in another.
+  el('state').dataset['phase'] = phase;
 
   el('phase').textContent = PHASE_LABELS[phase] ?? phase;
-
-  if (phase === 'streaming') {
-    dot.classList.add('live');
-  } else if (phase === 'waiting' || phase === 'opening') {
-    dot.classList.add('waiting');
-  } else if (phase === 'failed') {
-    dot.classList.add('bad');
-  }
 
   el('toggle').textContent = RUNNING.has(phase) ? 'Stop' : 'Start hosting';
 

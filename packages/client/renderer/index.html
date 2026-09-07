@@ -4,34 +4,42 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src data:"
     />
     <title>Prism</title>
     <style>
-      /* The window follows the system appearance rather than choosing one. */
+      /* Colour carries state rather than decorating.
+         A prism splits light, and this window has four things to say — waiting, connecting,
+         streaming, gone — so each gets a hue and nothing else does. The ground is a deep
+         violet rather than a tinted grey, because grey would leave the accents floating on a
+         background that belongs to no product in particular. */
       :root {
-        color-scheme: light dark;
-        --ink: #17181c;
-        --muted: #6b7078;
-        --line: #d9dce1;
-        --ground: #f7f8fa;
-        --raised: #ffffff;
-        --accent: #2f6df6;
-        --good: #1e9e5a;
-        --bad: #d2453c;
-      }
+        color-scheme: dark;
 
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --ink: #eceef2;
-          --muted: #9aa1ac;
-          --line: #33363d;
-          --ground: #1b1d22;
-          --raised: #24262c;
-          --accent: #5b8dff;
-          --good: #3fbf7a;
-          --bad: #f0655c;
-        }
+        --ground: #14131a;
+        --band: #1a1922;
+        --raised: #201f2a;
+        --line: #2b2937;
+        --line-soft: #232231;
+
+        --ink: #eceaf4;
+        --ink-dim: #b3aec6;
+        --muted: #7d7891;
+
+        --accent: #a78bfa;
+        --accent-ink: #17121f;
+
+        --live: #4ade80;
+        --wait: #7aa2f7;
+        --warn: #f5c451;
+        --bad: #f87171;
+
+        --sans:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui,
+          sans-serif;
+        /* Only for values that change and want to line up: keys, addresses, codes. Never for
+           labels, where it would be costume rather than function. */
+        --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'JetBrains Mono', Menlo, monospace;
       }
 
       * {
@@ -40,155 +48,330 @@
 
       body {
         margin: 0;
-        /* Room at the top for the traffic lights, which sit over the content on macOS. */
-        padding: 34px 16px 16px;
-        font:
-          13px/1.45 -apple-system,
-          BlinkMacSystemFont,
-          'Segoe UI',
-          system-ui,
-          sans-serif;
+        font-family: var(--sans);
+        font-size: 13px;
+        line-height: 1.45;
         color: var(--ink);
         background: var(--ground);
         user-select: none;
         -webkit-user-select: none;
+        -webkit-font-smoothing: antialiased;
       }
 
-      /* The strip the traffic lights sit on is the only place the window can be dragged, since
-         the title bar itself is hidden. */
+      /* The strip the traffic lights sit on is the only draggable part, since the title bar is
+         hidden. */
       .drag {
         position: fixed;
         inset: 0 0 auto 0;
-        height: 34px;
+        height: 30px;
         -webkit-app-region: drag;
+        z-index: 2;
       }
 
-      h1 {
-        margin: 0 0 2px;
-        font-size: 15px;
+      /* ── Who this machine is ──────────────────────────────────────────────────────────
+         A line, not a banner. The traffic lights sit in the space above it. */
+      .crown {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 34px 20px 14px;
+      }
+
+      .crown-name {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--ink);
+      }
+
+      /* ── The one loud thing ───────────────────────────────────────────────────────────
+         Absent until there is something to say. A window that shouts "Not connected" at
+         somebody who has not asked to connect to anything is spending its loudest voice on
+         its least interesting fact. */
+      .state {
+        padding: 13px 20px 13px 17px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        border-left: 3px solid var(--edge);
+        background: color-mix(in oklab, var(--edge) 9%, var(--band));
+        --edge: var(--muted);
+      }
+
+      /* The one piece of motion in the window, and it is here because this is the one state
+         that is waiting for something rather than reporting it. It stops when the waiting
+         does. */
+      .state[data-phase='connecting'] {
+        --edge: var(--wait);
+        animation: waiting 1.6s ease-in-out infinite;
+      }
+
+      @keyframes waiting {
+        50% {
+          border-left-color: color-mix(in oklab, var(--wait) 35%, var(--band));
+        }
+      }
+
+      .state[data-phase='streaming'] {
+        --edge: var(--live);
+      }
+
+      .state[data-phase='failed'] {
+        --edge: var(--bad);
+      }
+
+      .state-line {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      #phase {
+        font-size: 14px;
         font-weight: 600;
         letter-spacing: -0.01em;
+        color: var(--ink);
       }
 
-      .sub {
+      #me {
+        font-family: var(--mono);
+        font-size: 10px;
         color: var(--muted);
-        font-size: 11px;
+        user-select: text;
+        -webkit-user-select: text;
       }
 
-      section {
-        margin-top: 12px;
-        padding: 11px 12px;
-        background: var(--raised);
-        border: 1px solid var(--line);
-        border-radius: 9px;
+      /* ── Bands ────────────────────────────────────────────────────────────────────────
+         Sections are separated by a hairline and nothing else. Boxing each one would give
+         them all the same weight, and they do not have the same weight. */
+      .band {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .band:last-of-type {
+        border-bottom: 0;
+      }
+
+      .band-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
       }
 
       h2 {
-        margin: 0 0 8px;
-        font-size: 11px;
+        margin: 0;
+        font-size: 12px;
         font-weight: 600;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
+        letter-spacing: 0;
+        color: var(--ink-dim);
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.5;
+        margin-bottom: 12px;
+        max-width: 42ch;
+      }
+
+      /* ── The machines ─────────────────────────────────────────────────────────────────
+         This list is what the window is for, so it gets the most room per item. */
+      .host {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 3px 12px;
+        align-items: center;
+        padding: 11px 0;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .host:last-child {
+        border-bottom: 0;
+      }
+
+      .host-name {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink);
+        user-select: text;
+        -webkit-user-select: text;
+      }
+
+      .host-where {
+        grid-column: 1;
+        font-size: 11px;
+      }
+
+      /* Typed as `input[type='text']` rather than `input`, because the general control rule
+         further down is written that way and would otherwise win on equal specificity by being
+         later. An address here is a line to write on, not a box to fill in. */
+      .host-where input[type='text'] {
+        width: 100%;
+        background: transparent;
+        border: 0;
+        border-bottom: 1px solid transparent;
+        border-radius: 0;
+        padding: 1px 0;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--ink-dim);
+      }
+
+      .host-where input[type='text']::placeholder {
         color: var(--muted);
       }
 
-      .row {
+      .host-where input[type='text']:hover {
+        border-bottom-color: var(--line);
+      }
+
+      .host-where input[type='text']:focus {
+        outline: 0;
+        border-bottom-color: var(--accent);
+        color: var(--ink);
+      }
+
+      .host-do {
+        grid-row: 1 / span 2;
+        grid-column: 2;
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        min-height: 26px;
+        gap: 4px;
       }
 
-      .row + .row {
-        margin-top: 6px;
-      }
-
-      .row .value {
-        color: var(--muted);
-        font-variant-numeric: tabular-nums;
-        text-align: right;
-      }
-
-      .status {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        font-weight: 500;
-      }
-
-      .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--muted);
-        flex: none;
-      }
-
-      .dot.live {
-        background: var(--good);
-      }
-
-      .dot.waiting {
-        background: var(--accent);
-      }
-
-      .dot.bad {
-        background: var(--bad);
-      }
-
+      /* ── Controls ─────────────────────────────────────────────────────────────────────── */
       button {
         font: inherit;
+        font-size: 12px;
         font-weight: 500;
-        color: var(--ink);
-        background: var(--ground);
+        color: var(--ink-dim);
+        background: var(--raised);
         border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 5px 11px;
+        border-radius: 7px;
+        padding: 6px 13px;
         cursor: pointer;
+        transition:
+          background 120ms ease,
+          color 120ms ease,
+          border-color 120ms ease;
       }
 
       button:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
+        color: var(--ink);
+        border-color: color-mix(in oklab, var(--accent) 45%, var(--line));
+      }
+
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
       }
 
       button:disabled {
-        opacity: 0.45;
+        opacity: 0.4;
         cursor: default;
       }
 
       button.primary {
         background: var(--accent);
         border-color: var(--accent);
-        color: #fff;
+        color: var(--accent-ink);
+        font-weight: 600;
       }
 
       button.primary:hover:not(:disabled) {
-        color: #fff;
-        filter: brightness(1.08);
+        background: color-mix(in oklab, var(--accent) 88%, white);
+        border-color: color-mix(in oklab, var(--accent) 88%, white);
+        color: var(--accent-ink);
       }
 
-      input[type='text'] {
+      /* The row is the thing being chosen, so the row answers the pointer and the button
+         inside it stays quiet until then. One filled violet control per machine, repeated all
+         the way down the list, would make the accent mean "a row exists" rather than "do this".
+         These come after the shared button rules deliberately: `.host:hover button` and
+         `button:hover:not(:disabled)` weigh exactly the same, so order is what decides. */
+      .host button {
+        color: var(--accent);
+        background: transparent;
+        border-color: transparent;
+      }
+
+      .host:hover button,
+      .host button:focus-visible {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--accent-ink);
+      }
+
+      /* Removing a machine is not what this row is for, so it never takes the accent — and
+         when it does answer the pointer it answers in the colour of the thing it does. */
+      .host .forget,
+      .host:hover .forget {
+        color: var(--muted);
+        background: transparent;
+        border-color: transparent;
+      }
+
+      .host .forget:hover:not(:disabled),
+      .host .forget:focus-visible {
+        color: var(--bad);
+        background: transparent;
+        border-color: color-mix(in oklab, var(--bad) 40%, transparent);
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 30px;
+      }
+
+      .row + .row {
+        margin-top: 2px;
+      }
+
+      .row > span:first-child {
+        color: var(--ink-dim);
+      }
+
+      .value {
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      input[type='text'],
+      input[type='password'] {
         font: inherit;
+        font-size: 12px;
         color: var(--ink);
         background: var(--ground);
         border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 4px 7px;
-        width: 170px;
-        text-align: right;
+        border-radius: 7px;
+        padding: 6px 9px;
+        width: 190px;
+      }
+
+      input::placeholder {
+        color: var(--muted);
       }
 
       input:focus {
-        outline: 2px solid var(--accent);
-        outline-offset: -1px;
+        outline: 0;
+        border-color: var(--accent);
+      }
+
+      input[type='checkbox'] {
+        accent-color: var(--accent);
+        width: 15px;
+        height: 15px;
       }
 
       code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-family: var(--mono);
         font-size: 11px;
-        color: var(--muted);
+        color: var(--ink-dim);
         user-select: text;
         -webkit-user-select: text;
       }
@@ -196,32 +379,88 @@
       .empty {
         color: var(--muted);
         font-size: 12px;
+        padding: 6px 0;
       }
 
+      /* Failures are quiet until they happen, and then they are unmissable and specific. */
       .error {
         color: var(--bad);
         font-size: 11px;
-        margin-top: 6px;
+        line-height: 1.5;
+        margin-top: 10px;
+        padding-left: 10px;
+        border-left: 2px solid var(--bad);
         white-space: pre-wrap;
         user-select: text;
         -webkit-user-select: text;
       }
 
-      .pair-fields {
+      .fields {
         display: flex;
         flex-direction: column;
-        gap: 6px;
-        margin-top: 8px;
+        gap: 4px;
       }
 
-      .pair-fields .row input {
-        width: 190px;
+      /* ── Account ──────────────────────────────────────────────────────────────────────── */
+      .who {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 500;
       }
 
-      /* Narrow, because it sits between a key and a button on one line. */
-      input.address {
-        width: 150px;
+      .who::before {
+        content: '';
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--live);
+      }
+
+      .device {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 7px 0;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .device:last-child {
+        border-bottom: 0;
+      }
+
+      .device .self {
+        color: var(--muted);
         font-size: 11px;
+      }
+
+      #account-devices {
+        margin-top: 8px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      #account-qr {
+        display: block;
+        margin: 4px auto 12px;
+        border-radius: 8px;
+        background: #fff;
+        padding: 8px;
+      }
+
+      #account-secret {
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        color: var(--ink);
+        user-select: all;
+        -webkit-user-select: all;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          transition: none !important;
+          animation: none !important;
+        }
       }
 
       [hidden] {
@@ -233,26 +472,69 @@
   <body>
     <div class="drag"></div>
 
-    <h1>Prism</h1>
-    <div class="sub"><code id="me">…</code></div>
+    <header class="crown">
+      <span class="crown-name" id="me-name">This machine</span>
+      <code id="me">…</code>
+    </header>
 
-    <section>
-      <h2>Stream</h2>
-      <div class="row">
-        <span class="status"><span class="dot" id="dot"></span><span id="phase">Not connected</span></span>
+    <div class="state" id="state" data-phase="idle" hidden>
+      <div class="state-line">
+        <span id="phase">Not connected</span>
         <button id="disconnect" hidden>Disconnect</button>
       </div>
       <div class="error" id="stream-error" hidden></div>
+    </div>
+
+    <section class="band" id="machines-section">
+      <div class="band-head"><h2>Machines</h2></div>
+      <div id="hosts"><div class="empty">None yet</div></div>
     </section>
 
-    <section>
-      <h2>Hosts</h2>
-      <div id="hosts"><div class="empty">No host paired yet</div></div>
+    <section class="band" id="account-section">
+      <div class="band-head"><h2>Account</h2></div>
+
+      <div id="account-signed-out">
+        <p class="hint">
+          Sign in and your machines find each other. Without an account they still pair, by
+          reading a code off one screen.
+        </p>
+        <div class="fields">
+          <div class="row"><span>Name</span><input type="text" id="account-name" spellcheck="false" /></div>
+          <div class="row"><span>Password</span><input type="password" id="account-password" /></div>
+          <div class="row"><span>Code</span><input type="text" id="account-code" inputmode="numeric" maxlength="6" placeholder="123456" /></div>
+          <div class="row">
+            <button id="account-create">Create account</button>
+            <button id="account-signin" class="primary">Sign in</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="account-signed-in" hidden>
+        <div class="row">
+          <span class="who" id="account-who"></span>
+          <button id="account-signout">Sign out</button>
+        </div>
+        <div class="row" id="account-relay-row">
+          <span>Relay</span><span class="value" id="account-relay"></span>
+        </div>
+      </div>
+
+      <div id="account-enrolment" hidden>
+        <p class="hint">
+          Scan this with an authenticator app. It is shown once — the server keeps only enough
+          to check codes, which is not enough to show it again.
+        </p>
+        <img id="account-qr" alt="" width="200" height="200" />
+        <div class="row"><span>Or type</span><code id="account-secret"></code></div>
+        <div class="row"><span></span><button id="account-enrolled" class="primary">Done</button></div>
+      </div>
+
+      <div class="error" id="account-error" hidden></div>
     </section>
 
-    <section>
-      <h2>Pair with a host</h2>
-      <div class="pair-fields">
+    <section class="band">
+      <div class="band-head"><h2>Pair by code</h2></div>
+      <div class="fields">
         <div class="row">
           <span>Address</span>
           <input type="text" id="pair-address" placeholder="192.168.1.5:47100" spellcheck="false" />
@@ -263,14 +545,18 @@
         </div>
         <div class="row">
           <span></span>
-          <button id="pair-button" class="primary">Pair</button>
+          <button id="pair-button">Pair</button>
         </div>
       </div>
       <div class="error" id="pair-error" hidden></div>
     </section>
 
-    <section>
-      <h2>Settings</h2>
+    <section class="band">
+      <div class="band-head"><h2>Settings</h2></div>
+      <div class="row">
+        <span>Account server</span>
+        <input type="text" id="account-server" placeholder="https://rv.example.com" spellcheck="false" />
+      </div>
       <div class="row">
         <span>Rendezvous</span>
         <input type="text" id="rendezvous" placeholder="host:47300" spellcheck="false" />

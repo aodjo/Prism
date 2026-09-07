@@ -19,9 +19,62 @@ export interface Identity {
 }
 
 /** What this machine is configured to do. */
+/**
+ * What is known about the account, if any.
+ *
+ * A machine with no account is not a lesser one: it pairs by reading six digits off the host's
+ * screen, which is what every machine did before accounts existed and what one still does when
+ * there is no server to sign in to.
+ */
+export interface AccountState {
+  /** Where the account server is, or empty when none is configured. */
+  readonly server: string;
+  /** The name signed in as, or `null`. */
+  readonly name: string | null;
+  /** This machine's own public key, as hex. */
+  readonly publicKey: string;
+  /** Every machine on the account, this one included. */
+  readonly devices: readonly AccountDeviceView[];
+  /** Whether the account may use the relay. */
+  readonly relayAllowed: boolean;
+  /** What went wrong the last time something was tried, if anything. */
+  readonly error: string | null;
+}
+
+/** One machine on the account, as the window shows it. */
+export interface AccountDeviceView {
+  /** Its long-term public key, as hex. */
+  readonly publicKey: string;
+  /** What its owner calls it. */
+  readonly label: string;
+  /** Whether it is the machine this window is running on. */
+  readonly isThisMachine: boolean;
+}
+
+/**
+ * What creating an account produced, shown once and never again.
+ *
+ * The server keeps only enough to check codes, which is not enough to show the secret a second
+ * time. Somebody who closes this without scanning it has to start over.
+ */
+export interface AccountEnrolmentView {
+  /** A QR code of the provisioning link, as a data URI. */
+  readonly qr: string;
+  /** The same secret as text, for typing in when a camera is not to hand. */
+  readonly secret: string;
+}
+
 export interface Settings {
   /** Rendezvous server to find hosts through, or empty to connect directly. */
   rendezvous: string;
+  /**
+   * Account server to sign in to, or empty to pair by code instead.
+   *
+   * Signing in is what makes a machine's own machines follow it: the account knows which
+   * public keys are its own, so two of them trust each other without anybody reading digits
+   * off a screen.
+   */
+  accountServer: string;
   /** Whether to send input to the host, or only watch. */
   control: boolean;
   /** Whether to even out arrival jitter at the cost of a little latency. */
@@ -75,6 +128,59 @@ export interface PrismApi {
    * @returns {Promise<Identity>} This machine's key and its hosts.
    */
   identity(): Promise<Identity>;
+
+  /**
+   * Returns what is known about the account.
+   *
+   * @returns {Promise<AccountState>} The current state, signed in or not.
+   */
+  accountState(): Promise<AccountState>;
+
+  /**
+   * Creates an account and returns the second factor to set up, once.
+   *
+   * @param {string} name - What to sign in as.
+   * @param {string} password - The password, which never leaves this machine.
+   * @returns {Promise<AccountEnrolmentView>} What to put into an authenticator app.
+   * @throws {Error} If the name is taken, or the server cannot be reached.
+   */
+  accountRegister(name: string, password: string): Promise<AccountEnrolmentView>;
+
+  /**
+   * Signs in, registers this machine, and trusts every other machine on the account.
+   *
+   * @param {string} name - The account name.
+   * @param {string} password - The password, which never leaves this machine.
+   * @param {string} code - Six digits from an authenticator app.
+   * @param {string} label - What to call this machine.
+   * @returns {Promise<AccountState>} The state afterwards.
+   * @throws {Error} If any of the three is wrong, which is reported as one failure.
+   */
+  accountSignIn(
+    name: string,
+    password: string,
+    code: string,
+    label: string,
+  ): Promise<AccountState>;
+
+  /**
+   * Forgets the session on this machine.
+   *
+   * Machines already trusted stay trusted: they were paired, and signing out is not the same
+   * as saying they are not yours.
+   *
+   * @returns {Promise<AccountState>} The state afterwards.
+   */
+  accountSignOut(): Promise<AccountState>;
+
+  /**
+   * Removes a machine from the account.
+   *
+   * @param {string} publicKey - The machine's public key, as hex.
+   * @returns {Promise<AccountState>} The state afterwards.
+   * @throws {Error} If the session has expired.
+   */
+  accountForgetDevice(publicKey: string): Promise<AccountState>;
 
   /**
    * Returns the stored settings.

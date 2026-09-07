@@ -8,31 +8,34 @@
     />
     <title>Prism</title>
     <style>
-      /* The panel follows the system appearance rather than choosing one. A menu bar window
-         that stays light while everything around it is dark reads as broken. */
+      /* The same palette the client window uses, because these are two halves of one product
+         and a person runs both. A tray panel that followed the system appearance instead would
+         match the menu bar it hangs from and match nothing else in Prism. */
       :root {
-        color-scheme: light dark;
-        --ink: #17181c;
-        --muted: #6b7078;
-        --line: #d9dce1;
-        --ground: #f7f8fa;
-        --raised: #ffffff;
-        --accent: #2f6df6;
-        --good: #1e9e5a;
-        --bad: #d2453c;
-      }
+        color-scheme: dark;
 
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --ink: #eceef2;
-          --muted: #9aa1ac;
-          --line: #33363d;
-          --ground: #1b1d22;
-          --raised: #24262c;
-          --accent: #5b8dff;
-          --good: #3fbf7a;
-          --bad: #f0655c;
-        }
+        --ground: #14131a;
+        --band: #1a1922;
+        --raised: #201f2a;
+        --line: #2b2937;
+        --line-soft: #232231;
+
+        --ink: #eceaf4;
+        --ink-dim: #b3aec6;
+        --muted: #7d7891;
+
+        --accent: #a78bfa;
+        --accent-ink: #17121f;
+
+        --live: #4ade80;
+        --wait: #7aa2f7;
+        --warn: #f5c451;
+        --bad: #f87171;
+
+        --sans:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui,
+          sans-serif;
+        --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'JetBrains Mono', Menlo, monospace;
       }
 
       * {
@@ -41,47 +44,104 @@
 
       body {
         margin: 0;
-        padding: 14px;
-        font:
-          13px/1.45 -apple-system,
-          BlinkMacSystemFont,
-          'Segoe UI',
-          system-ui,
-          sans-serif;
+        font-family: var(--sans);
+        font-size: 13px;
+        line-height: 1.45;
         color: var(--ink);
         background: var(--ground);
         user-select: none;
         -webkit-user-select: none;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* ── Who this machine is ────────────────────────────────────────────────────────── */
+      .crown {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 14px 16px 12px;
       }
 
       h1 {
-        margin: 0 0 2px;
-        font-size: 15px;
+        margin: 0;
+        font-size: 13px;
         font-weight: 600;
         letter-spacing: -0.01em;
       }
 
-      .sub {
-        color: var(--muted);
-        font-size: 11px;
-        font-variant-numeric: tabular-nums;
+      /* ── The one loud thing ─────────────────────────────────────────────────────────────
+         Unlike the client, this one is always here: whether a machine is hosting is the
+         whole question a person opens this panel to answer. */
+      .state {
+        padding: 12px 16px 12px 13px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        border-left: 3px solid var(--edge);
+        background: color-mix(in oklab, var(--edge) 9%, var(--band));
+        --edge: var(--muted);
       }
 
-      section {
-        margin-top: 12px;
-        padding: 11px 12px;
-        background: var(--raised);
-        border: 1px solid var(--line);
-        border-radius: 9px;
+      .state[data-phase='waiting'],
+      .state[data-phase='opening'] {
+        --edge: var(--wait);
+        animation: waiting 1.6s ease-in-out infinite;
+      }
+
+      @keyframes waiting {
+        50% {
+          border-left-color: color-mix(in oklab, var(--wait) 35%, var(--band));
+        }
+      }
+
+      .state[data-phase='streaming'] {
+        --edge: var(--live);
+      }
+
+      .state[data-phase='failed'] {
+        --edge: var(--bad);
+      }
+
+      .state-line {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      #phase {
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      /* The numbers a running session produces. Hidden until there is a session, because a
+         panel full of zeroes says a machine is doing something badly rather than nothing. */
+      .readings {
+        margin-top: 8px;
+      }
+
+      /* Nothing at all rather than an empty gap, for the state where every reading is hidden.
+         A margin under a heading with no content below it reads as a section that failed to
+         load. */
+      .readings:not(:has(.row:not([hidden]))) {
+        display: none;
+      }
+
+      /* ── Bands ───────────────────────────────────────────────────────────────────────── */
+      .band {
+        padding: 13px 16px;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .band:last-of-type {
+        border-bottom: 0;
       }
 
       h2 {
         margin: 0 0 8px;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 600;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
-        color: var(--muted);
+        color: var(--ink-dim);
       }
 
       .row {
@@ -89,111 +149,103 @@
         align-items: center;
         justify-content: space-between;
         gap: 10px;
-        min-height: 24px;
-      }
-
-      .row + .row {
-        margin-top: 6px;
+        min-height: 26px;
       }
 
       .row .value {
-        color: var(--muted);
+        color: var(--ink-dim);
         font-variant-numeric: tabular-nums;
-        text-align: right;
-      }
-
-      .status {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        font-weight: 500;
-      }
-
-      .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--muted);
-        flex: none;
-      }
-
-      .dot.live {
-        background: var(--good);
-      }
-
-      .dot.waiting {
-        background: var(--accent);
-      }
-
-      .dot.bad {
-        background: var(--bad);
       }
 
       button {
         font: inherit;
+        font-size: 12px;
         font-weight: 500;
-        color: var(--ink);
-        background: var(--ground);
+        color: var(--ink-dim);
+        background: var(--raised);
         border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 5px 11px;
+        border-radius: 7px;
+        padding: 5px 12px;
         cursor: pointer;
+        transition:
+          background 120ms ease,
+          color 120ms ease,
+          border-color 120ms ease;
       }
 
       button:hover:not(:disabled) {
-        border-color: var(--accent);
-        color: var(--accent);
+        color: var(--ink);
+        border-color: color-mix(in oklab, var(--accent) 45%, var(--line));
+      }
+
+      button:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
       }
 
       button:disabled {
-        opacity: 0.45;
+        opacity: 0.4;
         cursor: default;
       }
 
       button.primary {
         background: var(--accent);
         border-color: var(--accent);
-        color: #fff;
+        color: var(--accent-ink);
+        font-weight: 600;
       }
 
       button.primary:hover:not(:disabled) {
-        color: #fff;
-        filter: brightness(1.08);
+        background: color-mix(in oklab, var(--accent) 88%, white);
+        border-color: color-mix(in oklab, var(--accent) 88%, white);
+        color: var(--accent-ink);
       }
 
       input[type='text'],
       input[type='number'] {
         font: inherit;
+        font-size: 12px;
         color: var(--ink);
         background: var(--ground);
         border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 4px 7px;
+        border-radius: 7px;
+        padding: 5px 8px;
         width: 150px;
-        text-align: right;
       }
 
-      input:focus {
+      input::placeholder {
+        color: var(--muted);
+      }
+
+      input:focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: -1px;
       }
 
+      input[type='checkbox'] {
+        accent-color: var(--accent);
+        width: 15px;
+        height: 15px;
+      }
+
       code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-family: var(--mono);
         font-size: 11px;
         color: var(--muted);
         user-select: text;
         -webkit-user-select: text;
       }
 
+      /* The one number in this application a person reads out loud to somebody else, so it is
+         set at the size that survives being read off a screen from a step away. */
       .code {
-        margin: 6px 0 2px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin: 10px 0 4px;
+        font-family: var(--mono);
         font-size: 30px;
         font-weight: 600;
         letter-spacing: 0.16em;
         text-align: center;
-        color: var(--ink);
+        color: var(--accent);
         user-select: text;
         -webkit-user-select: text;
       }
@@ -208,6 +260,7 @@
         color: var(--bad);
         font-size: 11px;
         margin-top: 6px;
+        white-space: pre-wrap;
       }
 
       /* A missing grant is a warning rather than a failure: the host still runs, it just
@@ -229,6 +282,13 @@
         font-size: 11px;
       }
 
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          transition: none !important;
+          animation: none !important;
+        }
+      }
+
       [hidden] {
         display: none !important;
       }
@@ -236,39 +296,42 @@
   </head>
 
   <body>
-    <h1>Prism</h1>
-    <div class="sub"><code id="me">…</code></div>
+    <header class="crown">
+      <h1>Prism</h1>
+      <code id="me">…</code>
+    </header>
 
-    <section>
-      <h2>Session</h2>
-      <div class="row">
-        <span class="status"><span class="dot" id="dot"></span><span id="phase">Not hosting</span></span>
+    <div class="state" id="state" data-phase="idle">
+      <div class="state-line">
+        <span id="phase">Not hosting</span>
         <button id="toggle" class="primary">Start hosting</button>
       </div>
-      <div class="row" id="peer-row" hidden>
-        <span>Client</span><span class="value"><code id="peer"></code></span>
-      </div>
-      <div class="row" id="local-row" hidden>
-        <span>Listening on</span><span class="value"><code id="local"></code></span>
-      </div>
-      <div class="row" id="observed-row" hidden>
-        <span>Reachable at</span><span class="value"><code id="observed"></code></span>
-      </div>
-      <div class="row" id="rate-row" hidden>
-        <span>Sending</span><span class="value" id="rate"></span>
-      </div>
-      <div class="row" id="frames-row" hidden>
-        <span>Frames</span><span class="value" id="frames"></span>
+      <div class="readings">
+        <div class="row" id="peer-row" hidden>
+          <span>Client</span><span class="value"><code id="peer"></code></span>
+        </div>
+        <div class="row" id="local-row" hidden>
+          <span>Listening on</span><span class="value"><code id="local"></code></span>
+        </div>
+        <div class="row" id="observed-row" hidden>
+          <span>Reachable at</span><span class="value"><code id="observed"></code></span>
+        </div>
+        <div class="row" id="rate-row" hidden>
+          <span>Sending</span><span class="value" id="rate"></span>
+        </div>
+        <div class="row" id="frames-row" hidden>
+          <span>Frames</span><span class="value" id="frames"></span>
+        </div>
       </div>
       <div class="error" id="session-error" hidden></div>
-    </section>
+    </div>
 
-    <section id="permissions-section" hidden>
+    <section class="band" id="permissions-section" hidden>
       <h2>Permissions</h2>
       <div id="permissions"></div>
     </section>
 
-    <section>
+    <section class="band">
       <h2>Paired devices</h2>
       <div class="row">
         <span id="peers">None yet</span>
@@ -281,7 +344,7 @@
       <div class="error" id="pair-error" hidden></div>
     </section>
 
-    <section>
+    <section class="band">
       <h2>Settings</h2>
       <div class="row">
         <span>Rendezvous</span>

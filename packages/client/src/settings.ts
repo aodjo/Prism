@@ -13,6 +13,7 @@ import type { Settings } from './api.js';
  */
 export const DEFAULTS: Settings = {
   rendezvous: '',
+  accountServer: '',
   control: true,
   smooth: false,
   addresses: {},

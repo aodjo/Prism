@@ -9,7 +9,13 @@
  * it, stops it, and reports what it said.
  */
 
-import type { PrismApi, Settings, StreamState } from './api.js';
+import type {
+  AccountDeviceView,
+  AccountState,
+  PrismApi,
+  Settings,
+  StreamState,
+} from './api.js';
 
 declare global {
   interface Window {
@@ -23,14 +29,28 @@ const prism = window.prism;
 /** The phases in which a stream is running and can be stopped. */
 const RUNNING = new Set(['connecting', 'streaming']);
 
-/** What each phase is called in the window. */
+/**
+ * What each phase is called in the window.
+ *
+ * Said from the person's point of view rather than the session's. "Stopped" is what the
+ * process did; "Not connected" is what they can see.
+ */
 const PHASE_LABELS: Record<string, string> = {
   idle: 'Not connected',
-  connecting: 'Connecting',
-  streaming: 'Streaming',
+  connecting: 'Connecting to',
+  streaming: 'Streaming from',
   stopped: 'Not connected',
-  failed: 'Disconnected',
+  failed: 'Disconnected from',
 };
+
+/** This machine's own key, shown when no stream is naming another one. */
+let identityKey = '';
+
+/** The same key in full, so this machine can be told apart from the ones it may connect to. */
+let ownKey = '';
+
+/** Every machine the account knows, so the list can call them what their owner calls them. */
+let accountDevices: readonly AccountDeviceView[] = [];
 
 /** What the last state said the phase was. */
 let phase = 'idle';
@@ -129,19 +149,12 @@ function showError(id: string, error: unknown): void {
 function render(state: StreamState): void {
   phase = state.phase;
 
-  const dot = el('dot');
-  dot.className = 'dot';
-
-  if (phase === 'streaming') {
-    dot.classList.add('live');
-  } else if (phase === 'connecting') {
-    dot.classList.add('waiting');
-  } else if (phase === 'failed') {
-    dot.classList.add('bad');
-  }
+  // The phase is an attribute rather than a set of classes, so the stylesheet decides what
+  // each state looks like in one place instead of the script deciding it in another.
+  el('state').dataset['phase'] = phase;
 
   const label = PHASE_LABELS[phase] ?? phase;
-  el('phase').textContent = state.host ? `${label} — ${short(state.host)}` : label;
+  el('phase').textContent = state.host ? `${label} ${machineName(state.host)}` : label;
 
   button('disconnect').hidden = !RUNNING.has(phase);
 
@@ -155,6 +168,11 @@ function render(state: StreamState): void {
     error.hidden = true;
   }
 
+  // Nothing is said about a connection nobody has asked for. The band is the loudest thing in
+  // the window, and spending it on "Not connected" would leave it with nothing louder for the
+  // moment a stream actually drops.
+  el('state').hidden = phase === 'idle' || phase === 'stopped';
+
   renderHosts();
   fit();
 }
@@ -163,7 +181,38 @@ function render(state: StreamState): void {
 let hosts: readonly string[] = [];
 
 /**
- * Draws the list of paired hosts.
+ * Names this machine at the top of the window.
+ *
+ * It has a name only once an account has been signed in to and given one, so until then it is
+ * described rather than named.
+ *
+ * @returns {void}
+ */
+function renderCrown(): void {
+  const mine = accountDevices.find((device) => device.publicKey === ownKey);
+
+  el('me-name').textContent = mine?.label || 'This machine';
+}
+
+/**
+ * Returns what to call a machine.
+ *
+ * The account is asked first, because a person named their machines and a public key is what
+ * is left when nobody has.
+ *
+ * @param {string} key - The machine's public key as hex.
+ * @returns {string} Its name.
+ */
+function machineName(key: string): string {
+  return accountDevices.find((device) => device.publicKey === key)?.label || short(key);
+}
+
+/**
+ * Draws every machine this one can reach.
+ *
+ * One list rather than two. A machine arrives here either by being paired with directly or by
+ * being on the same account, and which of those happened is not something anybody wants to
+ * read two lists to find out.
  *
  * @returns {void}
  */
@@ -171,49 +220,92 @@ function renderHosts(): void {
   const list = el('hosts');
   list.textContent = '';
 
-  if (hosts.length === 0) {
+  // This machine is in both sources and belongs in neither list. Connecting to yourself is
+  // not something anybody wants, and offering it is how it gets tried.
+  const keys = [
+    ...new Set([...accountDevices.map((device) => device.publicKey), ...hosts]),
+  ].filter((key) => key !== ownKey);
+
+  if (keys.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    empty.textContent = 'No host paired yet';
+    // An empty screen is an invitation rather than a report.
+    empty.textContent = 'Sign in, or pair with a code below';
     list.append(empty);
 
     return;
   }
 
-  for (const host of hosts) {
-    const row = document.createElement('div');
-    row.className = 'row';
-
-    const name = document.createElement('code');
-    name.textContent = short(host);
-    name.title = host;
-
-    // Where this host is, when there is no rendezvous server to ask. The host's own panel
-    // shows the address it is listening on; this is where it gets typed, and it is remembered
-    // so it is typed once rather than every time.
-    const address = document.createElement('input');
-    address.type = 'text';
-    address.className = 'address';
-    address.placeholder = settings.rendezvous === '' ? '192.168.1.5:47200' : 'via rendezvous';
-    address.spellcheck = false;
-    address.value = settings.addresses[host] ?? '';
-    address.addEventListener('change', () => {
-      const next = { ...settings.addresses, [host]: address.value.trim() };
-      settings = { ...settings, addresses: next };
-      void save({ addresses: next });
-    });
-
-    const connect = document.createElement('button');
-    connect.className = 'primary';
-    connect.textContent = 'Connect';
-    connect.disabled = RUNNING.has(phase);
-    connect.addEventListener('click', () => {
-      void start(host, address.value.trim());
-    });
-
-    row.append(name, address, connect);
-    list.append(row);
+  for (const host of keys) {
+    list.append(hostRow(host));
   }
+}
+
+/**
+ * Builds one machine's row.
+ *
+ * @param {string} host - The machine's public key as hex.
+ * @returns {HTMLElement} The row.
+ */
+function hostRow(host: string): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'host';
+
+  const name = document.createElement('span');
+  name.className = 'host-name';
+  name.textContent = machineName(host);
+  name.title = host;
+
+  // Where this host is, when there is no rendezvous server to ask. The host's own panel shows
+  // the address it is listening on; this is where it gets typed, and it is remembered so it is
+  // typed once rather than every time.
+  const where = document.createElement('span');
+  where.className = 'host-where';
+
+  const address = document.createElement('input');
+  address.type = 'text';
+  address.placeholder = settings.rendezvous === '' ? '192.168.1.5:47200' : 'via rendezvous';
+  address.spellcheck = false;
+  address.value = settings.addresses[host] ?? '';
+  address.addEventListener('change', () => {
+    const next = { ...settings.addresses, [host]: address.value.trim() };
+    settings = { ...settings, addresses: next };
+    void save({ addresses: next });
+  });
+  where.append(address);
+
+  const actions = document.createElement('span');
+  actions.className = 'host-do';
+
+  if (accountDevices.some((device) => device.publicKey === host)) {
+    const forget = document.createElement('button');
+    forget.className = 'forget';
+    forget.textContent = 'Forget';
+    forget.addEventListener('click', () => {
+      void (async () => {
+        forget.disabled = true;
+        try {
+          renderAccount(await prism.accountForgetDevice(host));
+        } catch (error) {
+          showError('account-error', error);
+        }
+        fit();
+      })();
+    });
+    actions.append(forget);
+  }
+
+  const connect = document.createElement('button');
+  connect.textContent = 'Connect';
+  connect.disabled = RUNNING.has(phase);
+  connect.addEventListener('click', () => {
+    void start(host, address.value.trim());
+  });
+  actions.append(connect);
+
+  row.append(name, actions, where);
+
+  return row;
 }
 
 /**
@@ -276,7 +368,13 @@ async function pair(): Promise<void> {
 }
 
 /** What this machine is configured to do, as the window last read it. */
-let settings: Settings = { rendezvous: '', control: true, smooth: false, addresses: {} };
+let settings: Settings = {
+  rendezvous: '',
+  accountServer: '',
+  control: true,
+  smooth: false,
+  addresses: {},
+};
 
 /**
  * Loads the stored settings into the inputs.
@@ -288,6 +386,7 @@ async function loadSettings(): Promise<void> {
   settings = await prism.getSettings();
 
   input('rendezvous').value = settings.rendezvous;
+  input('account-server').value = settings.accountServer;
   input('control').checked = settings.control;
   input('smooth').checked = settings.smooth;
 }
@@ -304,11 +403,149 @@ async function save(change: Partial<Settings>): Promise<void> {
 }
 
 /**
+ * Draws what is known about the account.
+ *
+ * Three states in one section: nobody signed in, somebody signed in, and the one moment a new
+ * account's second factor is on screen. The last one hides the others because it is the only
+ * time something is shown that cannot be shown again.
+ *
+ * @param {AccountState} state - What the main process says.
+ * @returns {void}
+ */
+function renderAccount(state: AccountState): void {
+  const configured = state.server.trim() !== '';
+  const enrolling = !el('account-enrolment').hidden;
+
+  el('account-section').hidden = !configured;
+  el('account-signed-out').hidden = enrolling || state.name !== null;
+  el('account-signed-in').hidden = enrolling || state.name === null;
+
+  el('account-who').textContent = state.name ?? '';
+  el('account-relay').textContent = state.relayAllowed ? 'allowed' : 'not allowed';
+
+  const error = el('account-error');
+  error.hidden = state.error === null;
+  error.textContent = state.error ?? '';
+
+  accountDevices = state.devices;
+  renderCrown();
+  renderHosts();
+
+  fit();
+}
+
+/**
+ * Signs in and reports what happened.
+ *
+ * @async
+ * @returns {Promise<void>}
+ */
+async function signIn(): Promise<void> {
+  const name = input('account-name').value.trim();
+  const password = input('account-password').value;
+  const code = input('account-code').value.trim();
+
+  el('account-error').hidden = true;
+  button('account-signin').disabled = true;
+  button('account-signin').textContent = 'Signing in…';
+
+  try {
+    // A label the person can recognise later, which is the machine's own name rather than
+    // anything they have to think of. It can be renamed by signing in again.
+    const state = await prism.accountSignIn(name, password, code, hostLabel());
+
+    input('account-password').value = '';
+    input('account-code').value = '';
+    renderAccount(state);
+    renderHosts();
+  } catch (error) {
+    showError('account-error', error);
+  } finally {
+    button('account-signin').disabled = false;
+    button('account-signin').textContent = 'Sign in';
+  }
+}
+
+/**
+ * Creates an account and shows the second factor to set up.
+ *
+ * @async
+ * @returns {Promise<void>}
+ */
+async function createAccount(): Promise<void> {
+  const name = input('account-name').value.trim();
+  const password = input('account-password').value;
+
+  el('account-error').hidden = true;
+  button('account-create').disabled = true;
+
+  try {
+    const enrolment = await prism.accountRegister(name, password);
+
+    (el('account-qr') as HTMLImageElement).src = enrolment.qr;
+    el('account-secret').textContent = enrolment.secret;
+
+    el('account-enrolment').hidden = false;
+    el('account-signed-out').hidden = true;
+    el('account-signed-in').hidden = true;
+    fit();
+  } catch (error) {
+    showError('account-error', error);
+  } finally {
+    button('account-create').disabled = false;
+  }
+}
+
+/**
+ * What to call this machine on the account.
+ *
+ * @returns {string} A name somebody would recognise.
+ */
+function hostLabel(): string {
+  const platform = navigator.platform || 'computer';
+
+  return `${platform} (${new Date().getFullYear()})`;
+}
+
+/**
  * Wires every control to what it changes.
  *
  * @returns {void}
  */
 function listen(): void {
+  button('account-signin').addEventListener('click', () => {
+    void signIn();
+  });
+
+  button('account-create').addEventListener('click', () => {
+    void createAccount();
+  });
+
+  button('account-enrolled').addEventListener('click', () => {
+    // Back to the sign-in fields, with the code box waiting: the account exists now and the
+    // very next thing to do is use it.
+    el('account-enrolment').hidden = true;
+    void (async () => {
+      renderAccount(await prism.accountState());
+      input('account-code').focus();
+    })();
+  });
+
+  button('account-signout').addEventListener('click', () => {
+    void (async () => {
+      renderAccount(await prism.accountSignOut());
+    })();
+  });
+
+  input('account-server').addEventListener('change', (event) => {
+    const accountServer = (event.target as HTMLInputElement).value.trim();
+    settings = { ...settings, accountServer };
+    void (async () => {
+      await save({ accountServer });
+      renderAccount(await prism.accountState());
+    })();
+  });
+
   button('disconnect').addEventListener('click', () => {
     void (async () => {
       render(await prism.disconnect());
@@ -348,11 +585,15 @@ function listen(): void {
 async function begin(): Promise<void> {
   const identity = await prism.identity();
 
-  el('me').textContent = short(identity.publicKey);
+  ownKey = identity.publicKey;
+  identityKey = short(identity.publicKey);
+  el('me').textContent = identityKey;
   el('me').title = identity.publicKey;
+  renderCrown();
   hosts = identity.hosts;
 
   await loadSettings();
+  renderAccount(await prism.accountState());
   render(await prism.streamState());
 }
 

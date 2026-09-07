@@ -82,7 +82,7 @@ const TIMEOUT_MS = 20_000;
  */
 export class AccountClient {
   /** Where the server is, without a trailing slash. */
-  private readonly base: string;
+  readonly base: string;
 
   /** Derives the sign-in secret; native, because it is a memory-hard hash. */
   private readonly deriveAuth: DeriveAuth;
@@ -107,15 +107,32 @@ export class AccountClient {
   }
 
   /**
-   * Forgets the session without telling the server.
+   * Ends the session, here and on the server.
    *
-   * The server's own copy expires on its own and is dropped when it restarts, so there is
-   * nothing to ask it to do.
+   * The server is told rather than left to expire the token on its own, because sessions
+   * survive a restart now: a token this client merely forgot would go on working for the rest
+   * of its twelve hours in the hands of anybody who had read it.
    *
-   * @returns {void}
+   * Forgetting happens either way. Somebody signing out on a machine they are about to hand
+   * over should not stay signed in on it because the network was down.
+   *
+   * @async
+   * @returns {Promise<void>}
    */
-  signOut(): void {
+  async signOut(): Promise<void> {
+    const token = this.token;
     this.token = null;
+
+    if (token === null) {
+      return;
+    }
+
+    try {
+      await this.sendWith(token, 'DELETE', '/v1/session');
+    } catch {
+      // Nothing to do about it and nothing to say: the token is gone from this machine, and
+      // the server drops it when it expires.
+    }
   }
 
   /**
@@ -170,6 +187,47 @@ export class AccountClient {
       devices: body.devices.map(toDevice),
       relayAllowed: body.relay_allowed,
     };
+  }
+
+  /**
+   * Signs in with a token kept from a previous run.
+   *
+   * The token is checked by being used, which is the only check worth anything: a token that
+   * looks well-formed and has expired is indistinguishable from a good one until the server
+   * says otherwise. A refusal clears it, so a stale token is discarded rather than retried on
+   * every later call.
+   *
+   * @async
+   * @param {string} token - What was stored the last time somebody signed in.
+   * @returns {Promise<AccountSession & {name: string} | null>} The session, or `null` if the
+   *   token is no longer good.
+   * @throws {AccountError} If the server could not be reached, which is not the same as the
+   *   token being bad and must not throw the token away.
+   */
+  async resume(token: string): Promise<(AccountSession & { name: string }) | null> {
+    this.token = token;
+
+    try {
+      const body = await this.send<{
+        name: string;
+        devices: { public_key: string; label: string; added_unix: number }[];
+        relay_allowed: boolean;
+      }>('GET', '/v1/session');
+
+      return {
+        name: body.name,
+        token,
+        devices: body.devices.map(toDevice),
+        relayAllowed: body.relay_allowed,
+      };
+    } catch (error) {
+      if (error instanceof AccountError && error.status === 401) {
+        return null;
+      }
+
+      this.token = null;
+      throw error;
+    }
   }
 
   /**
@@ -258,12 +316,34 @@ export class AccountClient {
    * @throws {AccountError} If the server refused, or could not be reached in time.
    */
   private async send<T>(method: string, path: string, body?: unknown): Promise<T> {
+    return this.sendWith(this.token, method, path, body);
+  }
+
+  /**
+   * Sends one request under a named token rather than the current one.
+   *
+   * Exists for signing out, which has to use a token it has already given up.
+   *
+   * @async
+   * @param {string | null} token - What to authorise with, if anything.
+   * @param {string} method - The HTTP method.
+   * @param {string} path - The path, including any query.
+   * @param {unknown} [body] - What to send, when there is anything.
+   * @returns {Promise<T>} The parsed reply.
+   * @throws {AccountError} If the server refused, or could not be reached in time.
+   */
+  private async sendWith<T>(
+    token: string | null,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) {
       headers['content-type'] = 'application/json';
     }
-    if (this.token) {
-      headers['authorization'] = `Bearer ${this.token}`;
+    if (token) {
+      headers['authorization'] = `Bearer ${token}`;
     }
 
     let response: Response;
