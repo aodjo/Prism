@@ -976,14 +976,7 @@ fn stream(
         for index in 0..frame.slices.len() {
             let data = frame.slice(index).expect("slice index is in range");
             sender
-                .send_slice(
-                    frame_id,
-                    index as u16,
-                    data,
-                    capture_ts_us,
-                    frame.is_idr,
-                    index == last,
-                )
+                .send_slice(frame_id, data, capture_ts_us, frame.is_idr, index == last)
                 .map_err(|err| err.to_string())?;
         }
 

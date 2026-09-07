@@ -216,7 +216,6 @@ pub fn run(run: HostRun, keys: &HostKeys) -> io::Result<()> {
             let bytes = slice_prefix(slice, slice_id, slices.len(), budget);
             sender.send_slice(
                 frame_id,
-                slice_id as u16,
                 bytes,
                 capture_ts_us,
                 is_idr,
@@ -404,14 +403,7 @@ fn drain_one(
 
     for slice_id in 0..frame.slices.len() {
         let data = frame.slice(slice_id).expect("slice index is in range");
-        sender.send_slice(
-            frame_id,
-            slice_id as u16,
-            data,
-            capture_ts_us,
-            is_idr,
-            slice_id == last,
-        )?;
+        sender.send_slice(frame_id, data, capture_ts_us, is_idr, slice_id == last)?;
     }
 
     Ok(true)
@@ -723,14 +715,7 @@ pub fn run_windows(
         let last = frame.slices.len().saturating_sub(1);
         for index in 0..frame.slices.len() {
             let data = frame.slice(index).expect("slice index is in range");
-            sender.send_slice(
-                sent,
-                index as u16,
-                data,
-                capture_ts_us,
-                frame.is_idr,
-                index == last,
-            )?;
+            sender.send_slice(sent, data, capture_ts_us, frame.is_idr, index == last)?;
         }
 
         sent += 1;
