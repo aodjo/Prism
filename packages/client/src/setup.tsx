@@ -1,0 +1,854 @@
+/**
+ * The setup flow.
+ *
+ * Six screens in one window, shown once. Everything on them is real: the permissions are the
+ * ones this machine actually holds, the code pairs, the connection is a connection, and the
+ * numbers on the last screen came off the stream. A flow that showed a plausible picture
+ * instead would be a flow that passes when the thing behind it is broken.
+ */
+
+import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
+import type { JSX } from 'react';
+import { createRoot } from 'react-dom/client';
+
+import type {
+  AccountDeviceView,
+  HostPermissions,
+  PrismApi,
+  Settings,
+  StreamState,
+} from './api.js';
+import { latency } from './format.js';
+import { Backdrop, Primary, STEP_SKY, Trouble, WELCOME_SKY, Wordmark, reason, short } from './ui.js';
+
+declare global {
+  interface Window {
+    readonly prism: PrismApi;
+  }
+}
+
+const prism = window.prism;
+
+/** The screens, in the order somebody sees them. */
+const STEPS = ['welcome', 'intro', 'permissions', 'device', 'connecting', 'ready'] as const;
+
+type Step = (typeof STEPS)[number];
+
+/** Which of the five dots is lit on each screen. The welcome screen is before the count. */
+const STEP_DOTS: Partial<Record<Step, string>> = {
+  intro: 'assets/steps-2.svg',
+  permissions: 'assets/steps-3.svg',
+  device: 'assets/steps-4.svg',
+  connecting: 'assets/steps-5.svg',
+  ready: 'assets/steps-6.svg',
+};
+
+/** The screens that offer a Continue rather than doing something else with the bottom right. */
+const HAS_NEXT: ReadonlySet<Step> = new Set<Step>(['intro', 'permissions', 'device']);
+
+/** How the three permission rows read, in the order the design puts them. */
+const GRANTS = [
+  {
+    id: 'screen',
+    glyph: '▣',
+    name: 'Screen Recording',
+    why: 'Capture this display so it can be streamed.',
+    tint: 'border-[rgba(124,92,255,0.28)] bg-[rgba(124,92,255,0.16)] text-violet',
+  },
+  {
+    id: 'input',
+    glyph: '⌘',
+    name: 'Accessibility',
+    why: 'Pass keyboard and mouse input to this machine.',
+    tint: 'border-[rgba(53,214,255,0.28)] bg-[rgba(53,214,255,0.16)] text-cyan',
+  },
+  {
+    id: 'network',
+    glyph: '⇄',
+    name: 'Local Network',
+    why: 'Discover your other devices on this network.',
+    tint: 'border-[rgba(77,232,176,0.28)] bg-[rgba(77,232,176,0.16)] text-mint',
+  },
+] as const;
+
+/** How many characters a pairing code has. */
+const CODE_LENGTH = 6;
+
+/** What a screen is laid out inside: a centred column over the backdrop. */
+const SCREEN = 'flex flex-col items-center text-center';
+
+/* ── 02 · Intro ───────────────────────────────────────────────────────────────────────── */
+
+/** The five rays leaving the prism, at the angles and colours the design set. */
+const RAYS = [
+  { turn: '-21deg', rgb: '124, 92, 255' },
+  { turn: '-10.5deg', rgb: '53, 214, 255' },
+  { turn: '0deg', rgb: '77, 232, 176' },
+  { turn: '10.5deg', rgb: '255, 176, 92' },
+  { turn: '21deg', rgb: '255, 92, 168' },
+] as const;
+
+/**
+ * White light going in one side and coming out as five colours.
+ *
+ * The rays are gradients on rotated boxes rather than exported assets, because that is what
+ * the design file holds too — there is no image to export.
+ *
+ * @returns {JSX.Element} The illustration.
+ */
+function PrismArt(): JSX.Element {
+  return (
+    <div className="relative h-[276px] w-[360px]">
+      <div className="absolute left-9 top-[18px] h-[240px] w-[276px] mix-blend-screen">
+        <img
+          src="assets/prism-glow.svg"
+          alt=""
+          className="absolute inset-y-[-22.5%] inset-x-[-19.57%] block max-w-none"
+        />
+      </div>
+      <div className="absolute left-[27px] top-[137px] h-[2px] w-[190px] mix-blend-screen">
+        <img
+          src="assets/incident-beam.svg"
+          alt=""
+          className="absolute inset-y-[-36%] inset-x-[-0.38%] block max-w-none"
+        />
+      </div>
+      {RAYS.map((ray) => (
+        <div
+          key={ray.rgb}
+          className="absolute left-[216px] top-[136.8px] h-[1.5px] w-[180px] origin-left blur-[0.75px] mix-blend-screen"
+          style={{
+            transform: `rotate(${ray.turn})`,
+            background: `linear-gradient(to right, rgb(${ray.rgb}), rgba(${ray.rgb}, 0.55) 65%, rgba(${ray.rgb}, 0))`,
+          }}
+        />
+      ))}
+      <img
+        src="assets/prism-intro.svg"
+        alt=""
+        className="absolute left-[174px] top-[91px] block h-[75px] w-[89px]"
+      />
+    </div>
+  );
+}
+
+/* ── 05 · Connecting ──────────────────────────────────────────────────────────────────── */
+
+/**
+ * The rings that travel outward while a connection is being made.
+ *
+ * The only motion in the flow, and it is here because this is the only screen that is waiting
+ * for something.
+ *
+ * @returns {JSX.Element} The illustration.
+ */
+function Pulse(): JSX.Element {
+  return (
+    <div className="relative size-[320px]">
+      <img
+        src="assets/ring-1.svg"
+        alt=""
+        className="absolute left-0 top-0 block size-[320px] origin-center animate-[ripple_3s_ease-out_infinite_0.8s]"
+      />
+      <img
+        src="assets/ring-2.svg"
+        alt=""
+        className="absolute left-10 top-10 block size-[240px] origin-center animate-[ripple_3s_ease-out_infinite_0.4s]"
+      />
+      <img
+        src="assets/ring-3.svg"
+        alt=""
+        className="absolute left-[78px] top-[78px] block size-[164px] origin-center animate-[ripple_3s_ease-out_infinite]"
+      />
+      <div className="absolute left-[60px] top-[60px] size-[200px] mix-blend-screen">
+        <img
+          src="assets/core-glow.svg"
+          alt=""
+          className="absolute inset-[-27.5%] block max-w-none"
+        />
+      </div>
+      <img
+        src="assets/prism-connecting.svg"
+        alt=""
+        className="absolute left-[127px] top-[132px] block h-[58px] w-[66px]"
+      />
+    </div>
+  );
+}
+
+/** How far along one of the three things a connection does has got. */
+type StageState = 'waiting' | 'doing' | 'done';
+
+/**
+ * One line of the connection's progress.
+ *
+ * @param {object} props - What to draw.
+ * @param {StageState} props.state - How far along it is.
+ * @param {string} props.what - What it is.
+ * @param {string} props.detail - What it settled on, once it has.
+ * @returns {JSX.Element} The row.
+ */
+function Stage({
+  state,
+  what,
+  detail,
+}: {
+  state: StageState;
+  what: string;
+  detail: string;
+}): JSX.Element {
+  return (
+    <div className="flex items-center gap-3 px-[18px] py-3.5 not-first:border-t not-first:border-wash-3">
+      {/* A dashed ring rather than a spinner: it says this one is open without implying a
+          proportion of it is finished, which nothing here can honestly report. */}
+      <span
+        className={
+          state === 'done'
+            ? 'flex size-5 flex-none items-center justify-center rounded-pill bg-[rgba(77,232,176,0.16)] text-tiny font-medium text-mint'
+            : state === 'doing'
+              ? 'size-5 flex-none rounded-pill border-2 border-dashed border-[rgba(124,92,255,0.85)]'
+              : 'size-5 flex-none rounded-pill border-2 border-line-4'
+        }
+      >
+        {state === 'done' ? '✓' : ''}
+      </span>
+      <span
+        className={`text-ui font-medium ${state === 'doing' ? 'text-ink' : 'text-ink-3'}`}
+      >
+        {what}
+      </span>
+      <span className="ml-auto text-fine-2 text-dim">{detail}</span>
+    </div>
+  );
+}
+
+/* ── The flow ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The setup window.
+ *
+ * @returns {JSX.Element} The whole of it.
+ */
+function Setup(): JSX.Element {
+  const [step, setStep] = useState<Step>('welcome');
+  const [version, setVersion] = useState('');
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
+  const [known, setKnown] = useState<readonly string[]>([]);
+  const [held, setHeld] = useState<HostPermissions | null>(null);
+  const [stream, setStream] = useState<StreamState>({
+    phase: 'idle',
+    host: null,
+    terms: null,
+    stats: null,
+    log: [],
+  });
+  const [target, setTarget] = useState<string | null>(null);
+  const [address, setAddress] = useState('');
+  const [pairError, setPairError] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [pairing, setPairing] = useState(false);
+
+  /**
+   * Returns what to call a machine.
+   *
+   * The account is asked first, because a person named their machines and a public key is what
+   * is left when nobody has.
+   */
+  const machineName = useCallback(
+    (key: string): string =>
+      devices.find((device) => device.publicKey === key)?.label || short(key),
+    [devices],
+  );
+
+  useEffect(() => {
+    void (async () => {
+      const [identity, account, stored] = await Promise.all([
+        prism.identity(),
+        prism.accountState(),
+        prism.getSettings(),
+      ]);
+
+      setVersion(identity.version);
+      setSettings(stored);
+      setDevices(account.devices);
+
+      // Both sources, minus this machine. A machine arrives here either by having been paired
+      // with or by being on the account, and setup should offer whichever is already true.
+      setKnown(
+        [
+          ...new Set([...account.devices.map((device) => device.publicKey), ...identity.hosts]),
+        ].filter((key) => key !== identity.publicKey),
+      );
+    })();
+  }, []);
+
+  useEffect(() => {
+    prism.onStream(setStream);
+  }, []);
+
+  // The last screen is reached by the connection working, not by anybody pressing anything.
+  useEffect(() => {
+    if (step === 'connecting' && stream.phase === 'streaming' && (stream.stats?.frames ?? 0) > 0) {
+      setStep('ready');
+    }
+
+    if (step === 'connecting' && stream.phase === 'failed' && stream.log.length > 0) {
+      setConnectError(stream.log.slice(-6).join('\n'));
+    }
+  }, [step, stream]);
+
+  useEffect(() => {
+    if (step !== 'permissions') {
+      return;
+    }
+
+    void (async () => {
+      try {
+        setHeld(await prism.permissions());
+      } catch {
+        setHeld({ screen: false, input: false, missing: [] });
+      }
+    })();
+  }, [step]);
+
+  // The flow's own controls, so that a screen which needs a second machine to reach can still
+  // be driven and photographed from this one. It adds no privilege — everything here changes
+  // what is displayed and nothing else — and it is the companion to the screenshot harness the
+  // main process already carries for the same reason.
+  useEffect(() => {
+    Object.defineProperty(window, 'prismSetup', {
+      value: { show: setStep, draw: setStream, aim: setTarget },
+      configurable: true,
+    });
+  }, []);
+
+  const advance = (): void => {
+    const next = STEPS[STEPS.indexOf(step) + 1];
+
+    if (next) {
+      setStep(next);
+    }
+  };
+
+  const finish = (): void => {
+    prism.finishSetup();
+  };
+
+  /**
+   * Opens a stream onto a machine.
+   */
+  const open = async (host: string, where: string): Promise<void> => {
+    setConnectError(null);
+    setTarget(host);
+    setStep('connecting');
+
+    try {
+      setStream(await prism.connect(host, where));
+    } catch (error) {
+      setConnectError(reason(error));
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (step === 'ready' && event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        finish();
+      }
+    };
+
+    document.addEventListener('keydown', onKey);
+
+    return () => {
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [step]);
+
+  const dots = STEP_DOTS[step];
+
+  return (
+    <>
+      <div className="drag fixed inset-x-0 top-0 z-[3] h-11" />
+      <Backdrop
+        key={step === 'welcome' ? 'welcome' : 'steps'}
+        sky={step === 'welcome' ? WELCOME_SKY : STEP_SKY}
+        vignette
+      />
+
+      {/* The comp insets its four corners by different amounts — the wordmark sits further in
+          than the step dots, and the skip link further in than the Continue button. The frame
+          takes the outermost of each and the pieces make up the rest. */}
+      <div className="relative z-[1] flex h-full flex-col pt-[71px] pr-10 pb-16 pl-14">
+        <div className="flex h-5 flex-none items-center justify-between">
+          <div className="ml-[21px]">
+            <Wordmark />
+          </div>
+          {step !== 'welcome' && step !== 'ready' && (
+            <button type="button" className="btn-ghost no-drag mr-[23px]" onClick={finish}>
+              Skip setup
+            </button>
+          )}
+        </div>
+
+        <div className="flex min-h-0 flex-1 items-center justify-center">
+          {step === 'welcome' && (
+            <section className={SCREEN}>
+              <h1 className="max-w-[min(1040px,72.2vw)] text-hero font-semibold">
+                Your desktop.
+                <br />
+                Everywhere.
+              </h1>
+              <p className="mt-7 max-w-[min(700px,48.6vw)] text-lead text-muted">
+                Low-latency remote access for macOS, Windows, and Linux.
+              </p>
+              <div className="mt-7">
+                <Primary trailing="→" onClick={advance}>
+                  Begin
+                </Primary>
+              </div>
+              {/* Somebody who already has machines does not need to be told what the product
+                  is. What they need is the window their machines are in. */}
+              <button type="button" className="btn-ghost no-drag mt-7" onClick={finish}>
+                Already using PRISM? Restore my devices
+              </button>
+            </section>
+          )}
+
+          {step === 'intro' && (
+            <section className={SCREEN}>
+              <PrismArt />
+              <h2 className="mt-4 max-w-[min(640px,44.4vw)] text-display font-semibold">
+                One machine, every screen.
+              </h2>
+              <p className="mt-4 max-w-[min(520px,36.1vw)] text-body text-muted">
+                PRISM streams your desktop to any other device you own — with latency low enough
+                that you stop noticing it&rsquo;s remote.
+              </p>
+            </section>
+          )}
+
+          {step === 'permissions' && (
+            <section className={SCREEN}>
+              <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
+                A few permissions first
+              </h2>
+              <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
+                PRISM needs these to capture and control this machine.
+                <br />
+                Nothing is sent outside your own network.
+              </p>
+              <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
+                {GRANTS.map((grant) => {
+                  // Local Network is stated as given rather than checked. There is no
+                  // interface for asking the system about it, and by the time this screen is
+                  // on a display the application has already used the network to draw it — so
+                  // reporting anything else would be reporting a guess.
+                  const has =
+                    grant.id === 'screen'
+                      ? (held?.screen ?? false)
+                      : grant.id === 'input'
+                        ? (held?.input ?? false)
+                        : true;
+
+                  return (
+                    <div
+                      key={grant.id}
+                      className="flex items-center gap-4 py-5 pr-[18px] pl-[22px] not-first:border-t not-first:border-line-1"
+                    >
+                      <span
+                        className={`flex size-[38px] flex-none items-center justify-center rounded-badge border text-body-2 font-medium ${grant.tint}`}
+                      >
+                        {grant.glyph}
+                      </span>
+                      <span className="flex min-w-0 flex-1 flex-col gap-1">
+                        <span className="text-body-2 font-medium">{grant.name}</span>
+                        <span className="text-note text-muted-2">{grant.why}</span>
+                      </span>
+                      {has ? (
+                        <span className="tag-granted">
+                          <span className="text-fine">✓</span>
+                          <span>Granted</span>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn-secondary no-drag"
+                          onClick={() => {
+                            void (async () => {
+                              try {
+                                await prism.requestPermission(grant.id);
+                              } finally {
+                                // Redrawn either way. The system may have granted it, refused
+                                // it, or opened its own settings pane — and only the check
+                                // afterwards says which.
+                                setHeld(await prism.permissions());
+                              }
+                            })();
+                          }}
+                        >
+                          Allow
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-4 text-note text-dim">
+                You can change these later in Settings → Privacy.
+              </p>
+            </section>
+          )}
+
+          {step === 'device' && (
+            <section className={SCREEN}>
+              <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
+                Add your first device
+              </h2>
+              <p className="mt-3.5 max-w-[min(580px,40.3vw)] text-body-2 text-muted">
+                Install PRISM on the machine you want to reach, then type the six characters it
+                shows on screen.
+              </p>
+
+              <CodeBoxes
+                disabled={pairing}
+                onComplete={(code) => {
+                  void (async () => {
+                    if (address.trim() === '') {
+                      setPairError('Type where that machine is, as address:port');
+                      return;
+                    }
+
+                    setPairError(null);
+                    setPairing(true);
+
+                    try {
+                      const paired = await prism.pair(address.trim(), code);
+
+                      // Remembered so that connecting does not ask for the same address a
+                      // second line later.
+                      const next = await prism.setSettings({
+                        addresses: { ...settings?.addresses, [paired.peer]: address.trim() },
+                      });
+                      setSettings(next);
+                      await open(paired.peer, address.trim());
+                    } catch (error) {
+                      setPairError(reason(error));
+                    } finally {
+                      setPairing(false);
+                    }
+                  })();
+                }}
+              />
+
+              {/* Where a machine is, for the case the design does not draw: pairing needs an
+                  address, and there is none to be had until a rendezvous server is configured.
+                  Kept quiet and out of the way of the code, which is what is being asked for. */}
+              <div className="mt-[18px] flex items-center gap-2.5">
+                <label htmlFor="pair-address" className="text-note-2 text-dim">
+                  Showing that code at
+                </label>
+                <input
+                  id="pair-address"
+                  type="text"
+                  spellCheck={false}
+                  placeholder="192.168.0.14:47100"
+                  value={address}
+                  onChange={(event) => {
+                    setAddress(event.target.value);
+                  }}
+                  className="no-drag w-60 rounded-pill border border-line-2 bg-wash-1 px-3 py-[7px] text-center text-note-2 text-ink-3 placeholder:text-dim-2 focus:border-[rgba(124,92,255,0.6)] focus:text-ink focus:outline-none"
+                />
+              </div>
+
+              <div className="mt-[34px] flex w-[min(620px,43.1vw)] items-center gap-4 text-note-2 text-dim before:h-px before:flex-1 before:bg-line-2 before:content-[''] after:h-px after:flex-1 after:bg-line-2 after:content-['']">
+                or pick one nearby
+              </div>
+
+              <div className="mt-8 flex w-[min(620px,43.1vw)] flex-col gap-2.5 text-left">
+                {known.length === 0 ? (
+                  <div className="py-[18px] text-center text-note text-dim">
+                    Nothing yet — a code above is how the first one arrives
+                  </div>
+                ) : (
+                  known.map((key) => {
+                    const where = settings?.addresses[key] ?? '';
+
+                    return (
+                      <div
+                        key={key}
+                        className="flex items-center gap-3.5 rounded-panel border border-line-2 bg-wash-1 py-3.5 pr-3.5 pl-[18px]"
+                      >
+                        <img
+                          src={where ? 'assets/status-live-04.svg' : 'assets/status-idle-04.svg'}
+                          alt=""
+                          className="block size-2 flex-none overflow-visible"
+                        />
+                        <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
+                          <span className="text-row font-medium">{machineName(key)}</span>
+                          <span className="text-fine-2 leading-tight text-muted-2">
+                            {where || 'through the rendezvous server'}
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-secondary no-drag"
+                          onClick={() => {
+                            void open(key, where);
+                          }}
+                        >
+                          Connect
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <Trouble message={pairError} className="mt-4" />
+            </section>
+          )}
+
+          {step === 'connecting' && (
+            <section className={SCREEN}>
+              <Pulse />
+              <h2 className="mt-5 max-w-[min(700px,48.6vw)] text-title font-semibold">
+                Connecting to {machineName(target ?? '')}
+              </h2>
+              <p className="mt-2.5 whitespace-pre-wrap text-fine text-muted-2">
+                {settings?.addresses[target ?? '']
+                  ? `${settings.addresses[target ?? '']}  ·  direct on your LAN  ·  no relay`
+                  : 'through the rendezvous server'}
+              </p>
+              <div className="mt-[59px] w-[min(500px,34.7vw)] overflow-hidden rounded-panel border border-line-2 bg-wash-1 text-left">
+                <Stage
+                  state={stream.terms !== null || stream.phase === 'streaming' ? 'done' : 'doing'}
+                  what="Secure handshake"
+                  detail="Ed25519"
+                />
+                <Stage
+                  state={
+                    stream.terms !== null
+                      ? 'done'
+                      : stream.phase === 'streaming'
+                        ? 'doing'
+                        : 'waiting'
+                  }
+                  what="Negotiating codec"
+                  detail={
+                    stream.terms
+                      ? stream.stats
+                        ? `${stream.terms.codec} · ${stream.stats.mbps.toFixed(0)} Mbps`
+                        : stream.terms.codec
+                      : '—'
+                  }
+                />
+                <Stage
+                  state={
+                    (stream.stats?.frames ?? 0) > 0
+                      ? 'done'
+                      : stream.terms !== null
+                        ? 'doing'
+                        : 'waiting'
+                  }
+                  what="Opening video stream"
+                  detail={
+                    stream.terms
+                      ? stream.terms.width
+                        ? `${stream.terms.width} × ${stream.terms.height} @ ${stream.terms.fps} Hz`
+                        : `the host's screen @ ${stream.terms.fps} Hz`
+                      : '—'
+                  }
+                />
+              </div>
+              <button
+                type="button"
+                className="btn-ghost no-drag mt-[22px]"
+                onClick={() => {
+                  void (async () => {
+                    setStream(await prism.disconnect());
+                    setStep('device');
+                  })();
+                }}
+              >
+                Cancel
+              </button>
+              <Trouble message={connectError} className="mt-4" />
+            </section>
+          )}
+
+          {step === 'ready' && (
+            <section className={SCREEN}>
+              <span className="inline-flex items-center gap-2 rounded-pill border border-[rgba(77,232,176,0.24)] bg-[rgba(77,232,176,0.12)] py-2 pr-4 pl-3.5 text-note-2 font-medium tracking-[0.3px] text-mint">
+                <img src="assets/dot-ready.svg" alt="" className="block size-[7px] overflow-visible" />
+                Connected
+              </span>
+              <h2 className="mt-[19px] max-w-[min(760px,52.8vw)] text-triumph font-semibold">
+                You&rsquo;re all set.
+              </h2>
+              <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
+                {machineName(stream.host ?? target ?? '')} is live. Press ⌘↵ from anywhere to
+                jump straight back in.
+              </p>
+              <div className="card mt-[26px] flex w-[min(560px,38.9vw)]">
+                <Figure
+                  label="LATENCY"
+                  tone="text-mint"
+                  value={stream.stats ? `${latency(stream.stats.rttMs)} ms` : '—'}
+                />
+                <Figure label="CODEC" tone="text-cyan" value={stream.terms?.codec ?? '—'} />
+                <Figure
+                  label="DISPLAY"
+                  tone="text-violet"
+                  value={
+                    stream.terms
+                      ? stream.terms.height
+                        ? `${stream.terms.height}p · ${stream.terms.fps} Hz`
+                        : `${stream.terms.fps} Hz`
+                      : '—'
+                  }
+                />
+              </div>
+              <div className="mt-[23px]">
+                <Primary trailing="⌘↵" onClick={finish}>
+                  Enter PRISM
+                </Primary>
+              </div>
+            </section>
+          )}
+        </div>
+
+        <div className="flex h-14 flex-none items-center justify-between">
+          {dots ? <img src={dots} alt="" className="block h-1.5 w-[70px]" /> : <span />}
+          {step === 'welcome' && (
+            <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>
+          )}
+          {HAS_NEXT.has(step) && (
+            <Primary trailing="→" onClick={advance}>
+              Continue
+            </Primary>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * One of the three figures on the last screen.
+ *
+ * @param {object} props - What to draw.
+ * @param {string} props.label - What it measures.
+ * @param {string} props.value - What it measured.
+ * @param {string} props.tone - The colour class for the value.
+ * @returns {JSX.Element} The figure.
+ */
+function Figure({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: string;
+}): JSX.Element {
+  return (
+    <div className="flex min-w-0 flex-1 flex-col items-center gap-[7px] py-5 not-first:border-l not-first:border-line-1">
+      <span className="text-label font-medium text-dim">{label}</span>
+      <span className={`text-[17px] font-medium ${tone}`}>{value}</span>
+    </div>
+  );
+}
+
+/**
+ * The six characters of a pairing code.
+ *
+ * One box per character, so that the code is read and typed as six things rather than as a
+ * word. Typing moves forward, deleting moves back, and pasting a whole code fills them all —
+ * which is what somebody does when the code is on a screen beside them rather than in their
+ * head.
+ *
+ * @param {object} props - What to draw.
+ * @param {boolean} props.disabled - Whether the boxes accept anything.
+ * @param {(code: string) => void} props.onComplete - Called once all six are filled.
+ * @returns {JSX.Element} The boxes.
+ */
+function CodeBoxes({
+  disabled,
+  onComplete,
+}: {
+  disabled: boolean;
+  onComplete: (code: string) => void;
+}): JSX.Element {
+  const [characters, setCharacters] = useState<string[]>(Array<string>(CODE_LENGTH).fill(''));
+  const boxes = useRef<(HTMLInputElement | null)[]>([]);
+
+  useEffect(() => {
+    boxes.current[0]?.focus();
+  }, []);
+
+  const put = (next: string[]): void => {
+    setCharacters(next);
+
+    if (next.every((character) => character !== '')) {
+      onComplete(next.join(''));
+    }
+  };
+
+  return (
+    <div className="mt-[88px] flex gap-2.5">
+      {characters.map((character, at) => (
+        <input
+          // The boxes are a fixed row of six that never reorders, so their position is what
+          // identifies them; there is nothing else stable to key on.
+          key={at}
+          ref={(node) => {
+            boxes.current[at] = node;
+          }}
+          type="text"
+          inputMode="numeric"
+          maxLength={1}
+          disabled={disabled}
+          aria-label={`Character ${at + 1}`}
+          value={character}
+          onChange={(event) => {
+            const typed = event.target.value.toUpperCase().slice(0, 1);
+            const next = [...characters];
+            next[at] = typed;
+
+            if (typed !== '') {
+              boxes.current[at + 1]?.focus();
+            }
+
+            put(next);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Backspace' && character === '') {
+              const next = [...characters];
+              next[at - 1] = '';
+              setCharacters(next);
+              boxes.current[at - 1]?.focus();
+            }
+          }}
+          onPaste={(event) => {
+            event.preventDefault();
+
+            const pasted = event.clipboardData.getData('text').toUpperCase().replace(/\s/g, '');
+            const next = characters.map((_, index) => pasted[index] ?? '');
+
+            boxes.current[Math.min(pasted.length, CODE_LENGTH - 1)]?.focus();
+            put(next);
+          }}
+          className={`no-drag h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none ${
+            character === '' ? 'border-line-4 bg-wash-1' : 'border-line-4 bg-wash-4'
+          } focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)]`}
+        />
+      ))}
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root') as HTMLElement).render(
+  <StrictMode>
+    <Setup />
+  </StrictMode>,
+);

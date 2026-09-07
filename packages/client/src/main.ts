@@ -264,6 +264,7 @@ function createWindow(): BrowserWindow {
     },
   });
 
+  echoConsole(created);
   void created.loadFile(join(here, '..', 'renderer', 'index.html'));
 
   return created;
@@ -298,6 +299,7 @@ function createStage(page: string): BrowserWindow {
     },
   });
 
+  echoConsole(created);
   void created.loadFile(join(here, '..', 'renderer', page));
 
   return created;
@@ -501,6 +503,26 @@ function registerHandlers(): void {
  */
 function idle(): StreamState {
   return { phase: 'idle', host: null, terms: null, stats: null, log: [] };
+}
+
+/**
+ * Forwards a window's own console to this process, while a harness is driving it.
+ *
+ * A renderer that throws while React is drawing it leaves an empty page and says so only in a
+ * console nobody is watching. Under a screenshot or a drive script that is the difference
+ * between a diagnosis and a black rectangle.
+ *
+ * @param {BrowserWindow} target - The window to listen to.
+ * @returns {void}
+ */
+function echoConsole(target: BrowserWindow): void {
+  if (!process.env['PRISM_WINDOW_DRIVE'] && !process.env['PRISM_WINDOW_SCREENSHOT']) {
+    return;
+  }
+
+  target.webContents.on('console-message', (event) => {
+    process.stderr.write(`window: ${event.message}\n`);
+  });
 }
 
 /**

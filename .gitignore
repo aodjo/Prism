@@ -24,5 +24,6 @@ packages/client/renderer/setup.js
 packages/client/renderer/setup.js.map
 packages/client/renderer/home.js
 packages/client/renderer/home.js.map
-packages/client/renderer/format.js
-packages/client/renderer/format.js.map
+
+# Built from packages/client/src/styles.css by Tailwind.
+packages/client/renderer/prism.css
