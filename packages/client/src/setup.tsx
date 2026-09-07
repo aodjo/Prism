@@ -304,6 +304,14 @@ function Setup(): JSX.Element {
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
   const [working, setWorking] = useState(false);
+  /**
+   * Which of the two account screens is showing.
+   *
+   * Decided by how somebody arrived rather than by a control on the screen itself: Begin is for
+   * a new account and the link beside it is for one that already exists, so by the time either
+   * screen is drawn the question has been answered.
+   */
+  const [joining, setJoining] = useState(true);
   const [accountTrouble, setAccountTrouble] = useState<string | null>(null);
 
   /**
@@ -524,7 +532,13 @@ function Setup(): JSX.Element {
             Low-latency remote access for macOS, Windows, and Linux.
           </p>
           <div className="mt-7">
-            <Primary trailing="→" onClick={advance}>
+            <Primary
+              trailing="→"
+              onClick={() => {
+                setJoining(true);
+                advance();
+              }}
+            >
               Begin
             </Primary>
           </div>
@@ -538,7 +552,10 @@ function Setup(): JSX.Element {
             <button
               type="button"
               className="btn-ghost no-drag mt-7 text-ink-3 hover:text-ink"
-              onClick={advance}
+              onClick={() => {
+                setJoining(false);
+                advance();
+              }}
             >
               Already using PRISM? Sign in
             </button>
@@ -562,11 +579,14 @@ function Setup(): JSX.Element {
       {which === 'account' && (
         <section className={cls}>
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-            Your PRISM account
+            {enrolment ? 'One more thing' : joining ? 'Create your account' : 'Welcome back'}
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
-            An account is how your machines find each other. Without one they still pair, by
-            reading a code off the other screen.
+            {enrolment
+              ? 'Set up the second factor now. It is the only time it is shown.'
+              : joining
+                ? 'An account is how your machines find each other. Without one they still pair, by reading a code off the other screen.'
+                : 'Sign in and every machine on your account finds this one.'}
           </p>
 
           {enrolment ? (
@@ -585,11 +605,14 @@ function Setup(): JSX.Element {
               <code className="block text-center text-fine tracking-[0.06em] select-all text-ink-3">
                 {enrolment.secret}
               </code>
+              {/* Straight to signing in, with the address already filled: the account exists
+                  now, and the next thing it needs is the code that was just set up. */}
               <button
                 type="button"
-                className="btn-secondary no-drag mx-auto mt-5 block"
+                className="btn-primary-sm no-drag mx-auto mt-5 block"
                 onClick={() => {
                   setEnrolment(null);
+                  setJoining(false);
                 }}
               >
                 I have it — sign in
@@ -615,66 +638,76 @@ function Setup(): JSX.Element {
                 <span className="text-fine-2 text-dim">Password</span>
                 <input
                   type="password"
-                  autoComplete="current-password"
+                  autoComplete={joining ? 'new-password' : 'current-password'}
                   className={ACCOUNT_FIELD}
                   value={password}
                   onChange={(event) => {
                     setPassword(event.target.value);
                   }}
-                />
-              </label>
-              <label className="flex flex-col gap-1.5">
-                <span className="text-fine-2 text-dim">
-                  Six digits from your authenticator — only when signing in
-                </span>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={6}
-                  autoComplete="one-time-code"
-                  placeholder="123456"
-                  className={`${ACCOUNT_FIELD} tracking-[0.3em]`}
-                  value={totp}
-                  onChange={(event) => {
-                    setTotp(event.target.value);
-                  }}
                   onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      signIn();
+                    if (event.key === 'Enter' && joining) {
+                      createAccount();
                     }
                   }}
                 />
               </label>
 
-              <div className="mt-2 flex items-center justify-between gap-3">
-                {/* Creating one asks for the same two fields, so it is the same form with a
-                    different button rather than a second screen to fill in twice. */}
-                <button
-                  type="button"
-                  className="btn-ghost no-drag"
-                  disabled={working}
-                  onClick={createAccount}
-                >
-                  Create an account
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary-sm no-drag"
-                  disabled={working}
-                  onClick={signIn}
-                >
-                  Sign in
-                </button>
-              </div>
+              {/* Only the sign-in screen asks for a code. Somebody creating an account does not
+                  have one yet — that is what the next screen is for. */}
+              {!joining && (
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-fine-2 text-dim">Six digits from your authenticator</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    autoComplete="one-time-code"
+                    placeholder="123456"
+                    className={`${ACCOUNT_FIELD} tracking-[0.3em]`}
+                    value={totp}
+                    onChange={(event) => {
+                      setTotp(event.target.value);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        signIn();
+                      }
+                    }}
+                  />
+                </label>
+              )}
+
+              <button
+                type="button"
+                className="btn-primary-sm no-drag mt-2 justify-center"
+                disabled={working}
+                onClick={joining ? createAccount : signIn}
+              >
+                {joining ? 'Create account' : 'Sign in'}
+              </button>
             </div>
           )}
 
           <Trouble message={accountTrouble} className="mt-4" />
 
-          {/* An account is worth having and not worth being trapped by: a machine with none
-              still pairs by code, which is the next screen either way. */}
           {enrolment === null && (
-            <button type="button" className="btn-ghost no-drag mt-7" onClick={advance}>
+            <button
+              type="button"
+              className="btn-ghost no-drag mt-5"
+              onClick={() => {
+                setAccountTrouble(null);
+                setTotp('');
+                setJoining(!joining);
+              }}
+            >
+              {joining ? 'I already have an account' : 'I need an account'}
+            </button>
+          )}
+
+          {/* An account is worth having and not worth being trapped by: a machine with none
+              still pairs by code, which is what the device screen is for either way. */}
+          {enrolment === null && (
+            <button type="button" className="btn-ghost no-drag mt-2.5" onClick={advance}>
               Continue without an account
             </button>
           )}
