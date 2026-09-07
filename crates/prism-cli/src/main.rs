@@ -526,8 +526,20 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 // session that never shows a frame.
                 offer: Offer {
                     codecs: Codecs::none().with(H264),
-                    max_width: u16::MAX,
-                    max_height: u16::MAX,
+                    // The window the stream will be shown in, when there is one. A host
+                    // sending more pixels than that is spending bitrate on pixels thrown
+                    // away before anybody sees them. A run with no window is measuring the
+                    // pipeline rather than watching it, and constrains nothing.
+                    max_width: if display {
+                        u16::try_from(window_width).unwrap_or(u16::MAX)
+                    } else {
+                        u16::MAX
+                    },
+                    max_height: if display {
+                        u16::try_from(window_height).unwrap_or(u16::MAX)
+                    } else {
+                        u16::MAX
+                    },
                     max_fps: u16::MAX,
                     audio: display,
                 },

@@ -77,10 +77,13 @@ fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
 
     if let Some(agreed) = opened.sender.agreed() {
         println!(
-            "host: agreed {:?} {}x{} at {} fps, {:.1} Mbps, audio {}",
+            "host: agreed {:?}, client shows {}, {} fps, {:.1} Mbps, audio {}",
             agreed.codec,
-            agreed.width,
-            agreed.height,
+            if agreed.width >= u16::MAX - 1 {
+                "any size".to_string()
+            } else {
+                format!("up to {}x{}", agreed.width, agreed.height)
+            },
             agreed.fps,
             f64::from(agreed.bitrate_bps) / 1e6,
             if agreed.audio { "on" } else { "off" },

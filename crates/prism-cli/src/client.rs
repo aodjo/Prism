@@ -236,6 +236,18 @@ struct DecodeReport {
     errors: Vec<i32>,
 }
 
+/// Describes an agreed picture size for a person to read.
+///
+/// A size at the ceiling means neither side constrained the other, which reads as a number in
+/// the sixty-thousands and means nothing. Saying so is more use than printing it.
+fn describe_size(width: u16, height: u16) -> String {
+    if width >= u16::MAX - 1 && height >= u16::MAX - 1 {
+        return "whatever the host's screen is".to_string();
+    }
+
+    format!("up to {width}x{height}")
+}
+
 /// Works out where the host is: the address given, or the one the rendezvous server reports.
 ///
 /// The lookup happens on the session socket, because the address the server observes is only
@@ -370,10 +382,9 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         prism_core::identity::to_hex(&established.session.peer_static)
     );
     println!(
-        "client: agreed {:?} {}x{} at {} fps, {:.1} Mbps, audio {}",
+        "client: agreed {:?}, {}, {} fps, {:.1} Mbps, audio {}",
         agreed.codec,
-        agreed.width,
-        agreed.height,
+        describe_size(agreed.width, agreed.height),
         agreed.fps,
         f64::from(agreed.bitrate_bps) / 1e6,
         if agreed.audio { "on" } else { "off" },
