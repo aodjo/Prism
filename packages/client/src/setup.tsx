@@ -300,6 +300,7 @@ function Setup(): JSX.Element {
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
   const [totp, setTotp] = useState('');
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
@@ -469,6 +470,7 @@ function Setup(): JSX.Element {
           ),
         );
         setPassword('');
+        setConfirm('');
         setTotp('');
         setGreeted(true);
       } catch (error) {
@@ -483,6 +485,13 @@ function Setup(): JSX.Element {
    * Creates an account and shows the second factor, once.
    */
   const createAccount = (): void => {
+    // Checked here because it cannot be checked anywhere else: the password never leaves this
+    // machine, so a mistyped one is only ever two strings in this window that differ.
+    if (password !== confirm) {
+      setAccountTrouble('Those two passwords are not the same');
+      return;
+    }
+
     void (async () => {
       setWorking(true);
       setAccountTrouble(null);
@@ -610,7 +619,7 @@ function Setup(): JSX.Element {
               : enrolment
                 ? 'Set up the second factor now. It is the only time it is shown.'
                 : joining
-                  ? 'An account is how your machines find each other. Without one they still pair, by reading a code off the other screen.'
+                  ? 'An account is how your machines find each other, and how this one is recognised when it asks.'
                   : 'Sign in and every machine on your account finds this one.'}
           </p>
 
@@ -660,7 +669,9 @@ function Setup(): JSX.Element {
                 />
               </label>
               <label className="flex flex-col gap-1.5">
-                <span className="text-fine-2 text-dim">Password</span>
+                <span className="text-fine-2 text-dim">
+                  {joining ? 'Password — at least eight characters' : 'Password'}
+                </span>
                 <input
                   type="password"
                   autoComplete={joining ? 'new-password' : 'current-password'}
@@ -669,13 +680,34 @@ function Setup(): JSX.Element {
                   onChange={(event) => {
                     setPassword(event.target.value);
                   }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && joining) {
-                      createAccount();
-                    }
-                  }}
                 />
               </label>
+
+              {/* Only when creating one. A password being typed to sign in is checked by the
+                  server on the next line; one being set has nothing to check it against. */}
+              {joining && (
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-fine-2 text-dim">Password again</span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    className={
+                      confirm !== '' && confirm !== password
+                        ? `${ACCOUNT_FIELD} border-[rgba(255,92,110,0.5)]`
+                        : ACCOUNT_FIELD
+                    }
+                    value={confirm}
+                    onChange={(event) => {
+                      setConfirm(event.target.value);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        createAccount();
+                      }
+                    }}
+                  />
+                </label>
+              )}
 
               {/* Only the sign-in screen asks for a code. Somebody creating an account does not
                   have one yet — that is what the next screen is for. */}
@@ -722,6 +754,7 @@ function Setup(): JSX.Element {
               onClick={() => {
                 setAccountTrouble(null);
                 setTotp('');
+                setConfirm('');
                 setJoining(!joining);
               }}
             >
@@ -731,11 +764,6 @@ function Setup(): JSX.Element {
 
           {/* An account is worth having and not worth being trapped by: a machine with none
               still pairs by code, which is what the device screen is for either way. */}
-          {enrolment === null && !greeted && (
-            <button type="button" className="btn-ghost no-drag mt-2.5" onClick={advance}>
-              Continue without an account
-            </button>
-          )}
         </section>
       )}
 
