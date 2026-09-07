@@ -25,6 +25,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::net::handshake::{Identity, KEY_LEN};
@@ -44,6 +45,9 @@ const SERVER_TIMEOUT: Duration = Duration::from_secs(15);
 /// a NAT binding lapses after tens of seconds of silence, and a host that spoke only at
 /// startup would quietly become unreachable with nothing appearing to be wrong.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long the keepalive thread sleeps between looking at its stop flag.
+const KEEPALIVE_TICK: Duration = Duration::from_millis(100);
 
 /// How many datagrams a host sends at a caller to open its own router.
 ///
@@ -116,7 +120,33 @@ pub fn register(
     ))
 }
 
-/// Keeps a registration and a router mapping alive until `stop` is set.
+/// A registration being held open, which stops when this is dropped.
+///
+/// The thread holds a duplicate of the session socket, so it is not only a registration that
+/// outlives its session but a port: until this thread ends, the address is taken and the next
+/// session that tries to bind it is refused. Ending it is therefore something that has to
+/// happen, not something to leave to the end of the process — so it happens on drop, and the
+/// handle is carried alongside the session it belongs to.
+#[derive(Debug)]
+pub struct Keepalive {
+    /// Set to end the thread.
+    stop: Arc<AtomicBool>,
+    /// The thread, taken when it is joined.
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for Keepalive {
+    /// Ends the keepalive and waits for its thread, so the socket is free on return.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Keeps a registration and a router mapping alive for as long as the returned handle lives.
 ///
 /// Runs on a duplicate of the session socket, because the mapping being held open is that
 /// socket's. Failures are silent: a keepalive that does not arrive costs nothing until
@@ -124,26 +154,41 @@ pub fn register(
 ///
 /// # Errors
 ///
-/// Returns the underlying [`io::Error`] if the socket cannot be duplicated.
+/// Returns the underlying [`io::Error`] if the socket cannot be duplicated or the thread
+/// cannot be spawned.
 pub fn spawn_keepalive(
     transport: &UdpTransport,
     server: SocketAddr,
     host: [u8; KEY_LEN],
-    stop: Arc<AtomicBool>,
-) -> io::Result<()> {
+) -> io::Result<Keepalive> {
     let transport = transport.try_clone()?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let mine = Arc::clone(&stop);
 
-    std::thread::spawn(move || {
-        let mut out = [0u8; MAX_MESSAGE_LEN];
-        let message = Message::Keepalive { host };
+    let thread = std::thread::Builder::new()
+        .name("prism-keepalive".into())
+        .spawn(move || {
+            let mut out = [0u8; MAX_MESSAGE_LEN];
+            let message = Message::Keepalive { host };
+            let mut due = Instant::now();
 
-        while !stop.load(Ordering::Relaxed) {
-            let _ = send(&transport, &mut out, &message, server);
-            std::thread::sleep(KEEPALIVE_INTERVAL);
-        }
-    });
+            // Slept in short steps rather than in one long one. What is waited on here is not
+            // the next keepalive but the order to stop, and a thread that checks for it every
+            // fifteen seconds is a share that takes fifteen seconds to restart.
+            while !mine.load(Ordering::Relaxed) {
+                if Instant::now() >= due {
+                    let _ = send(&transport, &mut out, &message, server);
+                    due = Instant::now() + KEEPALIVE_INTERVAL;
+                }
 
-    Ok(())
+                std::thread::sleep(KEEPALIVE_TICK);
+            }
+        })?;
+
+    Ok(Keepalive {
+        stop,
+        thread: Some(thread),
+    })
 }
 
 /// Where a host is, and where the server sees this machine.
@@ -212,13 +257,18 @@ pub fn lookup(
 /// Returns the caller's key and the address to expect it at. The key is advisory: it says who
 /// the server thinks is calling, and the handshake that follows is what actually decides.
 ///
+/// `cancelled` is read once per retry, so a host asked to stop while nobody has called stops
+/// within one interval rather than at the end of its patience.
+///
 /// # Errors
 ///
-/// Returns [`io::ErrorKind::TimedOut`] if nobody calls within `patience`.
+/// Returns [`io::ErrorKind::TimedOut`] if nobody calls within `patience`, and
+/// [`io::ErrorKind::Interrupted`] if `cancelled` is set.
 pub fn await_caller(
     transport: &UdpTransport,
     server: SocketAddr,
     patience: Duration,
+    cancelled: &AtomicBool,
 ) -> io::Result<([u8; KEY_LEN], SocketAddr)> {
     let mut buf = [0u8; MAX_MESSAGE_LEN];
 
@@ -226,6 +276,13 @@ pub fn await_caller(
     let give_up = Instant::now() + patience;
 
     while Instant::now() < give_up {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "the session was stopped while it was waiting",
+            ));
+        }
+
         let Some(message) = recv_from_server(transport, &mut buf, server)? else {
             continue;
         };

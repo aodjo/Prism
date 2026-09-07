@@ -363,12 +363,21 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<Atom
         connect(&config, &keys, stop, &mut waiting)
     };
 
-    let sender = match opened {
+    // The keepalive is bound rather than dropped: it holds this session's registration open,
+    // and the thread behind it holds a duplicate of the session socket. Letting it go here
+    // would unregister the machine the moment somebody started watching it.
+    let (sender, _keepalive) = match opened {
         Ok(opened) => {
             if let Ok(mut slot) = shared.peer.lock() {
                 *slot = Some(opened.sender.peer());
             }
-            opened.sender
+            (opened.sender, opened.keepalive)
+        }
+        // Being asked to stop is not a failure. A machine that was shared, waited, and was
+        // unshared before anybody came has done exactly what it was told to.
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+            shared.set_phase(Phase::Stopped);
+            return;
         }
         Err(err) => {
             shared.fail(err);
@@ -477,6 +486,12 @@ pub struct Opened {
     /// and a person wondering why the picture feels heavy deserves to know the answer is the
     /// path and not the encoder.
     pub relayed: bool,
+    /// The registration being held open, when a rendezvous server is in use.
+    ///
+    /// Handed back rather than kept out of sight because it has to outlive this call and must
+    /// not outlive the session: the thread behind it holds a duplicate of the session socket,
+    /// so dropping it is what frees the port. Whoever owns the session owns this.
+    pub keepalive: Option<crate::control::rendezvous::Keepalive>,
 }
 
 /// Binds, becomes reachable, and waits for a paired client to open a session.
@@ -523,27 +538,24 @@ pub fn connect(
                     keys.allowed.clone(),
                     ability(config),
                     config.patience,
+                    cancelled,
                 )?,
                 config,
             )?,
             observed: None,
             relayed: false,
+            keepalive: None,
         });
     };
 
     let observed = crate::control::rendezvous::register(&transport, server, &keys.identity)?;
 
-    // Held for the life of the session. Both the registration and the router's mapping lapse
-    // in well under a minute of silence, so a host that went quiet would be unreachable for
-    // the next client with nothing appearing to have failed.
-    let keepalive_stop = Arc::new(AtomicBool::new(false));
-    crate::control::rendezvous::spawn_keepalive(
-        &transport,
-        server,
-        *keys.identity.public(),
-        Arc::clone(&keepalive_stop),
-    )?;
-    std::mem::forget(keepalive_stop);
+    // Held for the life of the session, and no longer. Both the registration and the router's
+    // mapping lapse in well under a minute of silence, so a host that went quiet would be
+    // unreachable for the next client with nothing appearing to have failed — and the thread
+    // holding them open holds this socket too, so it has to end when the session does.
+    let keepalive =
+        crate::control::rendezvous::spawn_keepalive(&transport, server, *keys.identity.public())?;
 
     waiting(Reachable {
         local,
@@ -551,7 +563,7 @@ pub fn connect(
     });
 
     let (caller, _) =
-        crate::control::rendezvous::await_caller(&transport, server, config.patience)?;
+        crate::control::rendezvous::await_caller(&transport, server, config.patience, cancelled)?;
     stopped(cancelled)?;
 
     let direct = SliceSender::serve_on(
@@ -560,6 +572,7 @@ pub fn connect(
         keys.allowed.clone(),
         ability(config),
         DIRECT_PATIENCE,
+        cancelled,
     );
 
     let mut relayed = false;
@@ -585,6 +598,7 @@ pub fn connect(
                 keys.allowed.clone(),
                 ability(config),
                 RELAYED_PATIENCE,
+                cancelled,
             )
             .map_err(|err| {
                 io::Error::new(
@@ -600,6 +614,7 @@ pub fn connect(
         sender: ready(sender, config)?,
         observed: Some(observed),
         relayed,
+        keepalive: Some(keepalive),
     })
 }
 

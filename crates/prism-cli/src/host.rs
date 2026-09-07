@@ -90,6 +90,11 @@ fn open(config: HostConfig, keys: &HostKeys) -> io::Result<SliceSender> {
         );
     }
 
+    // Held until the process exits. Dropping it would end the keepalive the moment a client
+    // connected, unregistering a host that is still streaming; and this command runs one
+    // session and then exits, so there is no later session for the socket to be freed for.
+    std::mem::forget(opened.keepalive);
+
     Ok(opened.sender)
 }
 

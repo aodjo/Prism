@@ -22,6 +22,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::net::handshake::{
@@ -269,16 +270,23 @@ fn is_timeout(err: &io::Error) -> bool {
 /// The socket is connected to whoever completed the handshake before returning, so from that
 /// point the kernel drops datagrams from anywhere else.
 ///
+/// `cancelled` is read once per retry, so a host that is asked to stop while it is waiting
+/// stops within one interval rather than at the end of its patience. A wait that cannot be
+/// interrupted is a window that cannot be closed: patience here is measured in minutes, and
+/// the thread that ends the session is the one drawing the interface.
+///
 /// # Errors
 ///
 /// Returns [`io::ErrorKind::TimedOut`] if nobody completes a handshake before `patience`
-/// elapses, and the underlying [`io::Error`] for a socket failure.
+/// elapses, [`io::ErrorKind::Interrupted`] if `cancelled` is set, and the underlying
+/// [`io::Error`] for a socket failure.
 pub fn serve(
     transport: &UdpTransport,
     identity: Identity,
     policy: PeerPolicy,
     ability: HostAbility,
     patience: Duration,
+    cancelled: &AtomicBool,
 ) -> io::Result<(Established, SocketAddr, Listener)> {
     let mut listener = Listener::new(identity, policy, ability);
     let mut buf = [0u8; MAX_PACKET_SIZE];
@@ -287,6 +295,13 @@ pub fn serve(
     let give_up = Instant::now() + patience;
 
     while Instant::now() < give_up {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "the session was stopped while it was waiting",
+            ));
+        }
+
         let (len, from) = match transport.recv_from_into(&mut buf) {
             Ok((bytes, from)) => (bytes.len(), from),
             Err(err) if is_timeout(&err) => continue,
