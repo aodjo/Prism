@@ -23,6 +23,10 @@ rather than depending on somebody else's signalling service.
 
 ## Deploying it
 
+Two ways, and the second is not a lesser one.
+
+### As a container
+
 From a clone of this repository, on the machine that will run it:
 
 ```sh
@@ -42,6 +46,51 @@ docker logs -f prism-rendezvous
 It prints a line when it starts and a summary once a minute. `--verbose` in the compose file's
 `command` makes it print a line per message, which is what to reach for when a peer is not
 connecting.
+
+### As a plain binary, with no root at all
+
+The server binds one unprivileged port, reads nothing and writes nothing, so it needs no
+privilege at any point. Every dependency is pure Rust, which means it links statically against
+musl and can be cross-compiled from any machine with a Rust toolchain — no C compiler, on
+either end:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+RUSTFLAGS="-C linker=rust-lld -C target-feature=+crt-static" \
+  cargo build --release -p prism-rendezvous --target x86_64-unknown-linux-musl
+scp target/x86_64-unknown-linux-musl/release/prism-rendezvous server:~/bin/
+```
+
+That is a **1.2 MB** file with nothing beside it. As a user service, so it survives a reboot
+and restarts if it dies:
+
+```ini
+# ~/.config/systemd/user/prism-rendezvous.service
+[Unit]
+Description=Prism rendezvous server
+After=network-online.target
+
+[Service]
+ExecStart=%h/bin/prism-rendezvous --bind 0.0.0.0:47300
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+MemoryMax=128M
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+sudo loginctl enable-linger $USER      # the one command that needs root
+systemctl --user enable --now prism-rendezvous
+```
+
+`enable-linger` is what makes a user service start at boot rather than at login. Without it
+the server comes back only when somebody logs in, which on a headless machine is never.
 
 ## Host networking is not a preference
 
