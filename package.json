@@ -15,7 +15,7 @@
     "build:native:debug": "pnpm --filter @prism/native build:debug",
     "smoke:electron": "electron scripts/electron-smoke.cjs",
     "smoke:node": "node scripts/node-smoke.cjs",
-    "lint:cross": "cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
+    "lint:cross": "cargo clippy --workspace --exclude prism-rendezvous --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --exclude prism-rendezvous --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
     "build": "pnpm run build:native && pnpm -r --filter '!@prism/native' build",
     "typecheck": "pnpm -r typecheck"
   },

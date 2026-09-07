@@ -1,14 +1,19 @@
 # The rendezvous server, as a static binary in an image with nothing else in it.
 #
-# Nothing in this server is platform specific and nothing it depends on is C, so it links
-# statically against musl and the final image needs no libraries, no shell, and no package
-# manager. What ships is one file of a few megabytes, which is also the entire attack surface.
+# Nothing in this server is platform specific, so it links statically against musl and the
+# final image needs no libraries, no shell, and no package manager. What ships is one file,
+# which is also the entire attack surface.
+#
+# It is no longer pure Rust. Serving the account API means TLS, TLS means a cryptographic
+# provider, and the ones worth trusting with it are C. That costs the property this server
+# used to have — cross-building it from a Mac with nothing installed — and buys the one it
+# could not do without, which is that the value signing somebody in is not sent in the clear.
+# The trade is not close.
 
 FROM rust:1-alpine AS build
 
-# musl-dev supplies the linker's startup files. No other C is involved: every dependency in
-# this binary is pure Rust, which is why the resulting image can be empty.
-RUN apk add --no-cache musl-dev
+# musl-dev for the linker's startup files, and a C toolchain for the TLS provider.
+RUN apk add --no-cache musl-dev build-base
 
 WORKDIR /src
 
