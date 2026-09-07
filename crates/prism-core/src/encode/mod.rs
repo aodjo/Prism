@@ -13,6 +13,10 @@
 #[cfg(target_os = "windows")]
 pub mod nv12;
 
+/// Encoding on Linux through VAAPI, which covers Intel, AMD and NVIDIA behind one interface.
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+pub mod vaapi;
+
 #[cfg(target_os = "windows")]
 pub mod nvenc;
 /// The screen's path from the compositor to the wire, shared by every host that has one.
