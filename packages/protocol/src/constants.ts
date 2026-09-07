@@ -15,8 +15,24 @@ export const MAX_PACKET_SIZE = 1200;
 /** Byte length of a video packet header, including the leading channel tag. */
 export const VIDEO_HEADER_LEN = 20;
 
+/**
+ * Bytes a sealed packet costs beyond its plaintext.
+ *
+ * Eight for the nonce counter that travels in the clear and sixteen for the authentication
+ * tag. Everything else — the channel tag included — is inside the seal.
+ */
+export const SEAL_OVERHEAD = 24;
+
+/**
+ * Largest plaintext packet that still fits on the wire once sealed.
+ *
+ * `MAX_PACKET_SIZE` describes what leaves the socket, so the budget the packet formats are
+ * built against is that minus what the seal costs.
+ */
+export const MAX_PLAINTEXT_SIZE = MAX_PACKET_SIZE - SEAL_OVERHEAD;
+
 /** Largest slice fragment that fits in one video packet. */
-export const MAX_VIDEO_PAYLOAD = MAX_PACKET_SIZE - VIDEO_HEADER_LEN;
+export const MAX_VIDEO_PAYLOAD = MAX_PLAINTEXT_SIZE - VIDEO_HEADER_LEN;
 
 /** Exact byte length of a feedback packet; it carries no variable-length payload. */
 export const FEEDBACK_PACKET_LEN = 17;
@@ -46,7 +62,19 @@ export const CURSOR_POSITION_LEN = 18;
 export const FEC_HEADER_LEN = 20;
 
 /** Largest parity shard that fits in one packet. */
-export const MAX_FEC_PAYLOAD = MAX_PACKET_SIZE - FEC_HEADER_LEN;
+export const MAX_FEC_PAYLOAD = MAX_PLAINTEXT_SIZE - FEC_HEADER_LEN;
+
+/** Byte length of an audio packet header, including the leading channel tag. */
+export const AUDIO_HEADER_LEN = 13;
+
+/**
+ * Largest Opus packet that fits in one datagram.
+ *
+ * Far more than one is ever needed — five milliseconds of stereo at a hundred and twenty
+ * kilobits is about eighty bytes — which is the point: audio never fragments and never has to
+ * be reassembled, so a lost audio packet costs exactly one frame and nothing else.
+ */
+export const MAX_AUDIO_PAYLOAD = MAX_PLAINTEXT_SIZE - AUDIO_HEADER_LEN;
 
 /**
  * Most shards a Reed-Solomon block may hold, data and parity together.

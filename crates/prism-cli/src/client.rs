@@ -21,13 +21,33 @@ use std::time::{Duration, Instant};
 use prism_core::clock::now_us;
 use prism_core::net::ack::AckTracker;
 use prism_core::net::clocksync::ClockSync;
+use prism_core::net::handshake::{Identity, KEY_LEN};
 use prism_core::net::packet::{
-    CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
+    AudioPacket, CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
     FEEDBACK_PACKET_LEN, FecPacket, INPUT_PACKET_LEN, InputEvent, InputPacket, MAX_PACKET_SIZE,
     VideoPacket, channel_of, control_type_of,
 };
 use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
+use prism_core::net::secure::{SecureReceiver, SecureSender};
 use prism_core::net::transport::UdpTransport;
+
+#[cfg(target_os = "macos")]
+use crate::audio::AudioSink;
+
+/// Stands in for the playback sink on platforms with no client window yet.
+///
+/// The wire side of audio is built and tested everywhere; only the playing of it is macOS
+/// only so far, because that is where the client window is.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone)]
+pub struct AudioSink;
+
+#[cfg(not(target_os = "macos"))]
+impl AudioSink {
+    /// Discards a frame, on a platform that cannot play it.
+    pub fn push(&self, _sequence: u32, _payload: &[u8], _arrived_us: u64) {}
+}
+
 use prism_core::stats::{LatencyRecorder, LatencySummary};
 
 /// Where decoded pictures go when the client is showing them.
@@ -71,8 +91,11 @@ pub const OFFSET_UNKNOWN: i64 = i64::MIN;
 #[derive(Debug)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct InputSender {
-    transport: UdpTransport,
-    host: SocketAddr,
+    /// Behind a lock because this is shared with the window thread and sealing needs the
+    /// send buffer. The contention is nil — input is at most a thousand events a second and
+    /// nothing else uses this handle — and the alternative, a second key for this direction,
+    /// would mean a second nonce counter under the same key.
+    sender: Mutex<SecureSender>,
     offset: Arc<AtomicI64>,
 }
 
@@ -110,7 +133,11 @@ impl InputSender {
 
         let mut buf = [0u8; INPUT_PACKET_LEN];
         if packet.encode_into(&mut buf).is_ok() {
-            self.transport.send_to(&buf, self.host)?;
+            let mut sender = self
+                .sender
+                .lock()
+                .map_err(|_| io::Error::other("the input sender was poisoned"))?;
+            sender.send(&buf)?;
         }
 
         Ok(origin_ts_us)
@@ -136,13 +163,28 @@ pub struct ClientHooks {
     pub input: Option<Arc<OnceLock<InputSender>>>,
     /// Updated as the host reports where its pointer is.
     pub cursor: Option<CursorSink>,
+    /// Where arriving audio frames go, when this machine can play them.
+    ///
+    /// Absent when nothing is showing the stream, because a session with no window is a
+    /// measurement run and playing its audio out loud would be a surprise.
+    pub audio: Option<AudioSink>,
 }
 
 /// How the receiving client should behave.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Address to receive packets on.
-    pub bind: SocketAddr,
+    /// Address of the host, when it is directly reachable.
+    ///
+    /// `None` means ask the rendezvous server, which is what a host behind NAT requires.
+    pub host: Option<SocketAddr>,
+    /// Rendezvous server to find the host through.
+    pub rendezvous: Option<SocketAddr>,
+    /// Go through the relay without trying a direct path first.
+    ///
+    /// For measuring what relaying costs, and for a person on a path where punching succeeds
+    /// and then stops working — which looks like a session that opens and dies rather than one
+    /// that never opens.
+    pub force_relay: bool,
     /// Stop after this many frames, or run until idle if `None`.
     pub frames: Option<u32>,
     /// Give up after this long with no packets.
@@ -153,6 +195,14 @@ pub struct ClientConfig {
     pub in_flight: usize,
     /// Decode the reassembled frames rather than only counting them.
     pub decode: bool,
+    /// This machine's long-term key.
+    pub identity: Identity,
+    /// The host's public key, as pairing recorded it.
+    ///
+    /// This side dials, so this is the key it encrypts its very first message to. A host that
+    /// does not hold the matching private key cannot read that message at all, which is what
+    /// makes standing in the middle useless rather than merely detectable.
+    pub peer_key: [u8; KEY_LEN],
 }
 
 /// A reassembled frame on its way from the receive thread to the decode thread.
@@ -180,6 +230,98 @@ struct DecodeReport {
     errors: Vec<i32>,
 }
 
+/// Works out where the host is: the address given, or the one the rendezvous server reports.
+///
+/// The lookup happens on the session socket, because the address the server observes is only
+/// reachable at the port that created it.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::InvalidInput`] if neither an address nor a server was given,
+/// [`io::ErrorKind::NotFound`] if the server knows no such host, and the underlying
+/// [`io::Error`] for a socket failure.
+fn open(
+    transport: &UdpTransport,
+    config: &ClientConfig,
+) -> io::Result<(prism_core::net::handshake::Established, SocketAddr)> {
+    use prism_core::control::rendezvous;
+    use prism_core::control::session::{DIRECT_PATIENCE, RELAYED_PATIENCE, dial};
+
+    // An address given by hand is one somebody has arranged to be reachable, so there is
+    // nothing to fall back to and nothing to punch.
+    if let Some(host) = config.host {
+        let established = dial(
+            transport,
+            host,
+            &config.identity,
+            &config.peer_key,
+            RELAYED_PATIENCE,
+        )?;
+
+        return Ok((established, host));
+    }
+
+    let Some(server) = config.rendezvous else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "give either --host or --rendezvous so the host can be found",
+        ));
+    };
+
+    let me = *config.identity.public();
+    let found = rendezvous::lookup(transport, server, config.peer_key, me)?;
+    println!(
+        "client: the host is at {}, and this machine appears at {}",
+        found.address, found.observed
+    );
+
+    // Both sides punch. The handshake message about to be sent repeatedly is this side's own
+    // punch, but the host's router will only pass it once the host has sent outward here —
+    // which the server has just told it to do.
+    // Skipping the punch as well as the dial: a punch is only useful to a path that is about
+    // to be tried.
+    if config.force_relay {
+        println!("client: skipping the direct path because it was asked to");
+    } else {
+        rendezvous::punch(transport, found.address)?;
+
+        match dial(
+            transport,
+            found.address,
+            &config.identity,
+            &config.peer_key,
+            DIRECT_PATIENCE,
+        ) {
+            Ok(established) => {
+                println!("client: connected directly to {}", found.address);
+
+                return Ok((established, found.address));
+            }
+            Err(err) if err.kind() != io::ErrorKind::TimedOut => return Err(err),
+            Err(_) => {}
+        }
+    }
+
+    // Punching failed, which means both routers hand out a different mapping for every
+    // destination. There is no address to reach the host at, so the server carries it — at the
+    // cost of its bandwidth and its distance added to every round trip, which is why this is
+    // reached rather than chosen.
+    println!("client: no direct path opened; asking the rendezvous server to relay");
+
+    let relayed = rendezvous::relay(transport, server, config.peer_key, me)?;
+    let established = dial(
+        transport,
+        relayed.address,
+        &config.identity,
+        &config.peer_key,
+        RELAYED_PATIENCE,
+    )?;
+
+    println!("client: relaying through {}", relayed.address);
+
+    Ok((established, relayed.address))
+}
+
 /// Receives packets until the frame budget or the idle timeout is reached.
 ///
 /// # Errors
@@ -192,16 +334,30 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         offset,
         input,
         cursor,
+        audio,
     } = hooks;
     let offset = offset.unwrap_or_else(|| Arc::new(AtomicI64::new(OFFSET_UNKNOWN)));
-    let transport = UdpTransport::bind(config.bind)?;
+    let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
+
+    println!(
+        "client: connecting ({} frames in flight, decode {})",
+        config.in_flight,
+        if config.decode { "on" } else { "off" }
+    );
+
+    // Nothing is read as a packet until the handshake completes, and it only completes with
+    // the host pairing recorded: the first message is encrypted to that key and no other.
+    let (established, host) = open(&transport, &config)?;
+
+    // Connected only now that it is settled where the session runs. Doing it earlier would
+    // have made the fallback to a relay impossible: a connected socket refuses to send
+    // anywhere else.
+    transport.connect(host)?;
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
     println!(
-        "client: listening on {} ({} frames in flight, decode {})",
-        transport.local_addr()?,
-        config.in_flight,
-        if config.decode { "on" } else { "off" }
+        "client: session established with {host} ({})",
+        prism_core::identity::to_hex(&established.session.peer_static)
     );
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
@@ -218,7 +374,6 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut behind = 0u32;
     let mut unsynced = 0u32;
     let mut sync = ClockSync::new();
-    let mut host: Option<SocketAddr> = None;
     let mut last_ping = Instant::now() - PING_INTERVAL;
     let mut pings_sent = 0u32;
     let mut pongs_seen = 0u32;
@@ -227,37 +382,35 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut reports_sent = 0u64;
     let mut reports_failed = 0u64;
 
+    let mut sender = SecureSender::new(transport.try_clone()?, established.session.sealer);
+    let mut receiver = SecureReceiver::new(transport.try_clone()?, established.session.opener);
+
+    if let Some(slot) = input.as_ref() {
+        if let Ok(split) = sender.split() {
+            let _ = slot.set(InputSender {
+                sender: Mutex::new(split),
+                offset: Arc::clone(&offset),
+            });
+        }
+    }
+
     loop {
-        if let Some(host) = host {
-            if last_ping.elapsed() >= PING_INTERVAL {
-                last_ping = Instant::now();
-                let ping = ClockPing { t1_us: now_us() };
-                if ping.encode_into(&mut ping_buf).is_ok() {
-                    match transport.send_to(&ping_buf, host) {
-                        Ok(_) => pings_sent += 1,
-                        Err(err) => eprintln!("client: ping to {host} failed: {err}"),
-                    }
+        if last_ping.elapsed() >= PING_INTERVAL {
+            last_ping = Instant::now();
+            let ping = ClockPing { t1_us: now_us() };
+            if ping.encode_into(&mut ping_buf).is_ok() {
+                match sender.send(&ping_buf) {
+                    Ok(_) => pings_sent += 1,
+                    Err(err) => eprintln!("client: ping to {host} failed: {err}"),
                 }
             }
         }
 
-        let (bytes, from) = match transport.recv_from_into(&mut recv_buf) {
-            Ok(received) => received,
+        let bytes = match receiver.recv_into(&mut recv_buf) {
+            Ok(bytes) => bytes,
             Err(err) if is_timeout(&err) => break,
             Err(err) => return Err(err),
         };
-        if host.is_none() {
-            host = Some(from);
-            if let Some(slot) = input.as_ref() {
-                if let Ok(cloned) = transport.try_clone() {
-                    let _ = slot.set(InputSender {
-                        transport: cloned,
-                        host: from,
-                        offset: Arc::clone(&offset),
-                    });
-                }
-            }
-        }
 
         if channel_of(bytes) == Ok(Channel::Control) {
             let t4_us = now_us();
@@ -284,6 +437,18 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
                     }
                 }
                 _ => {}
+            }
+
+            continue;
+        }
+
+        // Audio has its own path from here on: no reassembly, no parity, and a jitter buffer
+        // of its own. Sharing the video path's machinery would make every one of its decisions
+        // wrong for sound, which is five millisecond frames rather than sixteen and a
+        // concealed gap rather than a repaired one.
+        if channel_of(bytes) == Ok(Channel::Audio) {
+            if let (Some(sink), Ok(packet)) = (audio.as_ref(), AudioPacket::decode(bytes)) {
+                sink.push(packet.sequence, packet.payload, now_us());
             }
 
             continue;
@@ -322,14 +487,12 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         // lost, and every microsecond it waits is a microsecond the encoder spends choosing
         // a reference it did not have to.
         acks.received(frame.frame_id);
-        if let Some(host) = host {
-            if let Some(report) = acks.report(now_us()) {
-                let mut buf = [0u8; FEEDBACK_PACKET_LEN];
-                if report.encode_into(&mut buf).is_ok() {
-                    match transport.send_to(&buf, host) {
-                        Ok(_) => reports_sent += 1,
-                        Err(_) => reports_failed += 1,
-                    }
+        if let Some(report) = acks.report(now_us()) {
+            let mut buf = [0u8; FEEDBACK_PACKET_LEN];
+            if report.encode_into(&mut buf).is_ok() {
+                match sender.send(&buf) {
+                    Ok(_) => reports_sent += 1,
+                    Err(_) => reports_failed += 1,
                 }
             }
         }

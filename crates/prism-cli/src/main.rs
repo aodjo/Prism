@@ -4,6 +4,8 @@
 //! with no Electron and no window, so the latency numbers describe the pipeline rather
 //! than a compositor. CI drives it for protocol regression runs.
 
+#[cfg(target_os = "macos")]
+mod audio;
 mod client;
 #[cfg(target_os = "macos")]
 mod display;
@@ -11,7 +13,6 @@ mod display;
 mod encode;
 mod host;
 mod pattern;
-mod wire;
 
 use std::error::Error;
 use std::net::SocketAddr;
@@ -20,6 +21,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use prism_core::identity;
+use prism_core::net::handshake::Identity;
+use prism_core::net::pairing::Pin;
 
 /// How the client trades latency against even presentation.
 ///
@@ -60,17 +64,26 @@ struct Cli {
 /// The sides of a session, plus the encoder probe.
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Produce frames and send them to a client.
+    /// Wait for a paired client to connect, then produce frames and send them.
     Host {
-        /// Address of the receiving client.
+        /// Address to listen on.
         ///
-        /// The socket is connected to it, so anything the client sends back has to come
-        /// from this exact address or the kernel discards it without a word. On a client
-        /// with two interfaces on one subnet that is not the address it is reachable at,
-        /// it is the one it routes out of — `route get <this host>` on the client says
-        /// which.
+        /// The host cannot dial: over the internet it has no way to learn a client's address
+        /// until that client speaks. Once one does, the socket is connected to it and the
+        /// kernel discards datagrams from anywhere else.
+        #[arg(long, default_value = "0.0.0.0:47200")]
+        bind: SocketAddr,
+
+        /// Give up after this long with no client, in seconds.
+        #[arg(long, default_value_t = 300)]
+        wait_secs: u64,
+
+        /// Rendezvous server to register with, so clients can find this machine behind NAT.
+        ///
+        /// Without one the host is reachable only from a network the client can already
+        /// address: the same LAN, a VPN, or a forwarded port.
         #[arg(long)]
-        peer: SocketAddr,
+        rendezvous: Option<SocketAddr>,
 
         /// Frames per second.
         #[arg(long, default_value_t = 60)]
@@ -138,13 +151,36 @@ enum Command {
         /// Requires --pace, which supplies the rate it starts from.
         #[arg(long)]
         adaptive: bool,
+
+        /// Where this machine's long-term key is kept, generated on first use.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+
+        /// Restrict the session to this one client key in hex.
+        ///
+        /// Every paired client is admitted by default, because a host serves whichever of its
+        /// machines connects. A host that had paired with nothing refuses everyone: there is
+        /// no way to run open, and a session that skipped this would be one where anyone who
+        /// can reach the port can watch the screen and type on it.
+        #[arg(long)]
+        peer_key: Option<String>,
     },
 
-    /// Receive frames and report latency.
+    /// Connect to a paired host, receive frames, and report latency.
     Client {
-        /// Address to listen on.
+        /// Address the host is listening on, when it is directly reachable.
         #[arg(long)]
-        bind: SocketAddr,
+        host: Option<SocketAddr>,
+
+        /// Rendezvous server to find the host through, when it is not.
+        #[arg(long)]
+        rendezvous: Option<SocketAddr>,
+
+        /// Go through the relay without trying a direct path first.
+        ///
+        /// For measuring what relaying costs against the same session run directly.
+        #[arg(long)]
+        force_relay: bool,
 
         /// Stop after this many frames; runs until idle when omitted.
         #[arg(long)]
@@ -194,6 +230,38 @@ enum Command {
         /// measured without a hand on the mouse.
         #[arg(long)]
         synthetic_input: bool,
+
+        /// Where this machine's long-term key is kept, generated on first use.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+
+        /// The host's public key in hex.
+        ///
+        /// Defaults to the one `prism-cli pair` recorded.
+        #[arg(long)]
+        peer_key: Option<String>,
+    },
+
+    /// Exchange long-term keys with another machine using a six digit code.
+    ///
+    /// Run once per pair of machines. After it, neither side ever needs a code again, and a
+    /// peer that cannot prove it holds the matching private key is refused before it can send
+    /// a single byte the session acts on.
+    Pair {
+        /// Which side of the exchange to run.
+        #[command(subcommand)]
+        side: PairSide,
+    },
+
+    /// Print this machine's public key, creating its long-term key if there is none.
+    ///
+    /// The two sides exchange these once. Each pins the other's, and from then on a peer
+    /// that cannot prove it holds the matching private key is refused before it can send a
+    /// single byte the session acts on.
+    Keygen {
+        /// Where to keep the key. Defaults to `~/.prism/identity.key`.
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
 
     /// Encode synthetic frames to an Annex B file to verify the encoder.
@@ -228,6 +296,40 @@ enum Command {
     },
 }
 
+/// The two halves of a pairing exchange.
+///
+/// The client dials, because that is where the person who typed the code is waiting. This is
+/// the opposite of a running session, where the host dials — pairing and streaming are
+/// separate exchanges and neither constrains the other.
+#[derive(Debug, Subcommand)]
+enum PairSide {
+    /// Show a code and wait for one client to use it.
+    Host {
+        /// Address to listen on.
+        #[arg(long, default_value = "0.0.0.0:47100")]
+        bind: SocketAddr,
+
+        /// Where this machine's long-term key is kept, generated on first use.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+    },
+
+    /// Type a code the host is showing and pair with it.
+    Client {
+        /// Address the host is waiting on.
+        #[arg(long)]
+        host: SocketAddr,
+
+        /// The six digits the host printed.
+        #[arg(long)]
+        pin: String,
+
+        /// Where this machine's long-term key is kept, generated on first use.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+    },
+}
+
 /// Parses the command line and runs the requested side.
 fn main() -> ExitCode {
     match dispatch(Cli::parse()) {
@@ -239,6 +341,52 @@ fn main() -> ExitCode {
     }
 }
 
+/// Works out which client keys a host session will admit.
+///
+/// Named on the command line, or every machine pairing has recorded. Never everyone: a host
+/// that has paired with nothing admits nobody, which is the right answer rather than an
+/// inconvenience.
+///
+/// # Errors
+///
+/// Returns [`std::io::ErrorKind::NotFound`] with an instruction to pair when nothing has
+/// been, and [`std::io::ErrorKind::InvalidInput`] for a key that is not one.
+fn admitted_clients(named: Option<&str>) -> Result<Vec<[u8; 32]>, Box<dyn Error>> {
+    let peers = identity::default_peers_path()?;
+
+    if let Some(text) = named {
+        return Ok(vec![identity::parse_peer_key(text)?]);
+    }
+
+    let known = identity::known_peers(&peers)?;
+    if known.is_empty() {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no client has been paired; run `prism-cli pair host` and pair one first",
+        )));
+    }
+
+    Ok(known)
+}
+
+/// Loads the identity at `path`, or at the default location when none was given.
+///
+/// Generated on first use rather than demanded up front: a machine that has never run has
+/// nothing to lose by making a key, and demanding one before the first run would put a setup
+/// step in front of every install.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if the key cannot be read or written.
+fn open_identity(path: Option<&std::path::Path>) -> Result<Identity, Box<dyn Error>> {
+    let path = match path {
+        Some(path) => path.to_path_buf(),
+        None => identity::default_path()?,
+    };
+
+    Ok(identity::load_or_create(&path)?)
+}
+
 /// Runs the selected subcommand.
 ///
 /// # Errors
@@ -248,7 +396,9 @@ fn main() -> ExitCode {
 fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Host {
-            peer,
+            bind,
+            wait_secs,
+            rendezvous,
             fps,
             frame_bytes,
             slices,
@@ -263,33 +413,49 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             parity,
             pace,
             adaptive,
+            identity,
+            peer_key,
         } => {
-            let config = host::HostConfig {
-                peer,
-                fps,
+            let keys = host::HostKeys {
+                identity: open_identity(identity.as_deref())?,
+                allowed: admitted_clients(peer_key.as_deref())?,
+            };
+            let run = host::HostRun {
+                session: host::HostConfig {
+                    bind,
+                    rendezvous,
+                    patience: Duration::from_secs(wait_secs),
+                    fps,
+                    bitrate_bps: bitrate,
+                    frames: Some(frames),
+                    parity_loss: parity.map(|percent| (percent.clamp(0.0, 100.0) / 100.0) as f32),
+                    pace_bps: pace.map(|mbps| (mbps.clamp(0.0, 10_000.0) * 1e6) as u32),
+                    adaptive,
+                    inject_input: true,
+                    // The command line measures the video path. Audio would add a second
+                    // stream to every number without being what any of them are about.
+                    audio_bitrate_bps: None,
+                },
                 frame_bytes,
                 slices,
-                frames,
                 loss_ppm: percent_to_ppm(loss),
                 loss_seed,
-                parity_loss: parity.map(|percent| (percent.clamp(0.0, 100.0) / 100.0) as f32),
-                pace_bps: pace.map(|mbps| (mbps.clamp(0.0, 10_000.0) * 1e6) as u32),
-                adaptive,
             };
 
             if !encode && !capture {
-                return Ok(host::run(config)?);
+                return Ok(host::run(run, &keys)?);
             }
 
             #[cfg(target_os = "macos")]
             if capture {
-                return host::run_captured(config, bitrate, width, height);
+                return host::run_captured(run, &keys, bitrate, width, height);
             }
 
             #[cfg(target_os = "macos")]
             {
                 host::run_encoded(
-                    config,
+                    run,
+                    &keys,
                     prism_core::encode::EncoderConfig {
                         width,
                         height,
@@ -316,7 +482,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         // differently.
                         max_slice_bytes: slices as u32,
                     };
-                    host::run_windows(config, encoder_config, capture)
+                    host::run_windows(run, &keys, encoder_config, capture)
                 }
 
                 #[cfg(not(target_os = "windows"))]
@@ -325,7 +491,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
         }
 
         Command::Client {
-            bind,
+            host,
+            rendezvous,
+            force_relay,
             frames,
             idle_timeout_ms,
             report_every,
@@ -338,15 +506,24 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             pacing_ms,
             no_input,
             synthetic_input,
+            identity,
+            peer_key,
         } => {
             let pacing_us = pacing_ms.map_or_else(|| mode.ceiling_us(), |ms| ms * 1_000);
             let config = client::ClientConfig {
-                bind,
+                host,
+                rendezvous,
+                force_relay,
                 frames,
                 idle_timeout: Duration::from_millis(idle_timeout_ms),
                 report_every,
                 in_flight,
                 decode: decode || display,
+                identity: open_identity(identity.as_deref())?,
+                peer_key: identity::resolve_peer(
+                    peer_key.as_deref(),
+                    &identity::default_peers_path()?,
+                )?,
             };
 
             let offset =
@@ -390,6 +567,49 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     )?)
                 }
             }
+        }
+
+        Command::Pair { side } => {
+            let peers = identity::default_peers_path()?;
+
+            match side {
+                PairSide::Host {
+                    bind,
+                    identity: path,
+                } => {
+                    let identity = open_identity(path.as_deref())?;
+                    let pin = Pin::generate()?;
+                    println!("pairing code: {}", pin.to_display());
+                    println!("waiting on {bind}");
+
+                    let peer = prism_core::control::pair::host(bind, &identity, &peers, pin)?;
+                    println!("paired with {}", identity::to_hex(&peer));
+                }
+                PairSide::Client {
+                    host,
+                    pin,
+                    identity: path,
+                } => {
+                    let identity = open_identity(path.as_deref())?;
+                    let peer = prism_core::control::pair::client(host, &pin, &identity, &peers)?;
+                    println!("paired with {}", identity::to_hex(&peer));
+                }
+            }
+
+            Ok(())
+        }
+
+        Command::Keygen { identity: path } => {
+            let path = match path {
+                Some(path) => path,
+                None => identity::default_path()?,
+            };
+            let identity = identity::load_or_create(&path)?;
+
+            println!("{}", identity::to_hex(identity.public()));
+            eprintln!("prism-cli: key kept at {}", path.display());
+
+            Ok(())
         }
 
         Command::Encode {

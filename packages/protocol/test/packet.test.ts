@@ -2,12 +2,18 @@ import { describe, expect, it } from 'vitest';
 
 import vectors from '../vectors.json' with { type: 'json' };
 import {
+  AUDIO_HEADER_LEN,
+  MAX_AUDIO_PAYLOAD,
+  decodeAudioPacket,
+  encodeAudioPacket,
   CLOCK_PING_LEN,
   CLOCK_PONG_LEN,
   CONTROL_HEADER_LEN,
   CURSOR_POSITION_LEN,
   FEC_HEADER_LEN,
   MAX_FEC_PAYLOAD,
+  MAX_PLAINTEXT_SIZE,
+  SEAL_OVERHEAD,
   Channel,
   ControlType,
   FEEDBACK_PACKET_LEN,
@@ -252,7 +258,7 @@ describe('video packet', () => {
     ).toThrow(PrismProtocolError);
   });
 
-  it('never produces a packet larger than MAX_PACKET_SIZE at the payload limit', () => {
+  it('at the payload limit fills the plaintext budget, which seals to exactly MAX_PACKET_SIZE', () => {
     const bytes = encodeVideoPacket({
       frameId: 1,
       sliceId: 0,
@@ -263,7 +269,8 @@ describe('video packet', () => {
       payload: new Uint8Array(MAX_VIDEO_PAYLOAD),
     });
 
-    expect(bytes.length).toBe(MAX_PACKET_SIZE);
+    expect(bytes.length).toBe(MAX_PLAINTEXT_SIZE);
+    expect(bytes.length + SEAL_OVERHEAD).toBe(MAX_PACKET_SIZE);
   });
 
   it('rejects encoding with a reserved flag bit set', () => {
@@ -357,9 +364,48 @@ function decodeByChannel(bytes: Uint8Array): void {
       return;
     }
     case Channel.Audio:
-      throw new PrismProtocolError('audio has no layout before M7');
+      decodeAudioPacket(bytes);
+      return;
   }
 }
+
+describe('audio packet', () => {
+  for (const vector of vectors.audioPackets) {
+    it(`encodes and decodes the ${vector.name} vector`, () => {
+      const packet = {
+        sequence: vector.fields.sequence,
+        captureTsUs: BigInt(vector.fields.captureTsUs),
+        payload: hexToBytes(vector.payloadHex),
+      };
+      const bytes = encodeAudioPacket(packet);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(bytes.length).toBe(AUDIO_HEADER_LEN + packet.payload.length);
+      expect(decodeAudioPacket(hexToBytes(vector.hex))).toEqual(packet);
+    });
+  }
+
+  it('rejects a frame larger than MAX_AUDIO_PAYLOAD', () => {
+    expect(() =>
+      encodeAudioPacket({
+        sequence: 0,
+        captureTsUs: 0n,
+        payload: new Uint8Array(MAX_AUDIO_PAYLOAD + 1),
+      }),
+    ).toThrow(PrismProtocolError);
+  });
+
+  it('rejects a packet from another channel', () => {
+    const bytes = encodeAudioPacket({
+      sequence: 0,
+      captureTsUs: 0n,
+      payload: new Uint8Array(4),
+    });
+    bytes[0] = Channel.Video;
+
+    expect(() => decodeAudioPacket(bytes)).toThrow(PrismProtocolError);
+  });
+});
 
 describe('fec packet', () => {
   for (const vector of vectors.fecPackets) {
@@ -385,6 +431,8 @@ describe('fec packet', () => {
   it('agrees with vectors.json on the sizes and the channel', () => {
     expect(FEC_HEADER_LEN).toBe(vectors.constants.fecHeaderLen);
     expect(MAX_FEC_PAYLOAD).toBe(vectors.constants.maxFecPayload);
+    expect(AUDIO_HEADER_LEN).toBe(vectors.constants.audioHeaderLen);
+    expect(MAX_AUDIO_PAYLOAD).toBe(vectors.constants.maxAudioPayload);
     expect(Channel.Fec).toBe(vectors.channels.fec);
   });
 
@@ -392,7 +440,8 @@ describe('fec packet', () => {
     // The reason the header is capped at 20 bytes. A longer header would leave room for
     // less than a full shard and Reed-Solomon needs every shard the same length.
     expect(MAX_FEC_PAYLOAD).toBe(MAX_VIDEO_PAYLOAD);
-    expect(FEC_HEADER_LEN + MAX_FEC_PAYLOAD).toBe(MAX_PACKET_SIZE);
+    expect(FEC_HEADER_LEN + MAX_FEC_PAYLOAD).toBe(MAX_PLAINTEXT_SIZE);
+    expect(MAX_PLAINTEXT_SIZE + SEAL_OVERHEAD).toBe(MAX_PACKET_SIZE);
   });
 
   it('recovers the slice length without the packet that would have carried it', () => {

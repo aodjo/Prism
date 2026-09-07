@@ -1,28 +1,35 @@
-//! Sending encoded slices over the wire.
+//! The host's send path: slices in, sealed and paced packets out.
 //!
-//! Shared by both host modes so the synthetic source and the real encoder put identical
-//! packets on the network — the only difference between them is where the bytes came
-//! from.
+//! Shared by every host mode so the synthetic source and the real encoder put identical
+//! packets on the network — the only difference between them is where the bytes came from.
+//!
+//! Everything that shapes traffic converges here: packetisation, forward error correction,
+//! send pacing, congestion control, and the seal. There is one place a byte leaves the socket
+//! and it is [`SliceSender::emit`], which is what makes it possible to say with confidence
+//! that nothing is sent unsealed, unpaced, or uncounted.
 
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use prism_core::clock::now_us;
-use prism_core::input::{Injector, PlatformInjector};
-use prism_core::net::ack::{is_newer, missing_in_history};
-use prism_core::net::cc::{CongestionConfig, CongestionController, DelaySample};
-use prism_core::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
-use prism_core::net::loss::LossInjector;
-use prism_core::net::packet::{
-    CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR, FLAG_LAST_OF_FRAME,
-    FecPacket, FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD,
-    channel_of,
+use crate::clock::now_us;
+use crate::input::{Injector, PlatformInjector};
+use crate::net::ack::{is_newer, missing_in_history};
+use crate::net::cc::{CongestionConfig, CongestionController, DelaySample};
+use crate::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
+use crate::net::handshake::{Identity, KEY_LEN, PeerPolicy};
+use crate::net::loss::LossInjector;
+use crate::net::packet::{
+    AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition, FLAG_IDR,
+    FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, InputEvent, InputPacket, MAX_PACKET_SIZE,
+    MAX_VIDEO_PAYLOAD, channel_of,
 };
-use prism_core::net::packetize::SlicePacketizer;
-use prism_core::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
-use prism_core::net::transport::UdpTransport;
-use prism_core::stats::LatencyRecorder;
+use crate::net::packetize::SlicePacketizer;
+use crate::net::seal::Opener;
+use crate::net::secure::SecureSender;
+use crate::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
+use crate::net::transport::UdpTransport;
+use crate::stats::LatencyRecorder;
 
 /// How many recent frames the host remembers the capture time of.
 ///
@@ -128,7 +135,17 @@ impl ReturnPath {
 /// Owns the socket and the reusable send buffer for one session.
 #[derive(Debug)]
 pub struct SliceSender {
-    transport: UdpTransport,
+    sender: SecureSender,
+    /// The key for the client's half of the session, until the return path takes it.
+    ///
+    /// Held rather than used here because opening is the receiving thread's job, and there
+    /// is exactly one of those. Two openers on one direction would each keep their own replay
+    /// window and each reject what the other had already accepted.
+    opener: Option<Opener>,
+    /// The client's static key, as the handshake proved it.
+    peer: [u8; KEY_LEN],
+    /// Where that client is.
+    peer_address: std::net::SocketAddr,
     buffer: [u8; MAX_PACKET_SIZE],
     packets: u64,
     bytes: u64,
@@ -150,20 +167,45 @@ pub struct SliceSender {
     pacer: Option<SendPacer>,
     /// Whether the congestion controller is allowed to drive the pacer's rate.
     adaptive: bool,
+    /// How many audio frames have gone out, counted separately because they are a different
+    /// kind of traffic: unpaced, unprotected, and two hundred a second regardless of the video.
+    audio_frames: u64,
 }
 
 impl SliceSender {
-    /// Binds an ephemeral local port and connects it to `peer`.
+    /// Waits on an already bound socket for a paired client to open a session.
+    ///
+    /// The socket is passed in rather than bound here because a host behind NAT has to
+    /// register with the rendezvous server from the very socket the session will use: a
+    /// router's mapping belongs to one local port, and an address published from a different
+    /// port leads nowhere.
+    ///
+    /// Returns only once the session is sealed. There is no path through this that produces a
+    /// sender able to put a packet on the wire in the clear.
     ///
     /// # Errors
     ///
-    /// Returns the underlying [`io::Error`] if the socket cannot be bound or connected.
-    pub fn connect(peer: std::net::SocketAddr) -> io::Result<Self> {
-        let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
-        transport.connect(peer)?;
+    /// Returns [`io::ErrorKind::TimedOut`] if no paired client connects within `patience`,
+    /// and the underlying [`io::Error`] for a socket failure.
+    pub fn serve_on(
+        transport: UdpTransport,
+        identity: &Identity,
+        allowed: Vec<[u8; KEY_LEN]>,
+        patience: std::time::Duration,
+    ) -> io::Result<Self> {
+        let (established, peer, _) = crate::control::session::serve(
+            &transport,
+            identity.clone(),
+            PeerPolicy::Paired(allowed),
+            patience,
+        )?;
+        transport.set_read_timeout(None)?;
 
         Ok(Self {
-            transport,
+            sender: SecureSender::new(transport, established.session.sealer),
+            opener: Some(established.session.opener),
+            peer: established.session.peer_static,
+            peer_address: peer,
             buffer: [0; MAX_PACKET_SIZE],
             packets: 0,
             bytes: 0,
@@ -176,6 +218,7 @@ impl SliceSender {
             oversized_slice_warned: false,
             pacer: None,
             adaptive: false,
+            audio_frames: 0,
         })
     }
 
@@ -359,7 +402,7 @@ impl SliceSender {
             return Ok(());
         }
 
-        self.transport.send(&self.buffer[..len])?;
+        self.sender.send(&self.buffer[..len])?;
 
         Ok(())
     }
@@ -455,7 +498,7 @@ impl SliceSender {
     ///
     /// Returns the underlying [`io::Error`] if the message cannot be sent.
     pub fn send_cursor(&mut self) -> io::Result<bool> {
-        let Some(sample) = prism_core::input::pointer() else {
+        let Some(sample) = crate::input::pointer() else {
             return Ok(false);
         };
 
@@ -470,11 +513,83 @@ impl SliceSender {
         let len = cursor
             .encode_into(&mut self.buffer)
             .expect("a clamped sample always encodes");
-        self.transport.send(&self.buffer[..len])?;
+        self.sender.send(&self.buffer[..len])?;
         self.packets += 1;
         self.bytes += len as u64;
 
         Ok(true)
+    }
+
+    /// Sends one encoded audio frame.
+    ///
+    /// Not paced and not protected by parity. Audio is a fraction of a percent of the link and
+    /// its frames are five milliseconds apart, so spreading them would delay sound to smooth a
+    /// burst that does not exist; and a lost frame is concealed by the decoder, which costs
+    /// nothing per frame where parity would cost bandwidth on every one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the packet cannot be sent, and
+    /// [`io::ErrorKind::InvalidInput`] if the frame is larger than one packet carries — which
+    /// for Opus at any sane rate it never is.
+    pub fn send_audio(
+        &mut self,
+        sequence: u32,
+        payload: &[u8],
+        capture_ts_us: u64,
+    ) -> io::Result<()> {
+        let packet = AudioPacket {
+            sequence,
+            capture_ts_us,
+            payload,
+        };
+
+        let len = packet
+            .encode_into(&mut self.buffer)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
+        self.sender.send(&self.buffer[..len])?;
+        self.packets += 1;
+        self.bytes += len as u64;
+        self.audio_frames += 1;
+
+        Ok(())
+    }
+
+    /// Builds a sender for the audio thread.
+    ///
+    /// Its own socket handle and its own buffer, so audio and video never wait on each other,
+    /// and a *shared* nonce counter, because both are the same direction under the same key.
+    /// Two independent counters would both start at zero and reuse every nonce, which leaks
+    /// the authentication key rather than merely weakening the cipher.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the socket cannot be duplicated.
+    pub fn audio_sender(&self) -> io::Result<AudioSender> {
+        Ok(AudioSender {
+            sender: self.sender.split()?,
+            buffer: Box::new([0; MAX_PACKET_SIZE]),
+            frames: 0,
+        })
+    }
+
+    /// Returns how many audio frames have been sent.
+    #[must_use]
+    pub fn audio_frames(&self) -> u64 {
+        self.audio_frames
+    }
+
+    /// Returns the connected client's public key, as the handshake proved it.
+    #[must_use]
+    pub fn peer(&self) -> [u8; KEY_LEN] {
+        self.peer
+    }
+
+    /// Returns where the connected client is.
+    #[must_use]
+    pub fn peer_address(&self) -> std::net::SocketAddr {
+        self.peer_address
     }
 
     /// Returns how many packets have been sent.
@@ -498,9 +613,18 @@ impl SliceSender {
     ///
     /// # Errors
     ///
-    /// Returns the underlying [`io::Error`] if the socket cannot be duplicated.
-    pub fn serve_return_path(&self, inject_input: bool) -> io::Result<()> {
-        let transport = self.transport.try_clone()?;
+    /// Returns the underlying [`io::Error`] if the socket cannot be duplicated, and
+    /// [`io::ErrorKind::AlreadyExists`] if a return path is already running.
+    pub fn serve_return_path(&mut self, inject_input: bool) -> io::Result<()> {
+        let opener = self.opener.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the return path is already running",
+            )
+        })?;
+
+        let mut receiver = self.sender.receiver(opener)?;
+        let mut replies = self.sender.split()?;
         let feedback = Arc::clone(&self.feedback);
         let adaptive = self.adaptive;
         let start_bps = self.pacer.as_ref().map_or(0, SendPacer::bitrate_bps);
@@ -522,7 +646,7 @@ impl SliceSender {
             let mut injected = 0u64;
 
             loop {
-                let bytes = match transport.recv_into(&mut recv_buf) {
+                let bytes = match receiver.recv_into(&mut recv_buf) {
                     Ok(bytes) => bytes,
                     Err(err) => {
                         eprintln!("host: return path recv failed: {err} ({:?})", err.kind());
@@ -546,7 +670,7 @@ impl SliceSender {
                             t3_us: now_us(),
                         };
                         if pong.encode_into(&mut send_buf).is_ok() {
-                            let _ = transport.send(&send_buf);
+                            let _ = replies.send(&send_buf);
                         }
                     }
                     Ok(Channel::Input) => {
@@ -758,5 +882,62 @@ impl HostInput {
                  cannot tell the two apart"
             );
         }
+    }
+}
+
+/// Sends audio, on the audio thread's own handle.
+///
+/// Separate from [`SliceSender`] because audio is a different kind of traffic on the same
+/// session: two hundred tiny frames a second, unpaced and unprotected, on a thread that must
+/// not wait behind a video frame being packetised.
+pub struct AudioSender {
+    sender: SecureSender,
+    buffer: Box<[u8; MAX_PACKET_SIZE]>,
+    frames: u64,
+}
+
+impl AudioSender {
+    /// Sends one encoded audio frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the packet cannot be sent, and
+    /// [`io::ErrorKind::InvalidInput`] if the frame is larger than one packet carries — which
+    /// for Opus at any sane rate it never is.
+    pub fn send_audio(
+        &mut self,
+        sequence: u32,
+        payload: &[u8],
+        capture_ts_us: u64,
+    ) -> io::Result<()> {
+        let packet = AudioPacket {
+            sequence,
+            capture_ts_us,
+            payload,
+        };
+
+        let len = packet
+            .encode_into(self.buffer.as_mut_slice())
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
+        self.sender.send(&self.buffer[..len])?;
+        self.frames += 1;
+
+        Ok(())
+    }
+
+    /// Returns how many frames have gone out.
+    #[must_use]
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+}
+
+impl core::fmt::Debug for AudioSender {
+    /// Describes the sender by what it has sent.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AudioSender")
+            .field("frames", &self.frames)
+            .finish_non_exhaustive()
     }
 }

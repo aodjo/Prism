@@ -3,7 +3,7 @@
   "constants": {
     "maxPacketSize": 1200,
     "videoHeaderLen": 20,
-    "maxVideoPayload": 1180,
+    "maxVideoPayload": 1156,
     "feedbackPacketLen": 17,
     "controlHeaderLen": 2,
     "clockPingLen": 10,
@@ -11,7 +11,11 @@
     "inputPacketLen": 15,
     "cursorPositionLen": 18,
     "fecHeaderLen": 20,
-    "maxFecPayload": 1180
+    "maxFecPayload": 1156,
+    "sealOverhead": 24,
+    "maxPlaintextSize": 1176,
+    "audioHeaderLen": 13,
+    "maxAudioPayload": 1163
   },
   "channels": {
     "control": 0,
@@ -187,8 +191,13 @@
     },
     {
       "name": "fec-tail-len-over-shard",
-      "hex": "050700000001000802009d0440420f0000000000aa",
+      "hex": "05070000000100080200850440420f0000000000aa",
       "reason": "the final data shard cannot exceed MAX_VIDEO_PAYLOAD"
+    },
+    {
+      "name": "audio-header-truncated",
+      "hex": "020100000001000000000000",
+      "reason": "an audio header is thirteen bytes"
     }
   ],
   "controlTypes": {
@@ -331,11 +340,11 @@
         "dataCount": 254,
         "parityCount": 1,
         "shardIndex": 0,
-        "tailLen": 1180,
+        "tailLen": 1156,
         "captureTsUs": "18446744073709551615"
       },
       "payloadHex": "ff",
-      "hex": "05fffffffffffffe01009c04ffffffffffffffffff"
+      "hex": "05fffffffffffffe01008404ffffffffffffffffff"
     },
     {
       "name": "single-shard-block",
@@ -350,6 +359,35 @@
       },
       "payloadHex": "00",
       "hex": "050000000000000102010100000000000000000000"
+    }
+  ],
+  "audioPackets": [
+    {
+      "name": "canonical",
+      "fields": {
+        "sequence": 66051,
+        "captureTsUs": "1000000"
+      },
+      "payloadHex": "fc0102030405",
+      "hex": "020302010040420f0000000000fc0102030405"
+    },
+    {
+      "name": "empty-frame",
+      "fields": {
+        "sequence": 0,
+        "captureTsUs": "0"
+      },
+      "payloadHex": "",
+      "hex": "02000000000000000000000000"
+    },
+    {
+      "name": "sequence-at-the-wrap",
+      "fields": {
+        "sequence": 4294967295,
+        "captureTsUs": "18446744073709551615"
+      },
+      "payloadHex": "ff",
+      "hex": "02ffffffffffffffffffffffffff"
     }
   ]
 }
