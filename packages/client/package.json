@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && pnpm run build:css && pnpm run build:renderer",
+    "build": "tsc -p tsconfig.json && pnpm run build:css && pnpm run build:renderer && pnpm run build:bridge",
+    "build:bridge": "esbuild src/bridge.ts --bundle --format=iife --outfile=renderer/bridge.js --target=chrome124 --sourcemap",
     "build:css": "tailwindcss -i src/styles.css -o renderer/prism.css",
     "build:renderer": "esbuild src/setup.tsx src/home.tsx src/panel.tsx --bundle --format=esm --outdir=renderer --target=chrome124 --jsx=automatic --sourcemap --define:process.env.NODE_ENV=\\\"production\\\"",
     "start": "pnpm run build && electron .",

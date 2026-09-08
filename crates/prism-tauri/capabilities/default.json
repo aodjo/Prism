@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the windows of this application are allowed to ask the system for. Only the core calls the shell itself makes: everything else this product does goes through commands defined in this crate, which carry their own checks.",
+  "windows": ["home", "setup", "settings"],
+  "permissions": ["core:default"]
+}

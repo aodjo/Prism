@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self'"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: asset: http://asset.localhost; font-src 'self'; connect-src ipc: http://ipc.localhost"
     />
     <title>Prism</title>
     <link rel="stylesheet" href="prism.css" />
@@ -12,6 +12,10 @@
 
   <body>
     <div id="root" class="h-full"></div>
+    <!-- Before the bundle, and deliberately not a module: a module is deferred, and the bundle
+         reads `window.prism` as it runs. Under Electron the preload has already provided that
+         and this stands aside. -->
+    <script src="bridge.js"></script>
     <script type="module" src="home.js"></script>
   </body>
 </html>

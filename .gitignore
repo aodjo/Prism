@@ -30,3 +30,4 @@ packages/client/renderer/prism.css
 
 # Scratch snapshots and logs from browser automation, never part of the tree.
 .playwright-mcp/
+crates/prism-tauri/gen/
