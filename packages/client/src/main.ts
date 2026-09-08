@@ -314,6 +314,30 @@ function openHome(): void {
 }
 
 /**
+ * Opens setup, and closes the home window if that is what was showing.
+ *
+ * The counterpart of {@link openHome}, used when signing out. Without it somebody who signs
+ * out is left looking at a window built entirely out of what the account said — a list of
+ * machines nobody can reach any more and a name that came from an account this machine is no
+ * longer on.
+ *
+ * @returns {void}
+ */
+function openSetup(): void {
+  if (setup && !setup.isDestroyed()) {
+    setup.focus();
+  } else {
+    setup = createStage('setup.html');
+  }
+
+  if (home && !home.isDestroyed()) {
+    home.close();
+  }
+
+  home = null;
+}
+
+/**
  * Registers every call the window is allowed to make.
  *
  * @returns {void}
@@ -345,8 +369,6 @@ function registerHandlers(): void {
   });
 
   ipcMain.on('setup:done', () => {
-    settings = { ...settings, setupDone: true };
-    saveSettings(settings);
     openHome();
   });
 
@@ -402,7 +424,21 @@ function registerHandlers(): void {
       announce(account.signIn(email, password, code, label)),
   );
 
-  ipcMain.handle('account:signOut', () => announce(account.signOut()));
+  // Signing out undoes what signing in set up, rather than only forgetting the token. What
+  // setup asked for was an account; without one there is nothing for the home window to draw,
+  // and the name this machine goes by came from the account it has just left. Leaving either
+  // behind is what makes a signed-out application look like a signed-in one with the names
+  // rubbed out.
+  ipcMain.handle('account:signOut', async () => {
+    const state = await announce(account.signOut());
+
+    sharing.stop();
+    settings = { ...settings, sharing: false, nickname: '' };
+    saveSettings(settings);
+    openSetup();
+
+    return state;
+  });
 
   ipcMain.handle('account:rename', (_event, label: string) => announce(account.rename(label)));
 
@@ -588,11 +624,12 @@ void app.whenReady().then(() => {
   // window this machine's own state would not otherwise show.
   const forced = process.env['PRISM_WINDOW_PAGE'];
 
-  // Being signed in is itself an answer to every question setup asks, so somebody who is does
-  // not get asked again — whatever the settings file says. The two can disagree: a settings
-  // file that was lost or copied from another machine would otherwise send somebody who has
-  // been using this for weeks back to the first screen.
-  const settled = settings.setupDone || Holder.signedInBefore();
+  // Being signed in is the answer to what setup asks, so it is the whole of the question here.
+  // A separate flag recording that setup had been finished could disagree with it — and did:
+  // signing out left the flag behind, so the application kept opening on a home window built
+  // out of an account it was no longer on. The other thing setup asks about is permissions,
+  // and those are the system's answer to give, read afresh every time rather than remembered.
+  const settled = Holder.signedInBefore();
 
   if (forced === 'setup.html' || (!settled && forced !== 'home.html')) {
     setup = createStage('setup.html');

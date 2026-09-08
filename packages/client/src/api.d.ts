@@ -137,14 +137,6 @@ export interface Settings {
    */
   sharing: boolean;
 
-  /**
-   * Whether the setup flow has been through once.
-   *
-   * Stored rather than inferred from whether anything is paired, because somebody who skipped
-   * setup deliberately should not be asked again every time they open the application with no
-   * machines added.
-   */
-  setupDone: boolean;
   /** Whether to send input to the host, or only watch. */
   control: boolean;
   /** Whether to even out arrival jitter at the cost of a little latency. */
