@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Holder } from '@prism/account/holder';
+import type { AccountView } from '@prism/account/holder';
 import { toDataURL } from 'qrcode';
 
 import type { AccountEnrolmentView, HostSnapshot, Session, Settings, StreamState } from './api.js';
@@ -169,6 +170,33 @@ async function others(): Promise<string> {
 }
 
 /**
+ * Tells every open window what the account says, and hands the answer back to the caller.
+ *
+ * The window that asked learns the answer from its own call, but it is never the only one
+ * looking: the settings sheet and the list of machines behind it are drawn from the same
+ * account. A sign-out that reached only the sheet leaves the list still naming machines and
+ * still saying who is signed in, which reads as the button having done nothing.
+ *
+ * Takes the promise rather than the result so that a handler can wrap its one call and stay
+ * one line, which is what stops the next handler from forgetting to do this.
+ *
+ * @async
+ * @param {Promise<AccountView>} state - The account operation to announce the result of.
+ * @returns {Promise<AccountView>} What the account says, for the caller to return.
+ */
+async function announce(state: Promise<AccountView>): Promise<AccountView> {
+  const settled = await state;
+
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('account:state', settled);
+    }
+  }
+
+  return settled;
+}
+
+/**
  * Asks the account who its machines are, and acts on a change.
  *
  * Two things go stale together. The list a window draws is one; the list a running session
@@ -188,13 +216,7 @@ async function catchUp(): Promise<void> {
 
   await account.refresh();
 
-  const state = await account.view();
-
-  for (const open of [window, setup, home]) {
-    if (open && !open.isDestroyed()) {
-      open.webContents.send('account:state', state);
-    }
-  }
+  await announce(account.view());
 
   const own = sharing.snapshot();
 
@@ -372,18 +394,20 @@ function registerHandlers(): void {
     },
   );
 
+  // All four change who this machine belongs to, so all four tell every window rather than
+  // only the one that asked.
   ipcMain.handle(
     'account:signIn',
     (_event, email: string, password: string, code: string, label: string) =>
-      account.signIn(email, password, code, label),
+      announce(account.signIn(email, password, code, label)),
   );
 
-  ipcMain.handle('account:signOut', () => account.signOut());
+  ipcMain.handle('account:signOut', () => announce(account.signOut()));
 
-  ipcMain.handle('account:rename', (_event, label: string) => account.rename(label));
+  ipcMain.handle('account:rename', (_event, label: string) => announce(account.rename(label)));
 
   ipcMain.handle('account:forgetDevice', (_event, publicKey: string) =>
-    account.forget(publicKey),
+    announce(account.forget(publicKey)),
   );
 
   /**
