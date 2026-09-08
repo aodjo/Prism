@@ -70,6 +70,9 @@ const api: PrismApi = {
   accountForgetDevice: (publicKey: string): Promise<AccountState> =>
     ipcRenderer.invoke('account:forgetDevice', publicKey),
 
+  accountRename: (label: string): Promise<AccountState> =>
+    ipcRenderer.invoke('account:rename', label),
+
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
 
   rendezvousServers: (): Promise<RendezvousServer[]> => ipcRenderer.invoke('rendezvous:servers'),

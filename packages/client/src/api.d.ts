@@ -432,6 +432,19 @@ export interface PrismApi {
   accountForgetDevice(publicKey: string): Promise<AccountState>;
 
   /**
+   * Renames this machine on the account.
+   *
+   * The name every other machine on the account sees, which is not the same as the one this
+   * one is called here — that is a nickname and stays local.
+   *
+   * @async
+   * @param {string} label - What to call it from now on.
+   * @returns {Promise<AccountState>} The account as it stands afterwards.
+   * @throws {Error} If nobody is signed in, or the server refuses.
+   */
+  accountRename(label: string): Promise<AccountState>;
+
+  /**
    * Returns the stored settings.
    *
    * @async

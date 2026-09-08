@@ -229,6 +229,31 @@ export class Holder {
    * @returns {Promise<AccountView>} What is known afterwards.
    * @throws {Error} If no server is configured, or the server refused.
    */
+  /**
+   * Renames this machine on the account.
+   *
+   * The same call that registered it: the server keeps one entry per key, so registering a key
+   * it already has is how a label is changed. Which means renaming needs no endpoint of its
+   * own, and cannot leave a machine listed twice under two names.
+   *
+   * @param {string} label - What to call it from now on.
+   * @returns {Promise<AccountView>} The account as it stands afterwards.
+   * @throws {Error} If nobody is signed in, or the server refuses.
+   */
+  async rename(label: string): Promise<AccountView> {
+    const client = this.reach();
+
+    try {
+      this.adopt(await client.registerDevice(this.native.identityPublicKey(), label));
+      this.trouble = null;
+    } catch (error) {
+      this.trouble = message(error);
+      throw new Error(this.trouble);
+    }
+
+    return this.snapshot();
+  }
+
   async forget(publicKey: string): Promise<AccountView> {
     const client = this.reach();
 

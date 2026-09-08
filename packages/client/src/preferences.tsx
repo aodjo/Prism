@@ -434,7 +434,16 @@ export function SharingTerms(): JSX.Element {
             setSettings((was) => (was ? { ...was, nickname: event.target.value } : was));
           }}
           onBlur={(event) => {
-            save({ nickname: event.target.value.trim() });
+            const named = event.target.value.trim();
+            save({ nickname: named });
+
+            // The account carries the name every other machine reads, so the one typed here
+            // is sent there too — two names for one machine would be two answers to the
+            // same question. A machine nobody has signed in on has nowhere to send it, and
+            // that is not a failure worth interrupting anybody over.
+            if (named !== '') {
+              void prism.accountRename(named).catch(() => {});
+            }
           }}
         />
       </Row>

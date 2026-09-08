@@ -380,6 +380,8 @@ function registerHandlers(): void {
 
   ipcMain.handle('account:signOut', () => account.signOut());
 
+  ipcMain.handle('account:rename', (_event, label: string) => account.rename(label));
+
   ipcMain.handle('account:forgetDevice', (_event, publicKey: string) =>
     account.forget(publicKey),
   );
