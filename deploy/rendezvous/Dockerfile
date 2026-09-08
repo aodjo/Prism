@@ -31,15 +31,27 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p prism-rendezvous \
      && cp target/release/prism-rendezvous /prism-rendezvous
 
+# The directory accounts are kept in, made here so that it exists in the final image with the
+# right ownership. A named volume takes the ownership of whatever it is mounted over, and a
+# scratch image has nothing to take it from — so without this the volume arrives owned by root
+# and the server, which is not root, cannot write the file it was asked to keep.
+RUN mkdir -p /var/lib/prism && chown 65534:65534 /var/lib/prism
+
 FROM scratch
 
 COPY --from=build /prism-rendezvous /prism-rendezvous
+COPY --from=build --chown=65534:65534 /var/lib/prism /var/lib/prism
 
-# Nothing here needs to write, read a file, or resolve a name. Running as a number rather than
-# a name because there is no /etc/passwd in the image to hold one.
+# Certificates for the mail provider it calls to send verification codes. A scratch image has
+# no trust store, and without one every send fails at the handshake.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Running as a number rather than a name because there is no /etc/passwd in the image to hold
+# one. The only thing it writes is the accounts directory, and only when asked to keep accounts.
 USER 65534:65534
 
 EXPOSE 47300/udp
+EXPOSE 47380/tcp
 
 ENTRYPOINT ["/prism-rendezvous"]
 CMD ["--bind", "0.0.0.0:47300"]

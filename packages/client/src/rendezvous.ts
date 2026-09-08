@@ -29,8 +29,14 @@ export const PRISM_RENDEZVOUS = 'rv.presm.kr:47300';
  * says where the rendezvous is, which is why a machine that has signed in needs to be told
  * nothing else.
  *
+ * A different name from the rendezvous, and one that resolves to a single machine. The
+ * rendezvous name is several — one record per region — because a signalling server is a
+ * stateless introducer and any of them will do. Accounts are a file on one disk that no server
+ * tells another about, so the same arrangement would sign somebody in against whichever region
+ * answered and deny their account existed on the next call.
+ *
  * TLS is the reverse proxy's, not the server's: what crosses it is the value that signs
  * somebody in, and never anything that opens a private key — that stays sealed under a secret
  * derived from the password and is not sent anywhere.
  */
-export const PRISM_ACCOUNT_SERVER = 'https://rv.presm.kr';
+export const PRISM_ACCOUNT_SERVER = 'https://accounts.presm.kr';

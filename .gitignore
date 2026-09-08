@@ -6,6 +6,9 @@ out/
 .DS_Store
 .env
 .env.*
+# The one that is a template rather than a secret, and the only way somebody knows what to fill
+# in. Named after the pattern above it so the exception has to be stated.
+!deploy/rendezvous/.env.example
 packages/native/index.js
 packages/native/index.d.ts
 

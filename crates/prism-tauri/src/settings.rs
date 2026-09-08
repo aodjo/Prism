@@ -19,7 +19,13 @@ use std::collections::BTreeMap;
 const PRISM_RENDEZVOUS: &str = "rv.presm.kr:47300";
 
 /// Where this project's account server is.
-const PRISM_ACCOUNT_SERVER: &str = "https://rv.presm.kr";
+///
+/// A different name from the rendezvous, and one that resolves to a single machine. The
+/// rendezvous name is several — one record per region — because a signalling server is a
+/// stateless introducer and any of them will do. Accounts are a file on one disk that no server
+/// tells another about, so the same arrangement would sign somebody in against whichever region
+/// answered and deny their account existed on the next call.
+const PRISM_ACCOUNT_SERVER: &str = "https://accounts.presm.kr";
 
 /// Everything a person has chosen.
 ///

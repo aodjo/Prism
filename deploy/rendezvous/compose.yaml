@@ -1,4 +1,6 @@
-# Run with, from the repository root:
+# One rendezvous region, with or without the accounts that go beside it.
+#
+# Copy `.env.example` to `.env`, fill it in, and from the repository root:
 #
 #   docker compose -f deploy/rendezvous/compose.yaml up -d --build
 #
@@ -23,14 +25,43 @@ services:
     # arrangement where what the server observes is what the peer actually is.
     network_mode: host
 
-    command: ["--bind", "0.0.0.0:47300"]
+    command:
+      - "--bind"
+      - "0.0.0.0:47300"
+      - "--region"
+      - "${PRISM_REGION}"
+      # Handed to a machine when it signs in, so neither end has to be told by hand where to
+      # register. The name rather than this server's own address, because a machine that only
+      # knew this region would stop finding hosts the moment a nearer one was added.
+      - "--advertise"
+      - "${PRISM_RENDEZVOUS_NAME}"
+      # The file itself, not the directory it is in: `sessions.json` is written beside whatever
+      # this names. The volume is mounted over the directory so both survive a rebuild.
+      - "--accounts"
+      - "/var/lib/prism/accounts.json"
+      # Plain HTTP on the loopback, which is where the proxy in front of it reaches it. Binding
+      # this anywhere else would put the value that signs somebody in on the network in the
+      # clear, and the server refuses to unless told the exposure is deliberate.
+      - "--api-bind"
+      - "127.0.0.1:47380"
 
-    # It holds two hash maps and a socket. This is a ceiling to make a runaway visible, not a
-    # figure it will approach.
+    environment:
+      # Without a mail key the server creates accounts already verified and says so at startup,
+      # which is right for a server one person runs for their own machines and wrong for one
+      # anybody can reach.
+      PRISM_RESEND_KEY: "${PRISM_RESEND_KEY:-}"
+      PRISM_MAIL_FROM: "${PRISM_MAIL_FROM:-}"
+      PRISM_ADMIN_TOKEN: "${PRISM_ADMIN_TOKEN:-}"
+
+    volumes:
+      - accounts:/var/lib/prism
+
+    # It holds two hash maps, a socket, and however many accounts somebody made. This is a
+    # ceiling to make a runaway visible, not a figure it will approach.
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 256M
 
     logging:
       driver: json-file
@@ -38,10 +69,48 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # The binary drops every capability it is given: it binds one unprivileged port and does
-    # nothing else a kernel would ask permission for.
+    # The binary drops every capability it is given: it binds two unprivileged ports and does
+    # nothing else a kernel would ask permission for. The accounts volume is writable; the rest
+    # of the filesystem is not, and there is nothing in it anyway.
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     read_only: true
+
+  # What makes the account API reachable over anything worth sending a password across.
+  #
+  # Caddy rather than nginx because the certificate is the whole job here, and Caddy obtains and
+  # renews one by itself: there is no certbot to install, no timer to forget, and no renewal
+  # that quietly stops. It answers the challenge on port 80 and serves on 443.
+  proxy:
+    image: caddy:2-alpine
+    container_name: prism-proxy
+    restart: unless-stopped
+
+    # Host networking again, and for a plainer reason: the API it forwards to is on the host's
+    # loopback, which a bridged container has no route to.
+    network_mode: host
+
+    environment:
+      PRISM_ACCOUNT_HOST: "${PRISM_ACCOUNT_HOST}"
+      PRISM_ACCOUNT_EMAIL: "${PRISM_ACCOUNT_EMAIL}"
+
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The certificate and the account key it was issued against. Losing these means asking a
+      # certificate authority for another one, which is rate limited — so they outlive the
+      # container.
+      - caddy-data:/data
+      - caddy-config:/config
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  accounts:
+  caddy-data:
+  caddy-config:

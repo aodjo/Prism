@@ -30,11 +30,36 @@ Two ways, and the second is not a lesser one.
 From a clone of this repository, on the machine that will run it:
 
 ```sh
+cp deploy/rendezvous/.env.example deploy/rendezvous/.env
+$EDITOR deploy/rendezvous/.env
 docker compose -f deploy/rendezvous/compose.yaml up -d --build
 ```
 
-The image is built from source and comes out at **2.4 MB**: one statically linked binary in an
-otherwise empty image, with no shell, no package manager, and no libraries.
+That brings up two containers: the server itself, and Caddy in front of the account API to
+obtain and renew its certificate. The server image is built from source and comes out at
+**2.4 MB** — one statically linked binary in an otherwise empty image, with no shell, no
+package manager and no libraries.
+
+Three ports have to be open: **47300/udp** for signalling, **47301/udp** for the relay, and
+**80** and **443/tcp** for the account API and the challenge that certifies it.
+
+#### The account name is not the rendezvous name
+
+`PRISM_ACCOUNT_HOST` has to resolve to the one machine keeping the accounts, and it must not be
+the rendezvous name.
+
+The rendezvous name is deliberately several address records, one per region, because signalling
+servers are stateless introducers and any of them will do — that is the whole of the section on
+regions below. Accounts are the opposite. They are a file on one disk, and no server tells
+another about them. A name that round-robined between regions would sign somebody in against
+whichever server answered and then tell them, on the next call, that their account does not
+exist.
+
+```
+rv.presm.kr.        A  203.0.113.10   # a region
+rv.presm.kr.        A  198.51.100.20  # another region
+accounts.presm.kr.  A  198.51.100.20  # the one that keeps accounts
+```
 
 Build it on the machine that will run it, which is what the command above does. Building it
 elsewhere for another architecture works but goes through emulation and takes many times
