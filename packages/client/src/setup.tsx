@@ -8,7 +8,7 @@
  */
 
 import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
-import type { JSX } from 'react';
+import type { CSSProperties, JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import type {
@@ -82,6 +82,40 @@ const GRANTS = [
 
 /** How many characters a pairing code has. */
 const CODE_LENGTH = 6;
+
+/** How far apart the code boxes are, centre to centre: 62 wide with 10 between. */
+const CODE_PITCH = 72;
+
+/** How far the leftmost box is from the middle of the row, which the rest step down from. */
+const CODE_CENTRE = ((CODE_LENGTH - 1) * CODE_PITCH) / 2;
+
+/**
+ * How long a refusal is shown before the row hands itself back.
+ *
+ * Long enough to read three words and see the row say no; short enough that somebody who
+ * already knows they fat-fingered it is not kept waiting to try again.
+ */
+const REFUSAL_HOLD_MS = 900;
+
+/**
+ * How the mark inside the circle is drawn on.
+ *
+ * The dash pattern is the whole trick: a path whose dash is as long as the path itself is
+ * either entirely gap or entirely line, so moving the offset from one to the other draws it.
+ * The lengths are the paths' own, rounded up.
+ */
+const MARK_TICK = {
+  '--mark-length': '22',
+  strokeDasharray: 22,
+  animation: 'code-mark 260ms cubic-bezier(0.65, 0, 0.35, 1) 320ms both',
+} as CSSProperties;
+
+/** The same, for each of the two strokes that say no. */
+const MARK_CROSS = {
+  '--mark-length': '16',
+  strokeDasharray: 16,
+  animation: 'code-mark 200ms cubic-bezier(0.65, 0, 0.35, 1) 120ms both',
+} as CSSProperties;
 
 /** The one shape every box on the account screen has. */
 const ACCOUNT_FIELD =
@@ -323,6 +357,13 @@ function Setup(): JSX.Element {
    * next time they open the application.
    */
   const [justEnrolled, setJustEnrolled] = useState(false);
+  /**
+   * How many codes have been refused on this screen.
+   *
+   * Counted rather than flagged, because the row of boxes reacts to it and a flag that was
+   * already true the second time would react once and then sit still.
+   */
+  const [refused, setRefused] = useState(0);
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
   const [working, setWorking] = useState(false);
@@ -489,8 +530,10 @@ function Setup(): JSX.Element {
         setConfirm('');
         setAskingCode(false);
         setGreeted(true);
+        setRefused(0);
       } catch (error) {
         setAccountTrouble(reason(error));
+        setRefused((was) => was + 1);
       } finally {
         setWorking(false);
       }
@@ -545,8 +588,10 @@ function Setup(): JSX.Element {
         setEnrolment(await prism.accountRegister(email.trim(), password, code));
         setProving(false);
         setJustEnrolled(true);
+        setRefused(0);
       } catch (error) {
         setAccountTrouble(reason(error));
+        setRefused((was) => was + 1);
       } finally {
         setWorking(false);
       }
@@ -685,6 +730,7 @@ function Setup(): JSX.Element {
           {greeted ? null : askingCode ? (
             <CodeBoxes
               disabled={working}
+              refused={refused}
               onComplete={(code) => {
                 signIn(code);
               }}
@@ -692,6 +738,7 @@ function Setup(): JSX.Element {
           ) : proving ? (
             <CodeBoxes
               disabled={working}
+              refused={refused}
               onComplete={(code) => {
                 proveAddress(code);
               }}
@@ -718,6 +765,7 @@ function Setup(): JSX.Element {
                 onClick={() => {
                   setEnrolment(null);
                   setJoining(false);
+                  setRefused(0);
                   setAskingCode(true);
                 }}
               >
@@ -1195,9 +1243,11 @@ function Figure({
  */
 function CodeBoxes({
   disabled,
+  refused,
   onComplete,
 }: {
   disabled: boolean;
+  refused: number;
   onComplete: (code: string) => void;
 }): JSX.Element {
   const [characters, setCharacters] = useState<string[]>(Array<string>(CODE_LENGTH).fill(''));
@@ -1207,6 +1257,25 @@ function CodeBoxes({
     boxes.current[0]?.focus();
   }, []);
 
+  // A refusal empties the row and puts the caret back at the start, but not until the mark has
+  // finished saying no. Clearing underneath the answer would take the answer away before it
+  // had been read; leaving six wrong characters in place would ask somebody to clean up after
+  // the interface's own bad news.
+  useEffect(() => {
+    if (refused === 0) {
+      return;
+    }
+
+    const settling = setTimeout(() => {
+      setCharacters(Array<string>(CODE_LENGTH).fill(''));
+      boxes.current[0]?.focus();
+    }, REFUSAL_HOLD_MS);
+
+    return () => {
+      clearTimeout(settling);
+    };
+  }, [refused]);
+
   const put = (next: string[]): void => {
     setCharacters(next);
 
@@ -1215,8 +1284,11 @@ function CodeBoxes({
     }
   };
 
+  const full = characters.every((character) => character !== '');
+  const wrong = full && refused > 0;
+
   return (
-    <div className="mt-[88px] flex gap-2.5">
+    <div className="relative mt-[88px] flex h-[72px] items-center gap-2.5">
       {characters.map((character, at) => (
         <input
           // The boxes are a fixed row of six that never reorders, so their position is what
@@ -1228,7 +1300,7 @@ function CodeBoxes({
           type="text"
           inputMode="numeric"
           maxLength={1}
-          disabled={disabled}
+          disabled={disabled || full}
           aria-label={`Character ${at + 1}`}
           value={character}
           onChange={(event) => {
@@ -1259,11 +1331,65 @@ function CodeBoxes({
             boxes.current[Math.min(pasted.length, CODE_LENGTH - 1)]?.focus();
             put(next);
           }}
-          className={`no-drag h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none ${
-            character === '' ? 'border-line-4 bg-wash-1' : 'border-line-4 bg-wash-4'
-          } focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)]`}
+          style={{
+            // Each box carries how far it is from the middle of the row, so the six of them
+            // draw together into one place rather than merely fading out where they stand.
+            // A transition rather than an animation because the way back out is the same
+            // movement reversed, and a refusal has to be able to hand the row back.
+            transform: full ? `translateX(${CODE_CENTRE - at * CODE_PITCH}px) scale(0.55)` : 'none',
+            opacity: full ? 0 : 1,
+            animationDelay: `${at * 45}ms`,
+          }}
+          className={`no-drag h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none transition-[transform,opacity,background-color,border-color,box-shadow] duration-[340ms] ease-[cubic-bezier(0.4,0,0.2,1)] focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)] ${
+            character === ''
+              ? 'border-line-4 bg-wash-1 animate-[code-in_380ms_cubic-bezier(0.22,1.2,0.36,1)_both]'
+              : 'border-[rgba(124,92,255,0.45)] bg-wash-4'
+          }`}
         />
       ))}
+
+      {/* What the six of them became: one round mark in the middle they collapsed into. A
+          circle rather than another box, because the row of boxes is what somebody was
+          filling in and this is no longer a thing to fill in. */}
+      {full && (
+        <span
+          key={refused}
+          className={`pointer-events-none absolute inset-0 flex items-center justify-center ${
+            wrong ? 'animate-[code-refused_420ms_cubic-bezier(0.36,0.07,0.19,0.97)]' : ''
+          }`}
+        >
+          <span
+            role="status"
+            style={{ animationDelay: wrong ? '0ms' : '190ms' }}
+            className={`flex size-[72px] animate-[code-sealed_320ms_cubic-bezier(0.22,1.2,0.36,1)_both] items-center justify-center rounded-full border-2 ${
+              wrong
+                ? 'border-[rgba(255,92,110,0.5)] bg-[rgba(255,92,110,0.16)]'
+                : 'border-[rgba(124,92,255,0.55)] bg-[rgba(124,92,255,0.16)]'
+            } ${disabled && !wrong ? 'animate-[code-checking_1.1s_ease-in-out_infinite]' : ''}`}
+          >
+            <span className="sr-only">{wrong ? 'That code was refused' : 'Six characters in'}</span>
+            <svg
+              viewBox="0 0 28 28"
+              className="size-7"
+              fill="none"
+              stroke={wrong ? '#ff8a96' : '#f6f6f8'}
+              strokeWidth="2.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              {wrong ? (
+                <>
+                  <path d="M8.5 8.5 L19.5 19.5" style={MARK_CROSS} />
+                  <path d="M19.5 8.5 L8.5 19.5" style={{ ...MARK_CROSS, animationDelay: '90ms' }} />
+                </>
+              ) : (
+                <path d="M6.5 14.5 L11.75 19.75 L21.5 8.75" style={MARK_TICK} />
+              )}
+            </svg>
+          </span>
+        </span>
+      )}
     </div>
   );
 }
