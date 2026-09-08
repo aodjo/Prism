@@ -676,16 +676,23 @@ fn spawn_accounts(
             };
 
             runtime.block_on(async move {
+                // A server told to keep accounts and unable to serve them is misconfigured, and
+                // the whole process goes rather than this thread alone. Returning here left the
+                // receive loop running, so the process stayed up, anything watching it called it
+                // healthy, and every request to the account API was refused for as long as
+                // nobody looked at the logs. Exiting is what makes a restart, or a person, see
+                // it.
                 let listener = match tokio::net::TcpListener::bind(bind).await {
                     Ok(listener) => listener,
                     Err(err) => {
                         eprintln!("prism-rendezvous: the account API could not bind {bind}: {err}");
-                        return;
+                        std::process::exit(1);
                     }
                 };
 
                 if let Err(err) = axum::serve(listener, routes(service)).await {
                     eprintln!("prism-rendezvous: the account API stopped: {err}");
+                    std::process::exit(1);
                 }
             });
         })?;

@@ -75,6 +75,72 @@ It prints a line when it starts and a summary once a minute. `--verbose` in the 
 `command` makes it print a line per message, which is what to reach for when a peer is not
 connecting.
 
+### On a push, by itself
+
+`.github/workflows/deploy.yml` builds the image once and puts it where it runs. A push to
+`develop` deploys to the `staging` environment and a push to `main` to `production`, and only
+after CI has passed on that commit — a pipeline whose point is that what reaches a server is
+what the tests ran against.
+
+Which machine each name means is set in the repository's environment settings rather than here,
+so pointing both at one box while there is only one box is a change to configuration and not to
+code. Each environment needs:
+
+| Secret | What it is |
+|---|---|
+| `DEPLOY_HOST` | The machine's address. |
+| `DEPLOY_USER` | The account to connect as. It has to be able to run `docker`. |
+| `DEPLOY_PATH` | The directory on it holding `.env`, and where the compose file is put. |
+| `DEPLOY_SSH_KEY` | A private key whose public half is in that account's `authorized_keys`. |
+| `DEPLOY_HOST_KEY` | The server's own key, from `ssh-keyscan <host>`. Pinned rather than accepted on sight: a deploy that trusts whatever answers can be pointed at something else by anything that answers first. |
+| `DEPLOY_PORT` | Optional. Defaults to 22. |
+
+The `.env` is **not** deployed and must be put on each server once, by hand. It holds the mail
+key, and a server's secrets belong to the server rather than to a repository that builds it.
+
+Create both environments **before** the first run and put the secrets on the environments rather
+than on the repository, so a staging credential cannot reach the production box. Naming an
+environment that does not exist creates it on first use with no protection at all. Give
+`production` a required reviewer and a deployment branch policy limiting it to `main`.
+
+Four things about this that are easy to be caught by:
+
+- `workflow_run` only fires for a workflow file that is on the **default branch**. Until this
+  file is on `main`, a push to `develop` builds nothing.
+- A `workflow_run` job runs with **this** repository's secrets whatever triggered it, and a pull
+  request from a fork triggers CI. The branch filter does not help — it matches the head branch
+  of the run that fired, and every fork has a `main`. The build job therefore checks that the run
+  came from a push in this repository, and those two conditions are the only thing standing
+  between a stranger's Dockerfile and the machine that keeps everybody's accounts.
+- The image is deployed **by digest**, not by tag. A tag is a name somebody can move.
+- The image is built for both architectures, because the machines it runs on are not all the
+  same one and an image that only runs where it was built is not a deployable artifact.
+
+A push deploy will not start on a machine that is already running the server another way. Osaka
+runs it as a systemd user service on the same UDP port; stop and disable that first
+(`systemctl --user disable --now prism-rendezvous`) or the container will fail to bind.
+
+To put a known-good build back without pushing a commit whose only purpose is to trigger a
+deploy, run the workflow by hand and choose the environment.
+
+### Backing up the accounts
+
+Everything else here is disposable. The signalling registry is in memory and repopulates itself
+within fifteen seconds of a restart; the image is rebuilt from a commit. The accounts volume is
+the one thing that is not: it holds each account's sealed private key, its TOTP secret and the
+machines it knows, and none of it can be reconstructed. Losing it means every account's key is
+gone, every pairing is gone, and every second factor has to be enrolled again.
+
+```sh
+docker run --rm -v prism-rendezvous_accounts:/d:ro alpine tar czf - -C /d . \
+  | age -r <recipient> > accounts-$(date +%F).tgz.age
+```
+
+Encrypted, and not optional: `accounts.json` holds every account's TOTP secret in the clear, so
+an unencrypted backup is a second copy of everybody's second factor. Put it on a different
+machine — a copy on the disk you are protecting against is not a backup — and restore it once
+before there is anything real in it, because a backup nobody has restored is a guess.
+
 ### As a plain binary, with no root at all
 
 The server binds one unprivileged port and needs no privilege at any point.

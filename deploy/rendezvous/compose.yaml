@@ -6,12 +6,21 @@
 #
 # See docs/rendezvous.md for what to open on the firewall and how to check it is working.
 
+# Named, and this matters more than it looks. Without it the project is the base name of
+# whichever directory the compose file happens to be in, and the accounts volume is named after
+# the project — so bringing the same stack up from a different path silently starts on an empty
+# account store rather than the one holding everybody's keys. Pinned so the path cannot decide.
+name: prism-rendezvous
+
 services:
   rendezvous:
     build:
       context: ../..
       dockerfile: deploy/rendezvous/Dockerfile
-    image: prism-rendezvous
+    # Overridden by the deploy workflow with the image it built and pushed, so a server pulls a
+    # tested build rather than compiling one. Left as a local name by default: somebody running
+    # this by hand on their own box wants the source in front of them, not a registry.
+    image: "${PRISM_IMAGE:-prism-rendezvous}"
     container_name: prism-rendezvous
     restart: unless-stopped
 
