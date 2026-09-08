@@ -319,12 +319,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                     Sign out
                   </button>
                 </Row>
-                <Row label="Relay">
-                  <span className="text-note-2 text-ink-3">
-                    {account.relayAllowed ? 'allowed' : 'not allowed'}
-                  </span>
-                </Row>
-                <div className="mt-2 flex flex-col gap-1">
+                  <div className="mt-2 flex flex-col gap-1">
                   {account.devices.map((device) => (
                     <div
                       key={device.publicKey}
@@ -430,16 +425,6 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
               }}
               onBlur={(event) => {
                 save({ bind: event.target.value.trim() });
-              }}
-            />
-          </Row>
-          <Row label="Share on launch">
-            <input
-              type="checkbox"
-              className={TOGGLE}
-              checked={settings?.shareOnLaunch ?? false}
-              onChange={(event) => {
-                save({ shareOnLaunch: event.target.checked });
               }}
             />
           </Row>

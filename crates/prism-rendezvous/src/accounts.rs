@@ -421,9 +421,12 @@ impl Accounts {
                 totp_secret: hex(&totp_secret),
                 sealed_key: hex(&registration.sealed_key),
                 devices: Vec::new(),
-                // Off until somebody decides otherwise. The relay costs bandwidth, and a
-                // server that gave it away by default would be one nobody could afford to run.
-                relay_allowed: false,
+                // On, because it is reached rather than chosen: a pair that can punch a hole
+                // to each other never touches it, and a pair that cannot has no other way to
+                // meet at all. Leaving it off by default meant the ones who needed it were the
+                // ones it was refused to. An operator paying for the bandwidth can still say
+                // no — see `set_relay_allowed`.
+                relay_allowed: true,
                 verified: true,
             },
         );
@@ -1067,26 +1070,27 @@ mod tests {
     }
 
     #[test]
-    fn the_relay_is_off_until_somebody_says_otherwise() {
-        // It costs bandwidth that somebody pays for, so it is not something a new account
-        // should quietly arrive holding.
+    fn the_relay_is_there_for_a_new_account_and_can_be_taken_away() {
+        // On by default because it is reached rather than chosen: an account that needed it
+        // and did not have it is a pair of machines that simply cannot meet, with nothing on
+        // screen saying why. An operator paying for the bandwidth can still refuse it.
         let (mut accounts, path) = store("relay");
         accounts
             .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         assert!(
-            !accounts
+            accounts
                 .get("someone@example.com")
                 .expect("exists")
                 .relay_allowed
         );
 
         accounts
-            .set_relay_allowed("someone@example.com", true)
-            .expect("allows");
+            .set_relay_allowed("someone@example.com", false)
+            .expect("refuses");
         assert!(
-            accounts
+            !accounts
                 .get("someone@example.com")
                 .expect("exists")
                 .relay_allowed

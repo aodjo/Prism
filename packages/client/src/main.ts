@@ -337,9 +337,21 @@ function registerHandlers(): void {
     window = createWindow();
   });
 
-  ipcMain.handle('share:start', () => sharing.start(settings));
+  // Sharing is remembered rather than asked about again. Somebody who turned this machine on
+  // for another one of theirs meant it to stay on: a switch that quietly returned to off every
+  // time the application restarted would be a machine that is reachable only when somebody
+  // happens to have opened a window on it, which is the opposite of what it is for.
+  ipcMain.handle('share:start', () => {
+    const state = sharing.start(settings);
+    remember(true);
 
-  ipcMain.handle('share:stop', () => sharing.stop());
+    return state;
+  });
+
+  ipcMain.handle('share:stop', () => {
+    sharing.stop();
+    remember(false);
+  });
 
   ipcMain.handle('share:state', () => sharing.snapshot());
 
@@ -371,6 +383,25 @@ function registerHandlers(): void {
   ipcMain.handle('account:forgetDevice', (_event, publicKey: string) =>
     account.forget(publicKey),
   );
+
+  /**
+   * Writes down whether this machine is meant to be shared.
+   *
+   * Separate from whether it is shared right now: the session can end for reasons nobody
+   * chose — a network that went away, a machine that slept — and coming back should put it
+   * back the way it was left rather than the way it happened to fail.
+   *
+   * @param {boolean} on - Whether sharing was turned on.
+   * @returns {void}
+   */
+  const remember = (on: boolean): void => {
+    if (settings.sharing === on) {
+      return;
+    }
+
+    settings = { ...settings, sharing: on };
+    saveSettings(settings);
+  };
 
   ipcMain.handle('settings:get', () => settings);
 
@@ -515,7 +546,7 @@ void app.whenReady().then(() => {
   registerHandlers();
   account.start();
 
-  if (settings.shareOnLaunch) {
+  if (settings.sharing) {
     try {
       sharing.start(settings);
     } catch {

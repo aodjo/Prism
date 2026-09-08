@@ -132,9 +132,8 @@ function Chip({
 function Home(): JSX.Element {
   const [machines, setMachines] = useState<readonly string[]>([]);
   const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
-  const [account, setAccount] = useState<{ email: string | null; relay: boolean }>({
+  const [account, setAccount] = useState<{ email: string | null }>({
     email: null,
-    relay: false,
   });
   const [settings, setSettings] = useState<Settings | null>(null);
   const [stream, setStream] = useState<StreamState>(NOTHING);
@@ -200,7 +199,7 @@ function Home(): JSX.Element {
 
       setSettings(stored);
       setDevices(signedIn.devices);
-      setAccount({ email: signedIn.email, relay: signedIn.relayAllowed });
+      setAccount({ email: signedIn.email });
       setMine(own);
       setStream(state);
       setHistory(past);
@@ -225,7 +224,7 @@ function Home(): JSX.Element {
     // somewhere else turns up here without anybody restarting anything.
     prism.onAccount((state) => {
       setDevices(state.devices);
-      setAccount({ email: state.email, relay: state.relayAllowed });
+      setAccount({ email: state.email });
       setMachines(
         state.devices
           .map((device) => device.publicKey)

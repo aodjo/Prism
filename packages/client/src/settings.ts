@@ -28,7 +28,7 @@ export const DEFAULTS: Settings = {
   bind: '0.0.0.0:47200',
   fps: 60,
   bitrateBps: 24_000_000,
-  shareOnLaunch: false,
+  sharing: false,
 };
 
 /**

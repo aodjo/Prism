@@ -119,8 +119,15 @@ export interface Settings {
   fps: number;
   /** What to spend while shared, in bits per second. */
   bitrateBps: number;
-  /** Whether to start sharing as soon as the application launches. */
-  shareOnLaunch: boolean;
+  /**
+   * Whether this machine is meant to be shared.
+   *
+   * Written by turning sharing on and off rather than by a setting of its own, and read at
+   * launch to put it back the way it was left. A machine somebody shared is one they meant to
+   * be able to reach, and a switch that reset itself every restart would make it reachable
+   * only while somebody had a window open on it.
+   */
+  sharing: boolean;
 
   /**
    * Whether the setup flow has been through once.

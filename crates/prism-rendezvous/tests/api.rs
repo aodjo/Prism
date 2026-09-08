@@ -500,7 +500,7 @@ async fn a_token_kept_from_a_previous_run_still_says_who_it_belongs_to() {
     // told by hand where the signalling is.
     assert_eq!(body["rendezvous"], "rv.example.com:47300");
     assert_eq!(body["email"], "someone@example.com");
-    assert_eq!(body["relay_allowed"], false);
+    assert_eq!(body["relay_allowed"], true);
     assert_eq!(body["devices"][0]["public_key"], key);
     assert_eq!(body["devices"][0]["label"], "a laptop");
     assert!(
@@ -691,8 +691,10 @@ async fn malformed_hex_is_refused_rather_than_stored() {
 }
 
 #[tokio::test]
-async fn the_relay_is_off_for_a_new_account() {
-    // It costs bandwidth somebody pays for.
+async fn the_relay_is_there_for_a_new_account() {
+    // Reached rather than chosen: a pair that can reach each other directly never touches it,
+    // and a pair that cannot has no other way to meet. An account that arrived without it
+    // would be one whose machines silently fail to connect.
     let (router, path) = service("relay");
     let secret = register(&router, "someone@example.com").await;
 
@@ -714,6 +716,6 @@ async fn the_relay_is_off_for_a_new_account() {
     )
     .await;
 
-    assert_eq!(body["relay_allowed"], false);
+    assert_eq!(body["relay_allowed"], true);
     let _ = std::fs::remove_file(path);
 }
