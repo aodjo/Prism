@@ -43,6 +43,12 @@ jobs:
             os: macos-latest
           - name: windows-x64
             os: windows-latest
+          # A runner of the architecture rather than a cross build from the x64 one: half of
+          # the Windows code is behind `cfg(target_os)` and none of it has ever been run on
+          # arm64, so a build that could not also execute the tests would be a green tick over
+          # an untested binary.
+          - name: windows-arm64
+            os: windows-11-arm
           - name: linux-x64
             os: ubuntu-latest
     steps:
@@ -124,6 +130,19 @@ jobs:
         with:
           name: prism-native-${{ matrix.name }}
           path: packages/native/*.node
+          if-no-files-found: error
+
+      # The addon on its own is not something anybody can run. This is: the client, the addon
+      # and the one runtime dependency, laid out as an application for the platform the job is
+      # on. Unsigned, so macOS and Windows will both say so on first launch — signing is its
+      # own piece of work and a build nobody can download is worth less than a warning.
+      - name: Package the application
+        run: pnpm package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-${{ matrix.name }}
+          path: out/*
           if-no-files-found: error
 
   rendezvous:

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 target/
+out/
 *.node
 .DS_Store
 .env
