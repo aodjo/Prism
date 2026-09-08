@@ -13,8 +13,13 @@
 // A second console behind the window on Windows is a developer's tool, not a product's.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account;
 mod harness;
+mod permissions;
+mod sessions;
 mod settings;
+mod sharing;
+mod stream;
 
 use std::sync::Mutex;
 
