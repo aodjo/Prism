@@ -33,7 +33,11 @@ createRoot(document.getElementById('root') as HTMLElement).render(
         <Wordmark size="sm" />
       </header>
 
-      <Preferences onResize={prism.fit} />
+      {/* The same white panel the sheet draws, so that a screenshot taken here is a picture of
+          what the settings actually look like rather than of a second design. */}
+      <div className="on-white mx-4 mb-4 overflow-hidden rounded-card">
+        <Preferences onResize={prism.fit} />
+      </div>
     </div>
   </StrictMode>,
 );
