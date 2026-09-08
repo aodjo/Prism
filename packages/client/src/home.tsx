@@ -21,6 +21,7 @@ import type {
   StreamState,
 } from './api.js';
 import { ago, latency, span, when } from './format.js';
+import { Preferences } from './preferences.js';
 import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -144,6 +145,8 @@ function Home(): JSX.Element {
   const [which, setWhich] = useState<Which>('all');
   const [everything, setEverything] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
+  /** Whether the settings are open over the window. */
+  const [tuning, setTuning] = useState(false);
   const search = useRef<HTMLInputElement | null>(null);
 
   const machineName = useCallback(
@@ -326,6 +329,24 @@ function Home(): JSX.Element {
 
   const listed = everything ? history : history.slice(0, RECENT);
 
+  useEffect(() => {
+    if (!tuning) {
+      return;
+    }
+
+    const close = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setTuning(false);
+      }
+    };
+
+    window.addEventListener('keydown', close);
+
+    return () => {
+      window.removeEventListener('keydown', close);
+    };
+  }, [tuning]);
+
   /**
    * Whether this is the only machine there is.
    *
@@ -392,7 +413,9 @@ function Home(): JSX.Element {
             className="no-drag flex-none rounded-pill"
             title={account.email ?? 'Not signed in'}
             aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
-            onClick={prism.openSettings}
+            onClick={() => {
+              setTuning(true);
+            }}
           >
             <img src="assets/account.svg" alt="" className="block h-7 w-14" />
           </button>
@@ -689,6 +712,42 @@ function Home(): JSX.Element {
         )}
 
       </div>
+
+      {/* Over the window rather than beside it. Settings are a detour from what somebody came
+          to do, and a detour that dims what it interrupts is one they can see their way back
+          from — a second window is a second thing to find, raise and close. */}
+      {tuning && (
+        <div
+          className="absolute inset-0 z-[2] flex items-start justify-center overflow-y-auto bg-[rgba(6,6,10,0.62)] px-6 py-14 backdrop-blur-[3px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          onMouseDown={(event) => {
+            // Only the backdrop itself. A drag that started inside the sheet and ended out
+            // here is somebody selecting text, not somebody dismissing it.
+            if (event.target === event.currentTarget) {
+              setTuning(false);
+            }
+          }}
+        >
+          <div className="w-full max-w-[520px] flex-none overflow-hidden rounded-card border border-line-4 bg-[rgba(20,20,26,0.96)] shadow-[0_24px_60px_rgba(0,0,0,0.45)]">
+            <div className="flex items-center justify-between px-5 pt-4 pb-1">
+              <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+                Settings
+              </h2>
+              <button
+                type="button"
+                aria-label="Close settings"
+                className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
+                onClick={() => {
+                  setTuning(false);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <Preferences />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
