@@ -98,6 +98,15 @@ const CODE_CENTRE = ((CODE_LENGTH - 1) * CODE_PITCH) / 2;
 const REFUSAL_HOLD_MS = 900;
 
 /**
+ * How long an accepted code is shown before the flow moves on.
+ *
+ * Enough for the tick to draw and be read. Without it the screen changes on the same frame the
+ * answer arrives, so the only mark anybody ever sees is the one that says no — which leaves
+ * the interface looking like it only ever has bad news.
+ */
+const SUCCESS_HOLD_MS = 620;
+
+/**
  * How the mark inside the circle is drawn on.
  *
  * The dash pattern is the whole trick: a path whose dash is as long as the path itself is
@@ -107,7 +116,7 @@ const REFUSAL_HOLD_MS = 900;
 const MARK_TICK = {
   '--mark-length': '22',
   strokeDasharray: 22,
-  animation: 'code-mark 260ms cubic-bezier(0.65, 0, 0.35, 1) 320ms both',
+  animation: 'code-mark 280ms cubic-bezier(0.65, 0, 0.35, 1) both',
 } as CSSProperties;
 
 /** The same, for each of the two strokes that say no. */
@@ -137,17 +146,28 @@ const SCREEN = 'flex flex-col items-center text-center';
  * @param {number} props.of - How many there are.
  * @returns {JSX.Element} The dots.
  */
-function Steps({ at, of }: { at: number; of: number }): JSX.Element {
+function Steps({ at, of, within }: { at: number; of: number; within: number }): JSX.Element {
   return (
     <div className="flex h-1.5 items-center gap-[7px]">
       {Array.from({ length: of }, (_, index) => (
         <span
           // A fixed run that never reorders: position is what identifies one of these.
           key={index}
-          className={`block h-1.5 rounded-full bg-white transition-all duration-300 ${
-            index === at ? 'w-[18px] opacity-90' : 'w-1.5 opacity-[0.18]'
+          className={`block h-1.5 overflow-hidden rounded-full transition-all duration-300 ${
+            index === at ? 'w-[18px] bg-[rgba(255,255,255,0.26)]' : 'w-1.5 bg-white opacity-[0.18]'
           }`}
-        />
+        >
+          {/* The one being stood on fills as the screens inside it go by. A step that holds
+              five screens and never moves reads as a flow that has stopped, and dividing it
+              into five dots of its own would answer that by making the whole thing look twice
+              as long as it is. */}
+          {index === at && (
+            <span
+              className="block h-full rounded-full bg-white transition-[width] duration-300 ease-out"
+              style={{ width: `${Math.round(Math.min(Math.max(within, 0), 1) * 100)}%` }}
+            />
+          )}
+        </span>
       ))}
     </div>
   );
@@ -372,6 +392,8 @@ function Setup(): JSX.Element {
    * claiming a history it does not have, on the one screen somebody has no context for.
    */
   const [moved, setMoved] = useState(false);
+  /** Whether the code just entered was accepted, while that is still being shown. */
+  const [passed, setPassed] = useState(false);
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
   const [working, setWorking] = useState(false);
@@ -535,10 +557,14 @@ function Setup(): JSX.Element {
             (key) => key !== state.publicKey,
           ),
         );
+        setPassed(true);
+        await new Promise((settled) => setTimeout(settled, SUCCESS_HOLD_MS));
+
         setPassword('');
         setConfirm('');
         setAskingCode(false);
         setGreeted(true);
+        setPassed(false);
         setRefused(0);
       } catch (error) {
         setAccountTrouble(reason(error));
@@ -594,9 +620,15 @@ function Setup(): JSX.Element {
       setAccountTrouble(null);
 
       try {
-        setEnrolment(await prism.accountRegister(email.trim(), password, code));
+        const made = await prism.accountRegister(email.trim(), password, code);
+
+        setPassed(true);
+        await new Promise((settled) => setTimeout(settled, SUCCESS_HOLD_MS));
+
+        setEnrolment(made);
         setProving(false);
         setJustEnrolled(true);
+        setPassed(false);
         setRefused(0);
       } catch (error) {
         setAccountTrouble(reason(error));
@@ -740,6 +772,7 @@ function Setup(): JSX.Element {
             <CodeBoxes
               disabled={working}
               refused={refused}
+              passed={passed}
               onComplete={(code) => {
                 signIn(code);
               }}
@@ -748,6 +781,7 @@ function Setup(): JSX.Element {
             <CodeBoxes
               disabled={working}
               refused={refused}
+              passed={passed}
               onComplete={(code) => {
                 proveAddress(code);
               }}
@@ -1138,6 +1172,33 @@ function Setup(): JSX.Element {
   const shownSteps = COUNTED.filter((which) => !answered(which));
   const counted = shownSteps.indexOf(step as (typeof COUNTED)[number]);
 
+  /**
+   * How far through the step being stood on somebody is.
+   *
+   * Only the account step has anything inside it — a form, an address to prove, a second
+   * factor to set up and then to try — so every other step is simply whole.
+   */
+  const within = (():number => {
+    if (step !== 'account') {
+      return 1;
+    }
+
+    if (greeted) {
+      return 1;
+    }
+    if (askingCode) {
+      return joining ? 0.8 : 0.55;
+    }
+    if (enrolment) {
+      return 0.6;
+    }
+    if (proving) {
+      return 0.35;
+    }
+
+    return 0.1;
+  })();
+
   return (
     <>
       <div className="drag fixed inset-x-0 top-0 z-[3] h-11" />
@@ -1200,7 +1261,11 @@ function Setup(): JSX.Element {
           key={`nav-${step}`}
           className="flex h-14 flex-none animate-[fade-in_420ms_ease-out_both] items-center justify-between"
         >
-          {counted >= 0 ? <Steps at={counted} of={shownSteps.length} /> : <span />}
+          {counted >= 0 ? (
+            <Steps at={counted} of={shownSteps.length} within={within} />
+          ) : (
+            <span />
+          )}
           {step === 'welcome' && (
             <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>
           )}
@@ -1257,13 +1322,26 @@ function Figure({
 function CodeBoxes({
   disabled,
   refused,
+  passed,
   onComplete,
 }: {
   disabled: boolean;
   refused: number;
+  passed: boolean;
   onComplete: (code: string) => void;
 }): JSX.Element {
   const [characters, setCharacters] = useState<string[]>(Array<string>(CODE_LENGTH).fill(''));
+  /**
+   * The refusal this row has already answered for.
+   *
+   * The count only ever goes up, so on its own it cannot say whether *this* attempt was the
+   * one refused. Without that distinction a row that was wrong once says so again the instant
+   * the sixth character of the right code lands, before the server has been asked.
+   *
+   * Started from whatever the count already is, so a row that appears after somebody has been
+   * refused on an earlier screen does not inherit that refusal and open by saying no.
+   */
+  const [handled, setHandled] = useState(refused);
   const boxes = useRef<(HTMLInputElement | null)[]>([]);
 
   useEffect(() => {
@@ -1275,19 +1353,20 @@ function CodeBoxes({
   // had been read; leaving six wrong characters in place would ask somebody to clean up after
   // the interface's own bad news.
   useEffect(() => {
-    if (refused === 0) {
+    if (refused === handled) {
       return;
     }
 
     const settling = setTimeout(() => {
       setCharacters(Array<string>(CODE_LENGTH).fill(''));
+      setHandled(refused);
       boxes.current[0]?.focus();
     }, REFUSAL_HOLD_MS);
 
     return () => {
       clearTimeout(settling);
     };
-  }, [refused]);
+  }, [refused, handled]);
 
   const put = (next: string[]): void => {
     setCharacters(next);
@@ -1298,7 +1377,7 @@ function CodeBoxes({
   };
 
   const full = characters.every((character) => character !== '');
-  const wrong = full && refused > 0;
+  const wrong = full && refused > handled;
 
   return (
     <div className="relative mt-[88px] flex h-[72px] items-center gap-2.5">
@@ -1362,8 +1441,12 @@ function CodeBoxes({
       ))}
 
       {/* What the six of them became: one round mark in the middle they collapsed into. A
-          circle rather than another box, because the row of boxes is what somebody was
-          filling in and this is no longer a thing to fill in. */}
+          circle rather than another box, because the row of boxes is what somebody was filling
+          in and this is no longer a thing to fill in.
+
+          Empty while the server is being asked. A tick drawn before the answer came back would
+          be the interface agreeing with somebody about something it has not checked, and the
+          one time that matters is the time they typed it wrong. */}
       {full && (
         <span
           key={refused}
@@ -1374,31 +1457,34 @@ function CodeBoxes({
           <span
             role="status"
             style={{ animationDelay: wrong ? '0ms' : '190ms' }}
-            className={`flex size-[72px] animate-[code-sealed_320ms_cubic-bezier(0.22,1.2,0.36,1)_both] items-center justify-center rounded-full border-2 ${
+            className={`flex size-[72px] animate-[code-sealed_320ms_cubic-bezier(0.22,1.2,0.36,1)_both] items-center justify-center rounded-full border-2 transition-colors duration-300 ${
               wrong
                 ? 'border-[rgba(255,92,110,0.5)] bg-[rgba(255,92,110,0.16)]'
-                : 'border-[rgba(124,92,255,0.55)] bg-[rgba(124,92,255,0.16)]'
-            } ${disabled && !wrong ? 'animate-[code-checking_1.1s_ease-in-out_infinite]' : ''}`}
+                : passed
+                  ? 'border-[rgba(77,232,176,0.6)] bg-[rgba(77,232,176,0.18)]'
+                  : 'border-[rgba(124,92,255,0.55)] bg-[rgba(124,92,255,0.16)]'
+            } ${!wrong && !passed ? 'animate-[code-checking_1.1s_ease-in-out_infinite]' : ''}`}
           >
-            <span className="sr-only">{wrong ? 'That code was refused' : 'Six characters in'}</span>
+            <span className="sr-only">
+              {wrong ? 'That code was refused' : passed ? 'That code was accepted' : 'Checking'}
+            </span>
             <svg
               viewBox="0 0 28 28"
               className="size-7"
               fill="none"
-              stroke={wrong ? '#ff8a96' : '#f6f6f8'}
+              stroke={wrong ? '#ff8a96' : '#4de8b0'}
               strokeWidth="2.4"
               strokeLinecap="round"
               strokeLinejoin="round"
               aria-hidden="true"
             >
-              {wrong ? (
+              {wrong && (
                 <>
                   <path d="M8.5 8.5 L19.5 19.5" style={MARK_CROSS} />
                   <path d="M19.5 8.5 L8.5 19.5" style={{ ...MARK_CROSS, animationDelay: '90ms' }} />
                 </>
-              ) : (
-                <path d="M6.5 14.5 L11.75 19.75 L21.5 8.75" style={MARK_TICK} />
               )}
+              {passed && <path d="M6.5 14.5 L11.75 19.75 L21.5 8.75" style={MARK_TICK} />}
             </svg>
           </span>
         </span>
