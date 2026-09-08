@@ -326,6 +326,15 @@ function Home(): JSX.Element {
 
   const listed = everything ? history : history.slice(0, RECENT);
 
+  /**
+   * Whether this is the only machine there is.
+   *
+   * Which is where everybody starts and where most people sit for a while, so it is a state to
+   * design rather than the full window with its contents missing. Searching one machine,
+   * filtering it, and counting it are all questions that answer themselves.
+   */
+  const alone = machines.length === 0;
+
   /** Where this machine can be reached, once it is listening somewhere. */
   const reachable =
     mine?.local === null || mine?.local === undefined
@@ -358,7 +367,10 @@ function Home(): JSX.Element {
         <header className="drag flex h-10 flex-none items-center gap-4">
           <Wordmark size="sm" />
           <div className="flex-1" />
-          <div className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-xl border border-line-1 bg-wash-3 py-2.5 pr-3 pl-3.5">
+          <div
+            hidden={alone}
+            className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-xl border border-line-1 bg-wash-3 py-2.5 pr-3 pl-3.5"
+          >
             <span className="flex-none text-ui text-dim">⌕</span>
             <input
               ref={search}
@@ -390,11 +402,17 @@ function Home(): JSX.Element {
           <h1 className="m-0 text-[26px] leading-none font-semibold tracking-[-0.5px] text-ink">
             Devices
           </h1>
-          <span className="rounded-pill bg-[rgba(255,255,255,0.09)] px-[9px] py-1 text-fine font-medium text-muted-2">
+          <span
+            hidden={alone}
+            className="rounded-pill bg-[rgba(255,255,255,0.09)] px-[9px] py-1 text-fine font-medium text-muted-2"
+          >
             {machines.length + 1}
           </span>
           <div className="flex-1" />
-          <div className="no-drag flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]">
+          <div
+            hidden={alone}
+            className="no-drag flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]"
+          >
             {WHICH.map((one) => (
               <button
                 key={one.id}
@@ -415,6 +433,7 @@ function Home(): JSX.Element {
           </div>
           <button
             type="button"
+            hidden={alone}
             onClick={prism.openSettings}
             className="no-drag inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
           >
@@ -494,6 +513,29 @@ function Home(): JSX.Element {
           className="mt-3 flex-none"
         />
 
+        {alone ? (
+          /* The one thing left to do, said once. Every other machine on the account turns up
+             here by itself, so what is missing is not a button but a second installation —
+             and a window that offered a button instead would be offering the wrong thing. */
+          <div className="mt-12 flex-none">
+            <h2 className="m-0 text-[19px] leading-none font-semibold tracking-[-0.3px] text-ink-2">
+              Nothing to watch yet
+            </h2>
+            <p className="mt-3 mb-0 max-w-[46ch] text-note leading-relaxed text-muted-2">
+              Install Prism on the machine you want to watch and sign in
+              {account.email ? (
+                <>
+                  {' as '}
+                  <span className="text-ink-3">{account.email}</span>
+                </>
+              ) : (
+                ' to the same account'
+              )}
+              . It turns up here on its own.
+            </p>
+          </div>
+        ) : (
+          <>
         <h2 className="mt-10 flex-none text-ui font-medium tracking-[0.2px] text-muted-2">
           Other devices
         </h2>
@@ -643,7 +685,9 @@ function Home(): JSX.Element {
               </button>
             ))
           )}
-        </div>
+        </div>          </>
+        )}
+
       </div>
     </div>
   );
