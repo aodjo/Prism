@@ -218,7 +218,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                   alt=""
                   width={200}
                   height={200}
-                  className="mx-auto mb-3 block rounded-lg border border-line-2 bg-white p-2"
+                  className="mx-auto mb-3 block rounded-lg bg-white p-2"
                 />
                 <Row label="Or type">
                   <code className="select-all font-mono text-fine tracking-[0.06em] text-ink">
