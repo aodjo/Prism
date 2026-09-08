@@ -386,49 +386,78 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
           </Row>
         </Band>
 
-        <Band title="Sharing this machine">
-          <Row label="Frame rate">
-            <input
-              type="number"
-              min={1}
-              max={480}
-              step={1}
-              className={NUMBER}
-              value={settings?.fps ?? 60}
-              onChange={(event) => {
-                save({ fps: Number(event.target.value) });
-              }}
-            />
-          </Row>
-          <Row label="Bitrate">
-            <input
-              type="number"
-              min={1}
-              max={200}
-              step={1}
-              className={NUMBER}
-              value={settings ? Math.round(settings.bitrateBps / 1e6) : 24}
-              onChange={(event) => {
-                save({ bitrateBps: Number(event.target.value) * 1e6 });
-              }}
-            />
-          </Row>
-          <Row label="Listen on">
-            <input
-              type="text"
-              spellCheck={false}
-              placeholder="0.0.0.0:47200"
-              className={WIDE}
-              value={settings?.bind ?? ''}
-              onChange={(event) => {
-                setSettings((was) => (was ? { ...was, bind: event.target.value } : was));
-              }}
-              onBlur={(event) => {
-                save({ bind: event.target.value.trim() });
-              }}
-            />
-          </Row>
-        </Band>
+    </div>
+  );
+}
+
+/**
+ * What this machine gives out while it is shared.
+ *
+ * Not in the settings with the rest, because these are not settings about the application —
+ * they are the terms of one particular action, and they belong beside the switch that starts
+ * it. Somebody changing the frame rate is deciding how to share this machine, not how Prism
+ * should behave.
+ *
+ * @returns {JSX.Element} The three figures that decide what goes out.
+ */
+export function SharingTerms(): JSX.Element {
+  const [settings, setSettings] = useState<Settings | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      setSettings(await prism.getSettings());
+    })();
+  }, []);
+
+  const save = (next: Partial<Settings>): void => {
+    void (async () => {
+      setSettings(await prism.setSettings(next));
+    })();
+  };
+
+  return (
+    <div className="flex flex-col">
+      <Row label="Frame rate">
+        <input
+          type="number"
+          min={1}
+          max={480}
+          step={1}
+          className={NUMBER}
+          value={settings?.fps ?? 60}
+          onChange={(event) => {
+            save({ fps: Number(event.target.value) });
+          }}
+        />
+      </Row>
+      <Row label="Bitrate">
+        <input
+          type="number"
+          min={1}
+          max={200}
+          step={1}
+          className={NUMBER}
+          value={settings ? Math.round(settings.bitrateBps / 1e6) : 24}
+          onChange={(event) => {
+            save({ bitrateBps: Number(event.target.value) * 1e6 });
+          }}
+        />
+      </Row>
+      <Row label="Listen on">
+        <input
+          type="text"
+          spellCheck={false}
+          placeholder="0.0.0.0:47200"
+          className={WIDE}
+          value={settings?.bind ?? ''}
+          onChange={(event) => {
+            setSettings((was) => (was ? { ...was, bind: event.target.value } : was));
+          }}
+          onBlur={(event) => {
+            save({ bind: event.target.value.trim() });
+          }}
+        />
+      </Row>
     </div>
   );
 }

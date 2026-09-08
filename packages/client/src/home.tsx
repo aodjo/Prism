@@ -21,7 +21,7 @@ import type {
   StreamState,
 } from './api.js';
 import { ago, latency, span, when } from './format.js';
-import { Preferences } from './preferences.js';
+import { Preferences, SharingTerms } from './preferences.js';
 import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -146,6 +146,8 @@ function Home(): JSX.Element {
   const [trouble, setTrouble] = useState<string | null>(null);
   /** Whether the settings are open over the window. */
   const [tuning, setTuning] = useState(false);
+  /** Whether the terms this machine is shared on are open beside the switch. */
+  const [terms, setTerms] = useState(false);
   const search = useRef<HTMLInputElement | null>(null);
 
   const machineName = useCallback(
@@ -467,7 +469,8 @@ function Home(): JSX.Element {
         {/* This machine, given the top of the window because it is the one machine that is
             always here and the one switch somebody came to flip. Everything below it is a
             machine somebody might watch; this is the one they might be watched on. */}
-        <div className="relative mt-6 flex-none overflow-hidden rounded-card border border-line-4 bg-gradient-to-r from-[rgba(255,255,255,0.08)] to-[rgba(255,255,255,0.03)]">
+        <div className="relative mt-6 flex-none">
+        <div className="relative overflow-hidden rounded-card border border-line-4 bg-gradient-to-r from-[rgba(255,255,255,0.08)] to-[rgba(255,255,255,0.03)]">
           <div className="pointer-events-none absolute top-[-151px] left-[59%] h-[400px] w-[700px] mix-blend-screen">
             <img
               src="assets/resume-glow.svg"
@@ -505,12 +508,29 @@ function Home(): JSX.Element {
               </span>
             </div>
 
-            <div className="flex flex-none flex-col items-end gap-3.5">
+            <div className="relative flex flex-none flex-col items-end gap-3.5">
               {watched && (
                 <Chip tone="text-violet" wash="rgba(124, 92, 255, 0.13)">
                   {(Number(mine?.bitrateBps ?? 0n) / 1e6).toFixed(0)} Mbps
                 </Chip>
               )}
+
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  aria-label="Sharing terms"
+                  aria-expanded={terms}
+                  title="Frame rate, bitrate and where it listens"
+                  className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 text-[17px] leading-none transition-colors ${
+                    terms ? 'bg-[rgba(255,255,255,0.12)] text-ink' : 'text-muted-2 hover:text-ink'
+                  }`}
+                  onClick={() => {
+                    setTerms(!terms);
+                  }}
+                >
+                  ⚙
+                </button>
+
               {shared ? (
                 <button type="button" className="btn-danger px-6 py-3.5 text-[15px]" onClick={flip}>
                   Stop sharing
@@ -521,8 +541,33 @@ function Home(): JSX.Element {
                   <span className="btn-key">⌘↵</span>
                 </button>
               )}
+              </div>
             </div>
           </div>
+        </div>
+
+        {/* The terms are opened from beside the switch they belong to, and the popover
+            hangs under it rather than over the middle of the window: what is being
+            changed is this card, and it should stay in sight while it changes. */}
+        {terms && (
+          <div className="absolute top-full right-0 z-[3] mt-2.5 w-[330px] overflow-hidden rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 py-4 text-left shadow-[0_20px_48px_rgba(0,0,0,0.5)]">
+            <div className="mb-1.5 flex items-center justify-between">
+              <h3 className="m-0 text-note font-semibold text-ink-3">Sharing terms</h3>
+              <button
+                type="button"
+                aria-label="Close sharing terms"
+                className="rounded-pill px-1.5 text-ui text-dim transition-colors hover:text-ink"
+                onClick={() => {
+                  setTerms(false);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            <SharingTerms />
+          </div>
+        )}
+
         </div>
 
         <Trouble
