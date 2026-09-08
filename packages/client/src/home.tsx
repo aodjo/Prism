@@ -422,7 +422,14 @@ function Home(): JSX.Element {
                   (watched
                     ? `${machineName(mine?.peer ?? '')} is watching`
                     : shared
-                      ? 'Waiting for a machine to connect'
+                      ? // Sharing with nothing to share it with is a real state and not a
+                        // failure: the switch is this machine's own, and somebody may well
+                        // turn it on before installing Prism on the machine they will watch
+                        // from. Saying which of the two waits is going on saves them looking
+                        // for a fault that is not there.
+                        machines.length === 0
+                        ? 'Waiting — no other machine on your account yet'
+                        : 'Waiting for a machine to connect'
                       : 'Nobody can watch this machine')}
               </span>
             </div>

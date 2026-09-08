@@ -51,20 +51,14 @@ pub fn host_config(
 
 /// Loads this machine's identity and every machine on the account that may watch it.
 ///
-/// A machine whose account names no other machine cannot be watched by anything, so sharing is
-/// refused here rather than opening a session that would wait forever for a client it would
-/// not admit anyway.
+/// An empty list is not refused. Sharing is this machine saying its own screen may be watched
+/// by the account it belongs to — a statement about itself, true whether or not a second
+/// machine exists yet. Somebody who turns it on before installing Prism anywhere else has done
+/// nothing wrong, and a switch that refused to move until some other machine appeared would be
+/// answering a question nobody asked.
 pub fn host_keys() -> napi::Result<prism_core::control::host::HostKeys> {
     let (identity, peers) = load()?;
     let allowed = identity::known_peers(&peers).map_err(reason)?;
-
-    if allowed.is_empty() {
-        return Err(napi::Error::from_reason(
-            "There is no other machine on your account yet, so nobody could watch this one. \
-             Install Prism on the machine you want to watch from and sign in to the same \
-             account.",
-        ));
-    }
 
     Ok(prism_core::control::host::HostKeys { identity, allowed })
 }
