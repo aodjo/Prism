@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import type { Settings } from './api.js';
-import { PRISM_RENDEZVOUS } from './rendezvous.js';
+import { PRISM_ACCOUNT_SERVER, PRISM_RENDEZVOUS } from './rendezvous.js';
 
 
 /**
@@ -16,7 +16,7 @@ import { PRISM_RENDEZVOUS } from './rendezvous.js';
 export const DEFAULTS: Settings = {
   setupDone: false,
   rendezvous: PRISM_RENDEZVOUS,
-  accountServer: '',
+  accountServer: PRISM_ACCOUNT_SERVER,
   control: true,
   smooth: false,
   addresses: {},

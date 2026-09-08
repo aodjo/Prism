@@ -1,8 +1,10 @@
 /**
- * How this machine finds the other one.
+ * Where this machine looks for everything it cannot find by itself.
  *
- * Shared by the window that offers the choice and the process that acts on it, because the
- * address the session uses and the address the interface shows have to be the same one.
+ * Both addresses are fixed rather than settings. What a person is deciding when they install
+ * this is not which servers to use — it is whether to use it — and a field asking them to
+ * name one is a question with no good answer for almost everybody. Anyone who does want to
+ * run their own has the server's own documentation and a settings file to point at it.
  */
 
 /**
@@ -20,26 +22,15 @@
  */
 export const PRISM_RENDEZVOUS = 'rv.presm.kr:47300';
 
-/** Which of the three answers a stored rendezvous address amounts to. */
-export type Finding = 'automatic' | 'custom' | 'off';
-
 /**
- * Works out which answer an address is.
+ * The account server this project runs.
  *
- * Read from the address rather than stored beside it, because two fields that mean one thing
- * are two fields that can disagree — and the address is the one the session actually uses.
+ * What a machine signs in to and how it learns about the others on the same account. It also
+ * says where the rendezvous is, which is why a machine that has signed in needs to be told
+ * nothing else.
  *
- * @param {string} address - The rendezvous setting as it is stored.
- * @returns {Finding} Which of the three the address amounts to.
- *
- * @example
- * findingOf('');                  // 'off'
- * findingOf('rv.example.com:47300'); // 'custom'
+ * TLS is the reverse proxy's, not the server's: what crosses it is the value that signs
+ * somebody in, and never anything that opens a private key — that stays sealed under a secret
+ * derived from the password and is not sent anywhere.
  */
-export function findingOf(address: string): Finding {
-  if (address === PRISM_RENDEZVOUS) {
-    return 'automatic';
-  }
-
-  return address.trim() === '' ? 'off' : 'custom';
-}
+export const PRISM_ACCOUNT_SERVER = 'https://rv.presm.kr';

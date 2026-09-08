@@ -146,12 +146,6 @@ function Panel(): JSX.Element {
   const save = (next: Partial<Settings>): void => {
     void (async () => {
       setSettings(await prism.setSettings(next));
-
-      // The account client belongs to the server that issued its session, so a change of
-      // address is a change of who is signed in.
-      if (next.accountServer !== undefined) {
-        setAccount(await prism.accountState());
-      }
     })();
   };
 
