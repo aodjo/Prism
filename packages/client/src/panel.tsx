@@ -13,9 +13,13 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import type { AccountEnrolmentView, AccountState, PrismApi, Settings } from './api.js';
-import { PRISM_RENDEZVOUS, findingOf } from './rendezvous.js';
-import type { Finding } from './rendezvous.js';
+import type {
+  AccountEnrolmentView,
+  AccountState,
+  PrismApi,
+  RendezvousServer,
+  Settings,
+} from './api.js';
 import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -56,113 +60,126 @@ function Band({ title, children }: { title: string; children: ReactNode }): JSX.
 }
 
 /**
- * A labelled control on its own line.
+ * A labelled control on its own line, with the reason for it underneath.
+ *
+ * The hint is where a trade-off goes. Every setting in this window costs something — input
+ * costs trust, smoothing costs latency, a fixed port costs a firewall rule — and a person
+ * deciding needs that beside the control rather than in a paragraph under the whole group.
  *
  * @param {object} props - What to draw.
  * @param {string} props.label - What it sets.
+ * @param {string} [props.hint] - What choosing it costs or means.
  * @param {ReactNode} props.children - The control.
  * @returns {JSX.Element} The row.
  */
-function Row({ label, children }: { label: string; children: ReactNode }): JSX.Element {
+function Row({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}): JSX.Element {
   return (
-    <div className="flex min-h-[30px] items-center justify-between gap-3">
-      <span className="text-note-2 text-muted">{label}</span>
-      {children}
+    <div className="flex min-h-[34px] items-center justify-between gap-5 py-[3px]">
+      <div className="min-w-0">
+        <div className="text-note-2 text-ink-3">{label}</div>
+        {hint && <div className="mt-px text-tiny leading-snug text-dim">{hint}</div>}
+      </div>
+      <div className="flex-none">{children}</div>
     </div>
   );
 }
 
-/** The one shape every text box in this window has. */
+/** The shape every text box in this window has, before it is given a width. */
 const FIELD =
-  'w-[190px] rounded-tile border border-line-2 bg-base px-2.5 py-1.5 text-fine text-ink placeholder:text-dim focus:border-[rgba(124,92,255,0.6)] focus:outline-none';
+  'rounded-tile border border-line-2 bg-base px-2.5 py-1.5 text-fine text-ink placeholder:text-dim focus:border-[rgba(124,92,255,0.6)] focus:outline-none';
+
+/** Wide enough for an address, which is the longest thing typed here. */
+const WIDE = `${FIELD} w-[210px]`;
 
 /**
- * Chooses how this machine finds the other one.
+ * Narrow, right aligned and tabular, for the two fields that hold a quantity.
  *
- * Three answers rather than a box to type an address into. The address is what the session
- * needs, but it is not what a person is deciding — they are deciding whether to use the
- * servers this project runs, one of their own, or none at all.
- *
- * Nothing is trusted to a rendezvous either way: the two machines prove who they are to each
- * other, so the worst a hostile one can do is refuse to introduce them. That is what makes
- * running your own a setting rather than a fork, and what makes the default safe.
- *
- * @param {object} props - The address and what to do when it changes.
- * @param {string} props.value - The rendezvous setting as it is stored.
- * @param {(next: string) => void} props.onChange - Called as the address is typed.
- * @param {(next: string) => void} props.onCommit - Called when the address should be saved.
- * @returns {JSX.Element} The chooser and, when one is wanted, the address field.
+ * A number in a box built for a URL reads as a fragment of something longer. Sizing the box to
+ * what goes in it is what says a frame rate is expected rather than an address.
  */
-function Rendezvous({
-  value,
-  onChange,
-  onCommit,
-}: {
-  value: string;
-  onChange: (next: string) => void;
-  onCommit: (next: string) => void;
-}): JSX.Element {
-  const finding = findingOf(value);
+const NUMBER = `${FIELD} w-[74px] text-right tabular-nums`;
 
-  const choose = (next: Finding): void => {
-    if (next === 'automatic') {
-      onChange(PRISM_RENDEZVOUS);
-      onCommit(PRISM_RENDEZVOUS);
-      return;
-    }
+/** The one shape every switch in this window has. */
+const TOGGLE = 'size-[15px] accent-violet';
 
-    if (next === 'off') {
-      onChange('');
-      onCommit('');
-      return;
-    }
+/**
+ * The rendezvous servers, and how far away each one is.
+ *
+ * Shown rather than chosen between. A session is introduced through whichever server answers
+ * it first, which is a measurement made at the moment of connecting and not a preference
+ * somebody set weeks ago — so what is useful here is seeing what is there, and that the
+ * nearest one is near.
+ *
+ * The round trip is measured by this machine. A server cannot make itself look close; the only
+ * thing it says for itself is its name, which is why the number is the part to read.
+ *
+ * @returns {JSX.Element} The list, or a line saying why there is not one.
+ */
+function Regions(): JSX.Element {
+  const [servers, setServers] = useState<RendezvousServer[] | null>(null);
 
-    // Left empty for the person to fill in. Carrying the previous address over would have
-    // them editing the project's own, which is not what choosing "my own server" meant.
-    onChange('');
-  };
+  useEffect(() => {
+    let live = true;
+
+    void (async () => {
+      const found = await prism.rendezvousServers();
+
+      if (live) {
+        setServers(found);
+      }
+    })();
+
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  if (servers === null) {
+    return <p className="text-tiny text-dim">Measuring…</p>;
+  }
+
+  if (servers.length === 0) {
+    return (
+      <p className="text-tiny text-dim">
+        No server answered. Machines can still be reached on this network, or at an address
+        typed in beside one.
+      </p>
+    );
+  }
 
   return (
     <>
-      <Row label="Find machines">
-        <select
-          className={FIELD}
-          value={finding}
-          onChange={(event) => {
-            choose(event.target.value as Finding);
-          }}
-        >
-          <option value="automatic">Automatically</option>
-          <option value="custom">My own server</option>
-          <option value="off">Same network only</option>
-        </select>
-      </Row>
+      <div className="flex flex-col">
+        {servers.map((server, at) => (
+          <div
+            key={server.address}
+            title={server.address}
+            className="flex items-baseline justify-between gap-4 py-[3px]"
+          >
+            <span className={`truncate text-note-2 ${at === 0 ? 'text-ink' : 'text-muted'}`}>
+              {server.region || server.address}
+            </span>
+            <span
+              className={`flex-none font-mono text-fine tabular-nums ${
+                at === 0 ? 'text-ink' : 'text-dim'
+              }`}
+            >
+              {Math.round(server.roundTripMs)} ms
+            </span>
+          </div>
+        ))}
+      </div>
 
-      {finding === 'custom' && (
-        <Row label="Server">
-          <input
-            type="text"
-            spellCheck={false}
-            placeholder="host:47300"
-            className={FIELD}
-            value={value}
-            onChange={(event) => {
-              onChange(event.target.value);
-            }}
-            onBlur={(event) => {
-              onCommit(event.target.value.trim());
-            }}
-          />
-        </Row>
-      )}
-
-      <p className="text-tiny text-dim">
-        {finding === 'automatic' &&
-          'Uses the servers this project runs, whichever is nearest. They introduce the two machines and never see the picture.'}
-        {finding === 'custom' &&
-          'Your own rendezvous server. Nothing is trusted to it — see docs/rendezvous.md for running one.'}
-        {finding === 'off' &&
-          'Machines are found only where this one can already reach them: the same network, a VPN, or a forwarded port.'}
+      <p className="mt-1.5 text-tiny leading-snug text-dim">
+        Whichever answers first introduces the two machines. Neither of them carries the picture.
       </p>
     </>
   );
@@ -289,14 +306,8 @@ function Panel(): JSX.Element {
       <div ref={body} className="relative z-[1]">
         <div className="drag h-[34px]" />
 
-        <header className="flex items-baseline gap-2.5 px-5 pb-3.5">
+        <header className="px-5 pb-4">
           <Wordmark size="sm" />
-          <code
-            title={account.publicKey}
-            className="select-text font-mono text-tiny-2 text-dim"
-          >
-            {account.publicKey ? short(account.publicKey) : '…'}
-          </code>
         </header>
 
         {configured && (
@@ -466,45 +477,49 @@ function Panel(): JSX.Element {
           </Band>
         )}
 
-        <Band title="Settings">
-          <Row label="Account server">
-            <input
-              type="text"
-              spellCheck={false}
-              placeholder="https://rv.example.com"
-              className={FIELD}
-              value={settings?.accountServer ?? ''}
-              onChange={(event) => {
-                setSettings((was) => (was ? { ...was, accountServer: event.target.value } : was));
-              }}
-              onBlur={(event) => {
-                save({ accountServer: event.target.value.trim() });
-              }}
-            />
-          </Row>
-          <Rendezvous
-            value={settings?.rendezvous ?? ''}
-            onChange={(rendezvous) => {
-              setSettings((was) => (was ? { ...was, rendezvous } : was));
-            }}
-            onCommit={(rendezvous) => {
-              save({ rendezvous });
-            }}
-          />
-          <Row label="Send input">
+        <Band title="Network">
+          <Regions />
+
+          <div className="mt-3 border-t border-line-1 pt-1">
+            <Row label="Account server" hint="Where machines sign in and find each other's keys.">
+              <input
+                type="text"
+                spellCheck={false}
+                placeholder="https://rv.example.com"
+                className={WIDE}
+                value={settings?.accountServer ?? ''}
+                onChange={(event) => {
+                  setSettings((was) => (was ? { ...was, accountServer: event.target.value } : was));
+                }}
+                onBlur={(event) => {
+                  save({ accountServer: event.target.value.trim() });
+                }}
+              />
+            </Row>
+          </div>
+        </Band>
+
+        {/* What this machine does when it is the one watching. Separate from what it does when
+            it is the one being watched, because they are answers to different questions and a
+            person is usually here about one of them. */}
+        <Band title="Watching">
+          <Row label="Send input" hint="Your keyboard and mouse reach the other machine.">
             <input
               type="checkbox"
-              className="size-[15px] accent-violet"
+              className={TOGGLE}
               checked={settings?.control ?? true}
               onChange={(event) => {
                 save({ control: event.target.checked });
               }}
             />
           </Row>
-          <Row label="Smooth playback">
+          <Row
+            label="Smooth playback"
+            hint="Evens out arrival jitter, and costs the latency that buys it."
+          >
             <input
               type="checkbox"
-              className="size-[15px] accent-violet"
+              className={TOGGLE}
               checked={settings?.smooth ?? false}
               onChange={(event) => {
                 save({ smooth: event.target.checked });
@@ -513,9 +528,6 @@ function Panel(): JSX.Element {
           </Row>
         </Band>
 
-        {/* What this machine gives out rather than what it takes in. Separate from the settings
-            above because they answer a different question — one is about watching, this is
-            about being watched. */}
         <Band title="Sharing this machine">
           <Row label="Frame rate">
             <input
@@ -523,32 +535,35 @@ function Panel(): JSX.Element {
               min={1}
               max={480}
               step={1}
-              className={FIELD}
+              className={NUMBER}
               value={settings?.fps ?? 60}
               onChange={(event) => {
                 save({ fps: Number(event.target.value) });
               }}
             />
           </Row>
-          <Row label="Bitrate (Mbps)">
+          <Row label="Bitrate" hint="Megabits a second.">
             <input
               type="number"
               min={1}
               max={200}
               step={1}
-              className={FIELD}
+              className={NUMBER}
               value={settings ? Math.round(settings.bitrateBps / 1e6) : 24}
               onChange={(event) => {
                 save({ bitrateBps: Number(event.target.value) * 1e6 });
               }}
             />
           </Row>
-          <Row label="Listen on">
+          <Row
+            label="Listen on"
+            hint="The port stays fixed so somebody on this network can reach it."
+          >
             <input
               type="text"
               spellCheck={false}
               placeholder="0.0.0.0:47200"
-              className={FIELD}
+              className={WIDE}
               value={settings?.bind ?? ''}
               onChange={(event) => {
                 setSettings((was) => (was ? { ...was, bind: event.target.value } : was));
@@ -561,7 +576,7 @@ function Panel(): JSX.Element {
           <Row label="Share on launch">
             <input
               type="checkbox"
-              className="size-[15px] accent-violet"
+              className={TOGGLE}
               checked={settings?.shareOnLaunch ?? false}
               onChange={(event) => {
                 save({ shareOnLaunch: event.target.checked });

@@ -91,6 +91,16 @@ export interface HostSnapshot {
   readonly error: string | null;
 }
 
+/** One rendezvous server, as it answered a probe. */
+export interface RendezvousServer {
+  /** Where it is, as `address:port`. */
+  readonly address: string;
+  /** What its operator named it, such as `Japan (Osaka)`, or empty if it did not say. */
+  readonly region: string;
+  /** How long the round trip took, in milliseconds. */
+  readonly roundTripMs: number;
+}
+
 export interface Settings {
   /** Rendezvous server to find hosts through, or empty to connect directly. */
   rendezvous: string;
@@ -433,6 +443,17 @@ export interface PrismApi {
    * @throws {Error} If neither an address nor a rendezvous server is configured.
    */
   connect(host: string, address: string): Promise<StreamState>;
+
+  /**
+   * Asks every rendezvous server where it is, and how far.
+   *
+   * The round trip is measured here rather than reported by the server, so a server cannot
+   * make itself look near. Servers that do not answer are left out. Nearest first.
+   *
+   * @async
+   * @returns {Promise<RendezvousServer[]>} The servers that answered, nearest first.
+   */
+  rendezvousServers(): Promise<RendezvousServer[]>;
 
   /**
    * Closes the stream window.

@@ -47,7 +47,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::net::handshake::{Identity, KEY_LEN};
-use crate::net::rendezvous::{MAX_MESSAGE_LEN, Message, RELAY_TOKEN_LEN, answer};
+use crate::net::rendezvous::{MAX_MESSAGE_LEN, Message, REGION_LEN, RELAY_TOKEN_LEN, answer};
 use crate::net::transport::UdpTransport;
 
 /// How long to wait for the server before asking again.
@@ -696,4 +696,109 @@ mod tests {
         // The relay runs one port along, and its datagrams are not messages either.
         assert!(!servers.holds("10.0.0.1:47301".parse().expect("valid")));
     }
+}
+
+/// One server, as it answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sighting {
+    /// Where it is.
+    pub address: SocketAddr,
+    /// What its operator named it, or empty if it did not say.
+    pub region: String,
+    /// How long the round trip took, in microseconds.
+    pub rtt_us: u32,
+}
+
+/// How long to wait for servers to answer a probe.
+///
+/// Long enough for the far side of the world twice over, short enough that a settings window
+/// does not sit blank. A server that has not answered in this is one nobody should be sent to.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Asks every server where it is, and how far away.
+///
+/// One datagram to each and whatever comes back, on a socket of its own — this is asked by a
+/// window showing a list, not by a session, and it must not disturb one that is running.
+///
+/// The round trip is measured here rather than claimed by the server, so a server cannot make
+/// itself look near. The name beside it is the server's own word and is cosmetic: what a person
+/// picks between is the number.
+///
+/// Servers that do not answer are left out. A list is a list of what is there.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] only if a socket cannot be opened at all. A server
+/// that fails to answer is an absence, not an error.
+pub fn probe(servers: &Servers) -> io::Result<Vec<Sighting>> {
+    let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
+    transport.set_read_timeout(Some(Duration::from_millis(100)))?;
+
+    let mut out = [0u8; MAX_MESSAGE_LEN];
+    let mut buf = [0u8; MAX_MESSAGE_LEN];
+    let mut sent: Vec<(SocketAddr, [u8; 8], Instant)> = Vec::with_capacity(servers.len());
+
+    for (index, &server) in servers.addresses().iter().enumerate() {
+        // Distinct per server, so an answer is matched to the question it belongs to rather
+        // than to whichever question was asked last.
+        let mut nonce = [0u8; 8];
+        nonce[..8].copy_from_slice(&(index as u64).to_le_bytes());
+
+        let asked = Instant::now();
+        if send(&transport, &mut out, &Message::Where { nonce }, server).is_ok() {
+            sent.push((server, nonce, asked));
+        }
+    }
+
+    let mut seen: Vec<Sighting> = Vec::new();
+    let give_up = Instant::now() + PROBE_TIMEOUT;
+
+    while Instant::now() < give_up && seen.len() < sent.len() {
+        let Ok((bytes, from)) = transport.recv_from_into(&mut buf) else {
+            continue;
+        };
+
+        let Ok(Message::Here { nonce, region }) = Message::decode(bytes) else {
+            continue;
+        };
+
+        let Some(&(server, _, asked)) = sent
+            .iter()
+            .find(|(server, expected, _)| *server == from && *expected == nonce)
+        else {
+            continue;
+        };
+
+        if seen.iter().any(|sighting| sighting.address == server) {
+            continue;
+        }
+
+        seen.push(Sighting {
+            address: server,
+            region: read_region(&region),
+            rtt_us: asked.elapsed().as_micros().min(u128::from(u32::MAX)) as u32,
+        });
+    }
+
+    // Nearest first, which is the order a person reads a list of places to connect through.
+    seen.sort_by_key(|sighting| sighting.rtt_us);
+
+    Ok(seen)
+}
+
+/// Reads a server's name for itself out of its fixed-width field.
+///
+/// Trailing zero bytes are padding rather than content, and anything that is not UTF-8 is
+/// dropped: a name is shown to a person, and one that arrived damaged is better absent than
+/// rendered as replacement characters.
+fn read_region(region: &[u8; REGION_LEN]) -> String {
+    let end = region
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(REGION_LEN);
+
+    core::str::from_utf8(&region[..end])
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned()
 }

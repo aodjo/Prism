@@ -9,6 +9,7 @@ import { toDataURL } from 'qrcode';
 
 import type { AccountEnrolmentView, HostSnapshot, Session, Settings, StreamState } from './api.js';
 import { loadSessions, recordSession } from './sessions.js';
+import { PRISM_RENDEZVOUS } from './rendezvous.js';
 import { DEFAULTS, loadSettings, saveSettings } from './settings.js';
 import { Sharing } from './sharing.js';
 import { Stream } from './stream.js';
@@ -372,6 +373,19 @@ function registerHandlers(): void {
   );
 
   ipcMain.handle('settings:get', () => settings);
+
+  // Asked by the settings window, which shows the regions and how far each one is. Off the
+  // main thread's critical path by being a request rather than a subscription: the list is
+  // read when somebody opens the window, not kept warm.
+  ipcMain.handle('rendezvous:servers', async () => {
+    try {
+      return prism.rendezvousServers(settings.rendezvous || PRISM_RENDEZVOUS);
+    } catch {
+      // A name that resolves to nothing is an empty list rather than an error. The window
+      // says so in a sentence, which is more use than a dialog.
+      return [];
+    }
+  });
 
   ipcMain.handle('settings:set', (_event, next: Partial<Settings>) => {
     settings = { ...settings, ...next };
