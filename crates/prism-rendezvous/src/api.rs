@@ -170,7 +170,7 @@ impl From<AccountError> for ApiError {
             AccountError::EmailTaken => ApiError::Conflict(error.to_string()),
             AccountError::BadEmail => ApiError::Conflict(error.to_string()),
             AccountError::NotVerified => ApiError::Conflict(error.to_string()),
-            AccountError::BadToken => ApiError::Conflict(error.to_string()),
+            AccountError::BadCode => ApiError::Conflict(error.to_string()),
             AccountError::Malformed { field } => ApiError::Malformed(field),
             AccountError::Store { .. } => ApiError::Unavailable,
         }
@@ -206,6 +206,9 @@ struct SaltBody {
 #[derive(Debug, Deserialize)]
 struct RegisterBody {
     email: String,
+    /// The six digits sent to that address, or empty on a server that sends nothing.
+    #[serde(default)]
+    code: String,
     salt: String,
     auth: String,
     sealed_key: String,
@@ -216,8 +219,22 @@ struct RegisterBody {
 struct RegisteredBody {
     totp_uri: String,
     totp_secret: String,
-    /// Whether a link was sent that has to be opened before this account can sign in.
-    verify_sent: bool,
+}
+
+/// What asking for a signup code needs.
+#[derive(Debug, Deserialize)]
+struct ChallengeBody {
+    email: String,
+}
+
+/// What asking for one produced.
+#[derive(Debug, Serialize)]
+struct ChallengedBody {
+    /// Whether a code was sent, and therefore whether one has to be typed back in.
+    ///
+    /// False on a server with no mail configured, where an address is only ever a name and
+    /// registering asks for nothing.
+    sent: bool,
 }
 
 /// What signing in needs.
@@ -281,7 +298,7 @@ pub fn routes(service: Arc<Service>) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/salt", get(salt))
         .route("/v1/accounts", post(register))
-        .route("/v1/accounts/verify", get(verify))
+        .route("/v1/accounts/challenge", post(challenge))
         .route("/v1/sessions", post(sign_in))
         .route("/v1/session", get(resume).delete(sign_out))
         .route("/v1/devices", get(list_devices).post(add_device))
@@ -316,6 +333,35 @@ async fn salt(
 }
 
 /// Creates an account and hands back the second factor, once.
+async fn challenge(
+    State(service): State<Arc<Service>>,
+    Json(body): Json<ChallengeBody>,
+) -> Result<Json<ChallengedBody>, ApiError> {
+    let Some(mailer) = service.mailer.as_ref() else {
+        // Nothing to prove an address with, so nothing is asked. The application is told to
+        // go straight on to registering, which is what this server did before it could send.
+        let accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
+        accounts.check_free(&body.email)?;
+
+        return Ok(Json(ChallengedBody { sent: false }));
+    };
+
+    let code = {
+        let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
+        accounts.challenge(&body.email, now_unix())?
+    };
+
+    // A failure to send is reported rather than swallowed: somebody waiting on a mail that was
+    // never sent would sit in front of six empty boxes with nothing to put in them.
+    mailer
+        .send_code(&body.email, &code)
+        .await
+        .map_err(|err| ApiError::Mail(err.to_string()))?;
+
+    Ok(Json(ChallengedBody { sent: true }))
+}
+
+/// Creates an account, once the code sent to its address comes back.
 async fn register(
     State(service): State<Arc<Service>>,
     Json(body): Json<RegisterBody>,
@@ -324,91 +370,28 @@ async fn register(
     let auth = unhex_array::<SECRET_LEN>(&body.auth).ok_or(ApiError::Malformed("auth"))?;
     let sealed_key = unhex(&body.sealed_key).ok_or(ApiError::Malformed("sealed key"))?;
 
-    let enrolled = {
-        let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
+    let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
 
-        accounts.register(
-            Registration {
-                email: body.email.clone(),
-                salt,
-                auth,
-                sealed_key,
-            },
-            service.mailer.is_some(),
-            now_unix(),
-        )?
+    let registration = Registration {
+        email: body.email.clone(),
+        salt,
+        auth,
+        sealed_key,
     };
 
-    // Sent after the account exists rather than before, because the token only means anything
-    // once there is something for it to unlock. If it cannot be sent the account is taken back
-    // out: one that was never told how to prove itself can never sign in, and leaving it there
-    // would also hold the address against the person trying again.
-    if let (Some(mailer), Some(token)) = (service.mailer.as_ref(), enrolled.token.as_ref())
-        && let Err(err) = mailer.send_verification(&body.email, token).await
-    {
-        if let Ok(mut accounts) = service.accounts.lock() {
-            let _ = accounts.forget_unverified(&body.email);
-        }
-
-        return Err(ApiError::Mail(err.to_string()));
-    }
+    let secret = if service.mailer.is_some() {
+        accounts.register(registration, &body.code, now_unix())?
+    } else {
+        // No way to send a code, so none was asked for and none is checked. A separate call
+        // rather than an empty-string special case inside the other one, so a server that can
+        // send never has a path through it that skips the proof.
+        accounts.register_unproved(registration)?
+    };
 
     Ok(Json(RegisteredBody {
-        totp_uri: totp::provisioning_uri(&enrolled.totp_secret, &body.email),
-        totp_secret: totp::to_base32(&enrolled.totp_secret),
-        verify_sent: enrolled.token.is_some(),
+        totp_uri: totp::provisioning_uri(&secret, &body.email),
+        totp_secret: totp::to_base32(&secret),
     }))
-}
-
-/// What a verification link carries.
-#[derive(Debug, Deserialize)]
-struct VerifyQuery {
-    token: String,
-}
-
-/// Accepts a verification link and says so in a page a browser can show.
-///
-/// Answers in HTML rather than JSON because the thing opening this is a mail reader's browser,
-/// not the application: nobody is parsing the reply, somebody is reading it.
-async fn verify(State(service): State<Arc<Service>>, Query(query): Query<VerifyQuery>) -> Response {
-    let outcome = service
-        .accounts
-        .lock()
-        .map_err(|_| AccountError::Refused)
-        .and_then(|mut accounts| accounts.verify(&query.token, now_unix()));
-
-    match outcome {
-        Ok(email) => page(
-            StatusCode::OK,
-            "Address confirmed",
-            &format!("{email} is yours. Sign in on Prism and add your machines."),
-        ),
-        Err(err) => page(
-            StatusCode::BAD_REQUEST,
-            "That link did not work",
-            &err.to_string(),
-        ),
-    }
-}
-
-/// Renders one sentence as a page somebody can read.
-fn page(status: StatusCode, heading: &str, sentence: &str) -> Response {
-    let body = format!(
-        "<!doctype html><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>Prism</title>\
-         <div style=\"font:16px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,\
-         sans-serif;max-width:30em;margin:18vh auto;padding:0 1.5em;color:#1a1a1f\">\
-         <h1 style=\"font-size:22px;margin:0 0 .4em\">{heading}</h1>\
-         <p style=\"margin:0;color:#4a4a56\">{sentence}</p></div>"
-    );
-
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        body,
-    )
-        .into_response()
 }
 
 /// Checks a sign-in and issues a token.

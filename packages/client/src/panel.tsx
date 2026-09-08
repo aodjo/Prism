@@ -86,6 +86,8 @@ function Panel(): JSX.Element {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
+  /** The code sent to the address, while an account is being made. */
+  const [proof, setProof] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
 
@@ -162,7 +164,20 @@ function Panel(): JSX.Element {
       setTrouble(null);
 
       try {
-        setEnrolment(await prism.accountRegister(email.trim(), password));
+        // Nothing is created until the code sent to the address comes back. Asking first is
+        // what stops somebody registering an address that is not theirs.
+        if (proof === null) {
+          if (await prism.accountChallenge(email.trim())) {
+            setProof('');
+            return;
+          }
+
+          setEnrolment(await prism.accountRegister(email.trim(), password, ''));
+          return;
+        }
+
+        setEnrolment(await prism.accountRegister(email.trim(), password, proof.trim()));
+        setProof(null);
       } catch (error) {
         setTrouble(reason(error));
       } finally {
@@ -198,12 +213,7 @@ function Panel(): JSX.Element {
                   Scan this with an authenticator app. It is shown once — the server keeps only
                   enough to check codes, which is not enough to show it again.
                 </p>
-                {enrolment.verifySent && (
-                  <p className="mx-auto mb-3 max-w-[42ch] text-tiny leading-normal text-amber">
-                    Then open the link sent to {email.trim()}. Until you do, this account
-                    cannot sign in.
-                  </p>
-                )}
+
                 <img
                   src={enrolment.qr}
                   alt=""
@@ -270,9 +280,26 @@ function Panel(): JSX.Element {
                     }}
                   />
                 </Row>
+                {/* Only once a code has been sent. Before that there is nothing to type, and
+                    a box for a code nobody has been sent reads as a step somebody missed. */}
+                {proof !== null && (
+                  <Row label="Emailed code">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      placeholder="123456"
+                      className={FIELD}
+                      value={proof}
+                      onChange={(event) => {
+                        setProof(event.target.value);
+                      }}
+                    />
+                  </Row>
+                )}
                 <div className="mt-2.5 flex justify-end gap-2">
                   <button type="button" className="btn-secondary" disabled={busy} onClick={create}>
-                    Create account
+                    {proof === null ? 'Create account' : 'Confirm code'}
                   </button>
                   <button
                     type="button"

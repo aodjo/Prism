@@ -289,19 +289,20 @@ function registerHandlers(): void {
 
   ipcMain.handle('account:state', () => account.view());
 
-  ipcMain.handle('account:register', async (_event, email: string, password: string) => {
-    const enrolment = await account.register(email, password);
+  ipcMain.handle('account:challenge', (_event, email: string) => account.challenge(email));
 
-    // Drawn here rather than in the window, because the window may not load anything and this
-    // process may. What crosses is a picture of a link the account server already sent.
-    const qr = await toDataURL(enrolment.totpUri, { margin: 1, width: 220 });
+  ipcMain.handle(
+    'account:register',
+    async (_event, email: string, password: string, code: string) => {
+      const enrolment = await account.register(email, password, code);
 
-    return {
-      qr,
-      secret: enrolment.totpSecret,
-      verifySent: enrolment.verifySent,
-    } satisfies AccountEnrolmentView;
-  });
+      // Drawn here rather than in the window, because the window may not load anything and
+      // this process may. What crosses is a picture of a link the account server already sent.
+      const qr = await toDataURL(enrolment.totpUri, { margin: 1, width: 220 });
+
+      return { qr, secret: enrolment.totpSecret } satisfies AccountEnrolmentView;
+    },
+  );
 
   ipcMain.handle(
     'account:signIn',

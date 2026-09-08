@@ -132,14 +132,30 @@ export class Holder {
    * @async
    * @param {string} email - The address to register.
    * @param {string} password - The password, which is never sent.
+   * @param {string} code - The six digits sent to that address, or empty when none was sent.
    * @returns {Promise<AccountEnrolment>} The second factor, once.
    * @throws {Error} If no server is configured, or the server refused.
    */
-  async register(email: string, password: string): Promise<AccountEnrolment> {
+  async register(email: string, password: string, code: string): Promise<AccountEnrolment> {
     const client = this.reach();
     this.trouble = null;
 
-    return client.register(email, password);
+    return client.register(email, password, code);
+  }
+
+  /**
+   * Asks the server to send a signup code to an address.
+   *
+   * @async
+   * @param {string} email - The address to prove.
+   * @returns {Promise<boolean>} Whether a code was sent and has to be typed back in.
+   * @throws {Error} If no server is configured, or the server refused.
+   */
+  async challenge(email: string): Promise<boolean> {
+    const client = this.reach();
+    this.trouble = null;
+
+    return client.challenge(email);
   }
 
   /**

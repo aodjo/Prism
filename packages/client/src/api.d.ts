@@ -62,12 +62,6 @@ export interface AccountEnrolmentView {
   readonly qr: string;
   /** The same secret as text, for typing in when a camera is not to hand. */
   readonly secret: string;
-  /**
-   * Whether a confirmation was sent to the address that has to be opened before signing in.
-   *
-   * False on a server with no mail configured, where the address is only ever a name.
-   */
-  readonly verifySent: boolean;
 }
 
 /** What this machine's own session is doing while it is shared. */
@@ -339,14 +333,31 @@ export interface PrismApi {
   accountState(): Promise<AccountState>;
 
   /**
+   * Asks the server to send a signup code to an address.
+   *
+   * Nothing is created by this. An account that existed before its address was proved would be
+   * one somebody could park on an address they do not own.
+   *
+   * @param {string} email - The address to prove.
+   * @returns {Promise<boolean>} Whether a code was sent and has to be typed back in.
+   * @throws {Error} If the address is taken or malformed, or the code could not be sent.
+   */
+  accountChallenge(email: string): Promise<boolean>;
+
+  /**
    * Creates an account and returns the second factor to set up, once.
    *
    * @param {string} email - The address to sign in with.
    * @param {string} password - The password, which never leaves this machine.
+   * @param {string} code - The six digits sent to that address, or empty when none was sent.
    * @returns {Promise<AccountEnrolmentView>} What to put into an authenticator app.
-   * @throws {Error} If the name is taken, or the server cannot be reached.
+   * @throws {Error} If the code is wrong, the address is taken, or the server is unreachable.
    */
-  accountRegister(email: string, password: string): Promise<AccountEnrolmentView>;
+  accountRegister(
+    email: string,
+    password: string,
+    code: string,
+  ): Promise<AccountEnrolmentView>;
 
   /**
    * Signs in, registers this machine, and trusts every other machine on the account.

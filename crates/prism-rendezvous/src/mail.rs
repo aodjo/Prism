@@ -30,7 +30,7 @@ const PATIENCE: Duration = Duration::from_secs(10);
 struct Outgoing<'a> {
     from: &'a str,
     to: [&'a str; 1],
-    subject: &'a str,
+    subject: String,
     text: String,
     html: String,
 }
@@ -51,60 +51,51 @@ pub enum MailError {
     },
 }
 
-/// Sends verification links for one deployment.
+/// Sends signup codes for one deployment.
 #[derive(Debug, Clone)]
 pub struct Mailer {
     /// The provider's key. Never logged and never stored.
     key: String,
     /// The address the message comes from, which the provider must already hold the domain for.
     from: String,
-    /// Where this server can be reached from wherever somebody reads their mail.
-    base: String,
     client: reqwest::Client,
 }
 
 impl Mailer {
     /// Builds a mailer.
     ///
-    /// `base` is the address the link points at. It is not the address the API is bound to:
-    /// this server is meant to sit behind something that terminates TLS, and the link has to
-    /// work from a phone on a different network, so only the operator knows what it is.
+    /// Nothing here needs to know where this server can be reached. What is sent is a code
+    /// somebody types back into the application they are already looking at, so there is no
+    /// link, no public name to configure, and nothing to get wrong.
     ///
     /// # Errors
     ///
     /// Returns the underlying error if an HTTP client cannot be built, which means the
     /// platform has no usable TLS.
-    pub fn new(key: String, from: String, base: String) -> Result<Self, MailError> {
+    pub fn new(key: String, from: String) -> Result<Self, MailError> {
         let client = reqwest::Client::builder()
             .timeout(PATIENCE)
             .build()
             .map_err(|err| MailError::Unreachable(err.to_string()))?;
 
-        Ok(Self {
-            key,
-            from,
-            base: base.trim_end_matches('/').to_string(),
-            client,
-        })
+        Ok(Self { key, from, client })
     }
 
-    /// Returns the link a token becomes.
-    #[must_use]
-    pub fn link(&self, token: &str) -> String {
-        format!("{}/v1/accounts/verify?token={token}", self.base)
-    }
-
-    /// Sends somebody the link that proves the address is theirs.
+    /// Sends somebody the code that proves the address is theirs.
+    ///
+    /// A code rather than a link. A link opens a browser, which is not where the person is —
+    /// they are in front of the application, halfway through signing up — and it would leave
+    /// the application with no way to know it had been opened. A code walks back to where the
+    /// flow is. It is also the safer of the two: a link is something a stranger can get an
+    /// address's owner to click, and a code is something they have to be told.
     ///
     /// # Errors
     ///
     /// Returns [`MailError::Unreachable`] if the provider cannot be reached and
     /// [`MailError::Refused`] if it answers with anything but success. Both are worth
-    /// reporting rather than swallowing: an account whose link was never sent is one nobody
-    /// can ever use, and saying so lets the person try again.
-    pub async fn send_verification(&self, to: &str, token: &str) -> Result<(), MailError> {
-        let link = self.link(token);
-
+    /// reporting rather than swallowing: a code that was never sent is a signup that cannot
+    /// finish, and saying so lets the person try again.
+    pub async fn send_code(&self, to: &str, code: &str) -> Result<(), MailError> {
         let response = self
             .client
             .post(ENDPOINT)
@@ -112,9 +103,9 @@ impl Mailer {
             .json(&Outgoing {
                 from: &self.from,
                 to: [to],
-                subject: "Confirm your Prism account",
-                text: text_of(&link),
-                html: html_of(&link),
+                subject: format!("{code} is your Prism code"),
+                text: text_of(code),
+                html: html_of(code),
             })
             .send()
             .await
@@ -134,13 +125,14 @@ impl Mailer {
 }
 
 /// The message, for somebody whose mail reader shows text.
-fn text_of(link: &str) -> String {
+fn text_of(code: &str) -> String {
     format!(
-        "Somebody registered a Prism account with this address.\n\n\
-         Open this link to confirm it is yours:\n\n{link}\n\n\
-         The link works once and stops working after a day. Until it is opened the account \
-         cannot sign in, so if this was not you there is nothing to do — ignore this and the \
-         address stays free for you to use.\n"
+        "{code}\n\n\
+         Type this into Prism to finish making your account.\n\n\
+         It works once and stops working in fifteen minutes. If you did not ask for it, \
+         nothing has been created and there is nothing to do — no account exists for this \
+         address until somebody types this code, so ignoring it leaves the address free for \
+         you.\n"
     )
 }
 
@@ -149,15 +141,16 @@ fn text_of(link: &str) -> String {
 /// Deliberately plain. A verification message that looks like marketing is one people have
 /// been taught to distrust, and everything here has to survive being read by somebody deciding
 /// whether it is a phishing attempt.
-fn html_of(link: &str) -> String {
+fn html_of(code: &str) -> String {
     format!(
         "<div style=\"font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,\
          sans-serif;color:#1a1a1f;max-width:34em\">\
-         <p>Somebody registered a Prism account with this address.</p>\
-         <p><a href=\"{link}\" style=\"color:#5b3ce0\">Confirm it is yours</a></p>\
-         <p style=\"color:#6a6a78;font-size:13px\">Or paste this into a browser:<br>{link}</p>\
-         <p style=\"color:#6a6a78;font-size:13px\">The link works once and stops working after \
-         a day. Until it is opened the account cannot sign in, so if this was not you there is \
-         nothing to do — ignore this and the address stays free for you to use.</p></div>"
+         <p style=\"font:600 34px/1 ui-monospace,SFMono-Regular,Menlo,monospace;\
+         letter-spacing:.18em;margin:0 0 .5em\">{code}</p>\
+         <p style=\"margin:0\">Type this into Prism to finish making your account.</p>\
+         <p style=\"color:#6a6a78;font-size:13px\">It works once and stops working in fifteen \
+         minutes. If you did not ask for it, nothing has been created and there is nothing to \
+         do — no account exists for this address until somebody types this code, so ignoring \
+         it leaves the address free for you.</p></div>"
     )
 }

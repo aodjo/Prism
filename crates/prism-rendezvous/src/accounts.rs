@@ -71,28 +71,33 @@ pub struct Account {
     pub devices: Vec<Device>,
     /// Whether the relay may be used, which costs bandwidth somebody pays for.
     pub relay_allowed: bool,
-    /// Whether somebody proved the address is theirs by opening what was sent to it.
+    /// Whether the address was proved to belong to whoever registered it.
     ///
-    /// Absent in a store written before addresses were proved at all, and read as `true` when
-    /// it is: those accounts were made under the old rule and locking them out for failing a
+    /// Always true for an account this server made, because it will not make one until the
+    /// address is proved. It survives as a field for the stores that came before that was so:
+    /// absent means an account written under the old rule, and locking those out for failing a
     /// test that did not exist would be a server that ate its own users.
     #[serde(default = "made_before_this_was_asked")]
     pub verified: bool,
-    /// The link that has been sent and not yet opened, if there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending: Option<Pending>,
 }
 
-/// A verification link that has been sent and not yet opened.
+/// A code sent to an address, waiting to be typed back in.
+///
+/// Not an account. Nothing is created for an address until somebody proves they read what was
+/// sent to it — which is the whole point: an account that exists before that is an account an
+/// attacker can park on somebody else's address, with a password and a second factor of their
+/// choosing, waiting for the owner to click something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Pending {
-    /// SHA-256 of the token in the link, as hex.
+pub struct Challenge {
+    /// SHA-256 of the six digits, as hex.
     ///
-    /// Hashed for the same reason the password verifier is: what is in the link is enough to
-    /// take the account, and this file is the thing an attacker would have stolen.
-    pub token_sha256: String,
-    /// When the link stops working, in seconds since the epoch.
+    /// Hashed because this file is the thing an attacker would have stolen, and the digits are
+    /// the whole of what stands between them and an address they do not own.
+    pub code_sha256: String,
+    /// When it stops working, in seconds since the epoch.
     pub expires_unix: u64,
+    /// How many wrong guesses have been made against it.
+    pub tries: u32,
 }
 
 /// What an account written before verification existed is taken to be.
@@ -116,11 +121,12 @@ pub enum AccountError {
     /// The address is registered but nobody has opened what was sent to it.
     #[error("Open the link sent to that address, then sign in.")]
     NotVerified,
-    /// The link is not one this server sent, or it has already been used, or it has lapsed.
-    #[error(
-        "That link has been used already, or it is more than a day old. Register again to get a new one."
-    )]
-    BadToken,
+    /// The code is wrong, spent, lapsed, or has been guessed at too many times.
+    ///
+    /// One error for all four, because telling them apart tells somebody guessing whether they
+    /// are close and whether the address is worth guessing at.
+    #[error("That code is wrong or has expired. Ask for a new one.")]
+    BadCode,
     /// What was given is not an address anything could be delivered to.
     #[error("That does not look like an email address.")]
     BadEmail,
@@ -157,23 +163,17 @@ pub const MIN_EMAIL: usize = 5;
 /// Longest, which is what the standard allows a whole address to be.
 pub const MAX_EMAIL: usize = 254;
 
-/// How long a verification link is good for.
+/// How long a code sent to an address is good for.
 ///
-/// A day. Long enough to survive being read the next morning, short enough that a link sitting
-/// in a mailbox somebody lost control of stops being a way in.
-pub const LINK_LIFETIME_SECS: u64 = 24 * 60 * 60;
+/// Fifteen minutes. Long enough to switch to a mail reader and come back, short enough that a
+/// code left in an inbox is not still a way in tomorrow.
+pub const CHALLENGE_LIFETIME_SECS: u64 = 15 * 60;
 
-/// Bytes in a verification token, before it is written as hex.
-const TOKEN_LEN: usize = 32;
-
-/// What registering produced.
-#[derive(Debug, Clone)]
-pub struct Enrolled {
-    /// The second factor's secret, to be shown once and never again.
-    pub totp_secret: [u8; totp::SECRET_LEN],
-    /// The token to put in the link, or `None` when this server does not prove addresses.
-    pub token: Option<String>,
-}
+/// How many wrong guesses a code survives.
+///
+/// Six digits is a million possibilities, which is a lot for a person and nothing at all for a
+/// script. What makes the code strong is not its length but that it stops answering.
+pub const CHALLENGE_TRIES: u32 = 5;
 
 /// What a new account is created from.
 #[derive(Debug, Clone)]
@@ -188,16 +188,24 @@ pub struct Registration {
     pub sealed_key: Vec<u8>,
 }
 
-/// Every account this server knows.
+/// Every account this server knows, and every address waiting to prove itself.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Stored {
     accounts: Vec<Account>,
+    /// Codes sent and not yet used, by address.
+    ///
+    /// Kept in the same file so a server restarted while somebody was halfway through signing
+    /// up does not lose the code they are looking at.
+    #[serde(default)]
+    challenges: std::collections::HashMap<String, Challenge>,
 }
 
 /// The accounts, and the file they are kept in.
 #[derive(Debug)]
 pub struct Accounts {
     by_email: HashMap<String, Account>,
+    /// Addresses that have been sent a code and have not used it.
+    challenges: HashMap<String, Challenge>,
     path: PathBuf,
     /// Makes the salt handed out for an unknown name look like a real one.
     ///
@@ -241,6 +249,7 @@ impl Accounts {
         })?;
 
         Ok(Self {
+            challenges: stored.challenges,
             by_email: stored
                 .accounts
                 .into_iter()
@@ -263,47 +272,118 @@ impl Accounts {
         self.by_email.is_empty()
     }
 
-    /// Creates an account and returns the second factor's secret, once.
+    /// Says whether an address is still going spare, without doing anything about it.
     ///
-    /// The secret is returned rather than stored-and-fetched because this is the only moment
-    /// it may leave the server: the client shows it as a code to scan, and after that the
-    /// server will only ever check codes against it.
+    /// # Errors
+    ///
+    /// Returns [`AccountError::BadEmail`] or [`AccountError::EmailTaken`].
+    pub fn check_free(&self, email: &str) -> Result<(), AccountError> {
+        check_email(email)?;
+
+        if self.by_email.contains_key(email) {
+            return Err(AccountError::EmailTaken);
+        }
+
+        Ok(())
+    }
+
+    /// Creates an account without proving the address belongs to anybody.
+    ///
+    /// What a server with no mail configured does, and the only thing it can do. Kept separate
+    /// from [`Self::register`] rather than folded in behind an empty code, so that a server
+    /// that *can* send has no path through it that skips the proof.
     ///
     /// # Errors
     ///
     /// Returns [`AccountError::EmailTaken`], [`AccountError::BadEmail`], or
-    /// [`AccountError::Store`] if the file cannot be written.
-    pub fn register(
+    /// [`AccountError::Store`].
+    pub fn register_unproved(
         &mut self,
         registration: Registration,
-        verify: bool,
-        now_unix: u64,
-    ) -> Result<Enrolled, AccountError> {
-        check_email(&registration.email)?;
+    ) -> Result<[u8; totp::SECRET_LEN], AccountError> {
+        self.check_free(&registration.email)?;
 
-        // An address nobody has proved belongs to them is an address still going spare. Taking
-        // it over is what keeps somebody from parking on an address they do not own and
-        // locking out the person who does — the whole squatting problem verification is for
-        // would otherwise survive it.
-        if let Some(existing) = self.by_email.get(&registration.email)
-            && existing.verified
-        {
+        self.create(registration)
+    }
+
+    /// Sends nothing and stores nothing but the code that proves an address.
+    ///
+    /// Returns the six digits for the caller to mail. No account is created here, and that is
+    /// the point: an account made before its address is proved is one somebody can park on an
+    /// address they do not own, holding a password and a second factor of their choosing until
+    /// the real owner does something that turns it on.
+    ///
+    /// Asking twice replaces the code, so somebody who lost the first mail can ask again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountError::BadEmail`] for an address nothing could be delivered to,
+    /// [`AccountError::EmailTaken`] if it already has an account, and
+    /// [`AccountError::Store`] if the result cannot be written.
+    pub fn challenge(&mut self, email: &str, now_unix: u64) -> Result<String, AccountError> {
+        check_email(email)?;
+
+        if self.by_email.contains_key(email) {
             return Err(AccountError::EmailTaken);
         }
 
-        let totp_secret = totp::new_secret().map_err(|err| AccountError::Store {
+        let code = new_code().map_err(|err| AccountError::Store {
             doing: "seeded with randomness",
             reason: err.to_string(),
         })?;
 
-        let token = if verify {
-            Some(new_token().map_err(|err| AccountError::Store {
-                doing: "seeded with randomness",
-                reason: err.to_string(),
-            })?)
-        } else {
-            None
-        };
+        self.challenges.insert(
+            email.to_owned(),
+            Challenge {
+                code_sha256: hex(&sha256(code.as_bytes())),
+                expires_unix: now_unix + CHALLENGE_LIFETIME_SECS,
+                tries: 0,
+            },
+        );
+
+        self.save()?;
+
+        Ok(code)
+    }
+
+    /// Creates an account, once the code sent to its address comes back.
+    ///
+    /// The second factor's secret is returned rather than stored-and-fetched because this is
+    /// the only moment it may leave the server: after this the server will only ever check
+    /// codes against it. Handing it out at any later point would mean a password alone could
+    /// fetch the thing the password is supposed to be paired with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountError::BadCode`] if the code is wrong, spent, lapsed or has been
+    /// guessed at too often, [`AccountError::EmailTaken`] if somebody registered the address
+    /// in between, [`AccountError::BadEmail`], and [`AccountError::Store`].
+    pub fn register(
+        &mut self,
+        registration: Registration,
+        code: &str,
+        now_unix: u64,
+    ) -> Result<[u8; totp::SECRET_LEN], AccountError> {
+        check_email(&registration.email)?;
+
+        if self.by_email.contains_key(&registration.email) {
+            return Err(AccountError::EmailTaken);
+        }
+
+        self.redeem(&registration.email, code, now_unix)?;
+
+        self.create(registration)
+    }
+
+    /// Writes the account and returns its second factor.
+    fn create(
+        &mut self,
+        registration: Registration,
+    ) -> Result<[u8; totp::SECRET_LEN], AccountError> {
+        let totp_secret = totp::new_secret().map_err(|err| AccountError::Store {
+            doing: "seeded with randomness",
+            reason: err.to_string(),
+        })?;
 
         self.by_email.insert(
             registration.email.clone(),
@@ -319,74 +399,42 @@ impl Accounts {
                 // Off until somebody decides otherwise. The relay costs bandwidth, and a
                 // server that gave it away by default would be one nobody could afford to run.
                 relay_allowed: false,
-                verified: !verify,
-                pending: token.as_ref().map(|token| Pending {
-                    token_sha256: hex(&sha256(token.as_bytes())),
-                    expires_unix: now_unix + LINK_LIFETIME_SECS,
-                }),
+                verified: true,
             },
         );
 
         self.save()?;
 
-        Ok(Enrolled { totp_secret, token })
+        Ok(totp_secret)
     }
 
-    /// Takes back an account whose address was never proved.
+    /// Spends the code standing against an address, or says why it cannot be spent.
     ///
-    /// For the one case that needs it: a registration whose link could not be sent. Leaving
-    /// that account in place would hold the address against the person trying again, and it
-    /// could never sign in anyway.
-    ///
-    /// Refuses to touch a verified account, so this cannot become a way to delete one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AccountError::Store`] if the result cannot be written.
-    pub fn forget_unverified(&mut self, email: &str) -> Result<(), AccountError> {
-        if self
-            .by_email
-            .get(email)
-            .is_some_and(|account| account.verified)
-        {
-            return Ok(());
+    /// A wrong guess costs one of the tries whether or not the caller comes back, and running
+    /// out throws the challenge away. Six digits is nothing to a script; what makes them worth
+    /// anything is that they stop answering.
+    fn redeem(&mut self, email: &str, code: &str, now_unix: u64) -> Result<(), AccountError> {
+        let Some(challenge) = self.challenges.get_mut(email) else {
+            return Err(AccountError::BadCode);
+        };
+
+        if challenge.expires_unix <= now_unix || challenge.tries >= CHALLENGE_TRIES {
+            self.challenges.remove(email);
+            self.save()?;
+
+            return Err(AccountError::BadCode);
         }
 
-        self.by_email.remove(email);
-        self.save()
-    }
+        if challenge.code_sha256 != hex(&sha256(code.as_bytes())) {
+            challenge.tries += 1;
+            self.save()?;
 
-    /// Marks an address proved, given the token that was sent to it.
-    ///
-    /// The token is spent: opening the same link twice fails the second time, because what
-    /// makes it good is deleted as it is accepted.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AccountError::BadToken`] if no account is waiting on that token, or the one
-    /// that was has lapsed, and [`AccountError::Store`] if the result cannot be written.
-    pub fn verify(&mut self, token: &str, now_unix: u64) -> Result<String, AccountError> {
-        let wanted = hex(&sha256(token.as_bytes()));
-
-        let email = self
-            .by_email
-            .values()
-            .find(|account| {
-                account.pending.as_ref().is_some_and(|pending| {
-                    pending.token_sha256 == wanted && pending.expires_unix > now_unix
-                })
-            })
-            .map(|account| account.email.clone())
-            .ok_or(AccountError::BadToken)?;
-
-        if let Some(account) = self.by_email.get_mut(&email) {
-            account.verified = true;
-            account.pending = None;
+            return Err(AccountError::BadCode);
         }
 
-        self.save()?;
+        self.challenges.remove(email);
 
-        Ok(email)
+        Ok(())
     }
 
     /// Returns the salt to hash a password with, for a name that may or may not exist.
@@ -568,6 +616,7 @@ impl Accounts {
     fn save(&self) -> Result<(), AccountError> {
         let stored = Stored {
             accounts: self.by_email.values().cloned().collect(),
+            challenges: self.challenges.clone(),
         };
 
         let json = serde_json::to_vec_pretty(&stored).map_err(|err| AccountError::Store {
@@ -627,17 +676,31 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-/// Makes a token for one verification link.
+/// Makes the six digits sent to an address.
+///
+/// Drawn from a rejection-sampled range rather than by taking a remainder, so every code is as
+/// likely as every other. A modulo over a byte stream leaves the low values slightly commoner,
+/// which is a small bias and a free one to avoid.
 ///
 /// # Errors
 ///
 /// Returns the underlying [`io::Error`] if the platform has no usable randomness. A guessable
-/// link is a way into somebody else's account, so this fails rather than falling back.
-fn new_token() -> io::Result<String> {
-    let mut token = [0u8; TOKEN_LEN];
-    getrandom::fill(&mut token).map_err(|err| io::Error::other(err.to_string()))?;
+/// code is a way into somebody else's address, so this fails rather than falling back.
+fn new_code() -> io::Result<String> {
+    // The largest multiple of a million that fits, so anything above it is thrown away rather
+    // than folded back over the low end of the range.
+    const CEILING: u32 = u32::MAX - (u32::MAX % 1_000_000);
 
-    Ok(hex(&token))
+    loop {
+        let mut raw = [0u8; 4];
+        getrandom::fill(&mut raw).map_err(|err| io::Error::other(err.to_string()))?;
+
+        let drawn = u32::from_le_bytes(raw);
+
+        if drawn < CEILING {
+            return Ok(format!("{:06}", drawn % 1_000_000));
+        }
+    }
 }
 
 /// Renders bytes as lowercase hex.
@@ -666,7 +729,9 @@ fn unhex_array<const N: usize>(text: &str) -> Option<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountError, Accounts, LINK_LIFETIME_SECS, MAX_EMAIL, Registration};
+    use super::{
+        AccountError, Accounts, CHALLENGE_LIFETIME_SECS, CHALLENGE_TRIES, MAX_EMAIL, Registration,
+    };
     use prism_core::account::secret::{SALT_LEN, SECRET_LEN};
     use prism_core::account::totp;
     use prism_core::net::handshake::KEY_LEN;
@@ -692,91 +757,130 @@ mod tests {
     }
 
     #[test]
-    fn an_address_cannot_sign_in_until_the_link_is_opened() {
-        let (mut accounts, _path) = store("until-opened");
+    fn no_account_exists_until_the_code_comes_back() {
+        let (mut accounts, _path) = store("code-first");
 
-        let enrolled = accounts
-            .register(registration("someone@example.com"), true, 1_700_000_000)
-            .expect("registers");
+        let code = accounts
+            .challenge("someone@example.com", 0)
+            .expect("sends a code");
 
-        let token = enrolled.token.clone().expect("a link was made");
-        let now = 1_700_000_000;
-        let code = totp::code_at_time(&enrolled.totp_secret, now);
+        // The whole point. An account that existed here would be one an attacker could park
+        // on somebody else's address, holding a password and a second factor of their
+        // choosing, waiting for the owner to do something that turned it on.
+        assert!(accounts.get("someone@example.com").is_none());
 
         assert_eq!(
             accounts
-                .sign_in("someone@example.com", &[2; SECRET_LEN], code, now)
+                .register(registration("someone@example.com"), "000000", 10)
                 .unwrap_err(),
-            AccountError::NotVerified,
+            AccountError::BadCode,
         );
 
-        assert_eq!(
-            accounts.verify(&token, now).expect("verifies"),
-            "someone@example.com",
-        );
+        let secret = accounts
+            .register(registration("someone@example.com"), &code, 10)
+            .expect("registers");
 
         assert!(
             accounts
-                .sign_in("someone@example.com", &[2; SECRET_LEN], code, now)
+                .get("someone@example.com")
+                .expect("exists")
+                .verified
+        );
+        assert!(
+            accounts
+                .sign_in(
+                    "someone@example.com",
+                    &[2; SECRET_LEN],
+                    totp::code_at_time(&secret, 10),
+                    10,
+                )
                 .is_ok(),
         );
     }
 
     #[test]
-    fn a_link_works_once_and_not_after_it_lapses() {
-        let (mut accounts, _path) = store("once-only");
+    fn a_code_is_spent_when_it_is_used() {
+        let (mut accounts, _path) = store("code-spent");
 
-        let token = accounts
-            .register(registration("someone@example.com"), true, 0)
-            .expect("registers")
-            .token
-            .expect("a link was made");
+        let code = accounts.challenge("someone@example.com", 0).expect("sends");
+        accounts
+            .register(registration("someone@example.com"), &code, 10)
+            .expect("registers");
 
-        // Past its day, so the same link that would have worked no longer does.
+        // The address is taken now, so this stops at the earlier check — but the code is gone
+        // either way, which is what keeps a leaked mail from being worth anything later.
         assert_eq!(
-            accounts.verify(&token, LINK_LIFETIME_SECS + 1).unwrap_err(),
-            AccountError::BadToken,
-        );
-
-        assert!(accounts.verify(&token, 10).is_ok());
-
-        // Spent. Opening it again is not a second chance at anything.
-        assert_eq!(
-            accounts.verify(&token, 10).unwrap_err(),
-            AccountError::BadToken,
+            accounts
+                .register(registration("someone@example.com"), &code, 10)
+                .unwrap_err(),
+            AccountError::EmailTaken,
         );
     }
 
     #[test]
-    fn an_unproved_address_can_be_registered_over() {
-        let (mut accounts, _path) = store("register-over");
+    fn a_code_lapses_and_stops_answering_after_enough_guesses() {
+        let (mut accounts, _path) = store("code-limits");
 
-        let first = accounts
-            .register(registration("someone@example.com"), true, 0)
-            .expect("registers")
-            .token
-            .expect("a link was made");
-
-        // Nobody proved the first one, so the address is still going spare. Without this,
-        // registering an address somebody else owns would lock them out of it for good.
-        let second = accounts
-            .register(registration("someone@example.com"), true, 0)
-            .expect("registers again")
-            .token
-            .expect("a link was made");
-
-        assert_ne!(first, second);
-        assert_eq!(
-            accounts.verify(&first, 10).unwrap_err(),
-            AccountError::BadToken,
-        );
-        assert!(accounts.verify(&second, 10).is_ok());
-
-        // Proved now, so it is taken.
+        let code = accounts.challenge("a@b.co", 0).expect("sends");
         assert_eq!(
             accounts
-                .register(registration("someone@example.com"), true, 0)
+                .register(registration("a@b.co"), &code, CHALLENGE_LIFETIME_SECS + 1)
                 .unwrap_err(),
+            AccountError::BadCode,
+        );
+
+        let code = accounts.challenge("a@b.co", 0).expect("sends again");
+
+        for _ in 0..CHALLENGE_TRIES {
+            assert_eq!(
+                accounts
+                    .register(registration("a@b.co"), "000000", 10)
+                    .unwrap_err(),
+                AccountError::BadCode,
+            );
+        }
+
+        // Six digits is nothing to a script. What makes the code worth anything is that it
+        // stops answering, so even the right one is refused now.
+        assert_eq!(
+            accounts
+                .register(registration("a@b.co"), &code, 10)
+                .unwrap_err(),
+            AccountError::BadCode,
+        );
+    }
+
+    #[test]
+    fn asking_twice_replaces_the_code() {
+        let (mut accounts, _path) = store("code-again");
+
+        let first = accounts.challenge("a@b.co", 0).expect("sends");
+        let second = accounts.challenge("a@b.co", 0).expect("sends again");
+
+        assert_eq!(
+            accounts
+                .register(registration("a@b.co"), &first, 10)
+                .unwrap_err(),
+            AccountError::BadCode,
+        );
+        assert!(
+            accounts
+                .register(registration("a@b.co"), &second, 10)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_code_is_never_asked_for_an_address_that_already_has_an_account() {
+        let (mut accounts, _path) = store("code-taken");
+
+        let code = accounts.challenge("a@b.co", 0).expect("sends");
+        accounts
+            .register(registration("a@b.co"), &code, 10)
+            .expect("registers");
+
+        assert_eq!(
+            accounts.challenge("a@b.co", 10).unwrap_err(),
             AccountError::EmailTaken,
         );
     }
@@ -785,8 +889,8 @@ mod tests {
     fn an_account_written_before_verification_existed_still_signs_in() {
         let (_fresh, path) = store("legacy-account");
 
-        // A store as an older server wrote it: no `verified`, no `pending`. Reading those as
-        // unverified would lock out every account made before the rule existed.
+        // A store as an older server wrote it: no `verified`, no challenges. Reading that as
+        // unproved would lock out every account made before the rule existed.
         std::fs::write(
             &path,
             br#"{"accounts":[{"name":"aodjo","salt":"08","verifier":"09","totp_secret":"00","sealed_key":"","devices":[],"relay_allowed":false}]}"#,
@@ -802,11 +906,11 @@ mod tests {
     fn a_registered_account_can_sign_in() {
         let (mut accounts, path) = store("signin");
         let secret = accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         let now = 1_700_000_000;
-        let code = totp::code_at_time(&secret.totp_secret, now);
+        let code = totp::code_at_time(&secret, now);
 
         assert!(
             accounts
@@ -820,11 +924,11 @@ mod tests {
     fn the_wrong_password_is_refused_even_with_the_right_code() {
         let (mut accounts, path) = store("wrongpass");
         let secret = accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         let now = 1_700_000_000;
-        let code = totp::code_at_time(&secret.totp_secret, now);
+        let code = totp::code_at_time(&secret, now);
 
         assert_eq!(
             accounts
@@ -840,7 +944,7 @@ mod tests {
         // The whole point of a second factor. A stolen password should not be a session.
         let (mut accounts, path) = store("nocode");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(
@@ -858,7 +962,7 @@ mod tests {
         // guessing needs, handed over for free.
         let (mut accounts, path) = store("unknown");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(
@@ -889,7 +993,7 @@ mod tests {
     fn a_real_account_gets_the_salt_it_registered_with() {
         let (mut accounts, path) = store("realsalt");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(accounts.salt_for("someone@example.com"), [1; SALT_LEN]);
@@ -900,12 +1004,12 @@ mod tests {
     fn the_same_name_cannot_be_taken_twice() {
         let (mut accounts, path) = store("taken");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(
             accounts
-                .register(registration("someone@example.com"), false, 0)
+                .register_unproved(registration("someone@example.com"))
                 .unwrap_err(),
             AccountError::EmailTaken
         );
@@ -928,7 +1032,7 @@ mod tests {
         ] {
             assert_eq!(
                 accounts
-                    .register(registration(address), false, 0)
+                    .register_unproved(registration(address))
                     .unwrap_err(),
                 AccountError::BadEmail,
                 "{address:?} was accepted"
@@ -943,7 +1047,7 @@ mod tests {
         // should quietly arrive holding.
         let (mut accounts, path) = store("relay");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         assert!(
@@ -969,7 +1073,7 @@ mod tests {
     fn signing_in_twice_on_one_machine_lists_it_once() {
         let (mut accounts, path) = store("devices");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         accounts
@@ -990,7 +1094,7 @@ mod tests {
     fn a_device_can_be_removed() {
         let (mut accounts, path) = store("remove");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
         accounts
             .add_device("someone@example.com", &[7; KEY_LEN], "laptop", 100)
@@ -1015,7 +1119,7 @@ mod tests {
         // The entire point of writing them down.
         let (mut accounts, path) = store("persist");
         let secret = accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
         accounts
             .add_device("someone@example.com", &[7; KEY_LEN], "laptop", 100)
@@ -1039,7 +1143,7 @@ mod tests {
                 .sign_in(
                     "someone@example.com",
                     &[2; SECRET_LEN],
-                    totp::code_at_time(&secret.totp_secret, now),
+                    totp::code_at_time(&secret, now),
                     now
                 )
                 .is_ok()
@@ -1052,7 +1156,7 @@ mod tests {
         // The server cannot check it and must not change it. A byte lost here is a key lost.
         let (mut accounts, path) = store("sealed");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         assert_eq!(
@@ -1071,7 +1175,7 @@ mod tests {
         // can sign in to, including its owner.
         let (mut accounts, path) = store("rekey");
         accounts
-            .register(registration("someone@example.com"), false, 0)
+            .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         accounts

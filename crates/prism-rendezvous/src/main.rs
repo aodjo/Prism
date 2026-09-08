@@ -111,14 +111,6 @@ struct Cli {
     #[arg(long, env = "PRISM_MAIL_FROM")]
     mail_from: Option<String>,
 
-    /// Where this server is reachable from wherever somebody reads their mail.
-    ///
-    /// The base of the confirmation link, so it cannot be worked out from `--api-bind`: that
-    /// is usually the loopback behind a proxy, and a link to the loopback opens nothing on the
-    /// phone somebody is holding. Something like `https://rv.example.com`.
-    #[arg(long, env = "PRISM_PUBLIC_URL")]
-    public_url: Option<String>,
-
     /// Refuse to carry traffic for peers that could not reach each other directly.
     ///
     /// Relaying costs this machine's bandwidth and adds its distance to every round trip, so
@@ -170,7 +162,6 @@ fn serve(cli: &Cli) -> io::Result<()> {
             Post {
                 key: cli.mail_key.clone(),
                 from: cli.mail_from.clone(),
-                public_url: cli.public_url.clone(),
             },
         )?;
     }
@@ -494,7 +485,6 @@ fn is_timeout(err: &io::Error) -> bool {
 struct Post {
     key: Option<String>,
     from: Option<String>,
-    public_url: Option<String>,
 }
 
 impl Post {
@@ -505,12 +495,12 @@ impl Post {
     /// Returns an error if a key was given without an address to send from — a half-configured
     /// mailer would fail at the moment somebody registers rather than at startup, which is the
     /// wrong end of the day to find out.
-    fn into_mailer(self, bind: SocketAddr) -> io::Result<Option<Mailer>> {
+    fn into_mailer(self) -> io::Result<Option<Mailer>> {
         let Some(key) = self.key.filter(|key| !key.trim().is_empty()) else {
             println!(
                 "prism-rendezvous: no mail key, so an email address is only ever a name here \
-                 — accounts are created already verified and nobody has to prove an address \
-                 is theirs. Fine for your own machines; not for a server strangers can reach."
+                 — anybody can register any address without proving it is theirs. Fine for \
+                 your own machines; not for a server strangers can reach."
             );
 
             return Ok(None);
@@ -520,27 +510,14 @@ impl Post {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "--mail-key was given without --mail-from, so there is no address to send \
-                 confirmations from",
+                 signup codes from",
             ));
         };
 
-        let base = self
-            .public_url
-            .filter(|url| !url.trim().is_empty())
-            .unwrap_or_else(|| format!("http://{bind}"));
+        let mailer =
+            Mailer::new(key, from.clone()).map_err(|err| io::Error::other(err.to_string()))?;
 
-        if base.starts_with("http://") {
-            println!(
-                "prism-rendezvous: confirmation links point at {base}, which is not TLS. They \
-                 have to open from wherever mail is read, so set --public-url to the name in \
-                 front of this server."
-            );
-        }
-
-        let mailer = Mailer::new(key, from.clone(), base.clone())
-            .map_err(|err| io::Error::other(err.to_string()))?;
-
-        println!("prism-rendezvous: confirmations sent from {from}, links under {base}");
+        println!("prism-rendezvous: signup codes sent from {from}");
 
         Ok(Some(mailer))
     }
@@ -609,7 +586,7 @@ fn spawn_accounts(
         println!("prism-rendezvous: telling signed-in machines to register at {advertise}");
     }
 
-    let mailer = post.into_mailer(bind)?;
+    let mailer = post.into_mailer()?;
     let service = Service::new(accounts, sessions, advertise, mailer);
 
     std::thread::Builder::new()

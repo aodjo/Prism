@@ -44,14 +44,6 @@ export interface AccountEnrolment {
   readonly totpUri: string;
   /** The same secret as text, for typing in by hand when a camera is not to hand. */
   readonly totpSecret: string;
-  /**
-   * Whether a confirmation was sent that has to be opened before this account can sign in.
-   *
-   * False on a server with no mail configured, where an address is only ever a name. The
-   * difference matters to whoever is looking at the screen: one of them can sign in now and
-   * the other cannot, and nothing else on the screen says which.
-   */
-  readonly verifySent: boolean;
 }
 
 /**
@@ -151,39 +143,54 @@ export class AccountClient {
   }
 
   /**
+   * Asks the server to send a signup code to an address.
+   *
+   * Nothing is created by this. The account comes into being only when the code comes back,
+   * which is what stops somebody registering an address they do not own.
+   *
+   * @async
+   * @param {string} email - The address to prove.
+   * @returns {Promise<boolean>} Whether a code was sent and has to be typed back in. False
+   *   from a server with no mail configured, where registering asks for nothing.
+   * @throws {AccountError} If the address already has an account or is malformed, or the
+   *   server cannot be reached.
+   */
+  async challenge(email: string): Promise<boolean> {
+    const body = await this.send<{ sent: boolean }>('POST', '/v1/accounts/challenge', {
+      email,
+    });
+
+    return body.sent;
+  }
+
+  /**
    * Creates an account and returns what to put into an authenticator app.
    *
    * The second factor is shown once. There is no way to ask for it again: the server keeps
-   * only what it needs to check codes, which is not enough to show the secret a second time.
+   * only what it needs to check codes, which is not enough to show the secret a second time —
+   * and handing it out later would mean a password alone could fetch the thing the password is
+   * supposed to be paired with.
    *
    * @async
    * @param {string} email - The address to sign in with.
    * @param {string} password - The password, which is never sent.
+   * @param {string} code - The six digits sent to that address, or empty when the server sent
+   *   nothing.
    * @returns {Promise<AccountEnrolment>} The second factor, once.
-   * @throws {AccountError} If the address already has an account or is malformed, or the
-   *   server cannot be reached.
+   * @throws {AccountError} If the code is wrong or lapsed, if the address already has an
+   *   account or is malformed, or the server cannot be reached.
    */
-  async register(email: string, password: string): Promise<AccountEnrolment> {
+  async register(email: string, password: string, code: string): Promise<AccountEnrolment> {
     const salt = await this.saltFor(email);
     const auth = await this.deriveAuth(password, salt);
 
-    const body = await this.send<{
-      totp_uri: string;
-      totp_secret: string;
-      verify_sent?: boolean;
-    }>(
+    const body = await this.send<{ totp_uri: string; totp_secret: string }>(
       'POST',
       '/v1/accounts',
-      { email, salt, auth, sealed_key: '' },
+      { email, code, salt, auth, sealed_key: '' },
     );
 
-    return {
-      totpUri: body.totp_uri,
-      totpSecret: body.totp_secret,
-      // Absent from a server built before addresses had to be proved, which is a server that
-      // does not prove them: the account is usable the moment it exists.
-      verifySent: body.verify_sent ?? false,
-    };
+    return { totpUri: body.totp_uri, totpSecret: body.totp_secret };
   }
 
   /**

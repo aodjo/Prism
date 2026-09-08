@@ -42,8 +42,15 @@ const api: PrismApi = {
 
   accountState: (): Promise<AccountState> => ipcRenderer.invoke('account:state'),
 
-  accountRegister: (email: string, password: string): Promise<AccountEnrolmentView> =>
-    ipcRenderer.invoke('account:register', email, password),
+  accountChallenge: (email: string): Promise<boolean> =>
+    ipcRenderer.invoke('account:challenge', email),
+
+  accountRegister: (
+    email: string,
+    password: string,
+    code: string,
+  ): Promise<AccountEnrolmentView> =>
+    ipcRenderer.invoke('account:register', email, password, code),
 
   accountSignIn: (
     email: string,

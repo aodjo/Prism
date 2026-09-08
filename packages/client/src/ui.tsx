@@ -209,17 +209,52 @@ export function Trouble({
 }
 
 /**
+ * What Electron puts in front of anything a main-process handler threw.
+ *
+ * A call that crosses the bridge and fails comes back as
+ * `Error invoking remote method 'account:register': AccountError: …`. The first half names the
+ * plumbing and the second half names a Rust type, and neither is addressed to the person
+ * reading it — the sentence they need is what the server wrote, at the end.
+ */
+const PLUMBING = /^Error invoking remote method '[^']*':\s*/;
+
+/**
+ * The `Error: ` or `AccountError: `-shaped prefix a serialised error keeps.
+ *
+ * Matched only when a word *ending* in `Error` is followed by a colon, so a message that
+ * happens to contain a colon of its own survives intact. The leading part is optional because
+ * the commonest case is the bare word.
+ */
+const CLASS_NAME = /^(?:[A-Za-z_$][\w$]*)?Error:\s*/;
+
+/**
  * Turns whatever was thrown into the sentence somebody should read.
  *
+ * Only the sentence. Everything the runtime wrapped around it on the way here says where the
+ * failure was raised, which is a thing to put in a log rather than under a form somebody is
+ * standing in front of.
+ *
  * @param {unknown} error - Whatever it was.
- * @returns {string} The message.
+ * @returns {string} The message, with the machinery taken off the front.
  */
 export function reason(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
+  const raw =
+    error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+
+  // The class name is taken off more than once because the wrappers nest: a rejection that
+  // crossed the bridge arrives as the plumbing, then the type it was thrown as, then sometimes
+  // the type it was wrapped in before that.
+  let said = raw.replace(PLUMBING, '');
+
+  for (let peeled = 0; peeled < 3 && CLASS_NAME.test(said); peeled += 1) {
+    said = said.replace(CLASS_NAME, '');
   }
 
-  return typeof error === 'string' ? error : String(error);
+  said = said.trim();
+
+  // Kept only when there is something left. An error whose whole message was the wrapper is
+  // still better shown than swallowed into an empty line that reads as nothing having failed.
+  return said === '' ? raw : said;
 }
 
 /**

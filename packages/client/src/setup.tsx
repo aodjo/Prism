@@ -306,6 +306,23 @@ function Setup(): JSX.Element {
    * field that gets filled in with a code that has already expired.
    */
   const [askingCode, setAskingCode] = useState(false);
+  /**
+   * Whether the code sent to the address is what is being waited for.
+   *
+   * Before the account exists, not after. An account created before its address is proved is
+   * one somebody can park on an address they do not own, holding a password and a second
+   * factor of their choosing until the owner does something that turns it on.
+   */
+  const [proving, setProving] = useState(false);
+  /**
+   * Whether the second factor was set up a moment ago.
+   *
+   * The screen that follows asks for six digits either way, but it means two different things:
+   * signing in, or checking that the authenticator somebody has just set up actually produces
+   * what this account expects. Getting that wrong is worth finding out now rather than the
+   * next time they open the application.
+   */
+  const [justEnrolled, setJustEnrolled] = useState(false);
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
   const [working, setWorking] = useState(false);
@@ -481,7 +498,9 @@ function Setup(): JSX.Element {
   };
 
   /**
-   * Creates an account and shows the second factor, once.
+   * Asks the server to send a code to the address, and waits for it to come back.
+   *
+   * No account is made here. That is the whole of what this step is for.
    */
   const createAccount = (): void => {
     // Checked here because it cannot be checked anywhere else: the password never leaves this
@@ -496,7 +515,36 @@ function Setup(): JSX.Element {
       setAccountTrouble(null);
 
       try {
-        setEnrolment(await prism.accountRegister(email.trim(), password));
+        if (await prism.accountChallenge(email.trim())) {
+          setProving(true);
+        } else {
+          // A server with no mail configured sends nothing and asks for nothing. The account
+          // is made on the spot, which is what this server did before it could send at all.
+          setEnrolment(await prism.accountRegister(email.trim(), password, ''));
+          setJustEnrolled(true);
+        }
+      } catch (error) {
+        setAccountTrouble(reason(error));
+      } finally {
+        setWorking(false);
+      }
+    })();
+  };
+
+  /**
+   * Creates the account, now that the code sent to the address has come back.
+   *
+   * @param {string} code - The six digits from the message.
+   */
+  const proveAddress = (code: string): void => {
+    void (async () => {
+      setWorking(true);
+      setAccountTrouble(null);
+
+      try {
+        setEnrolment(await prism.accountRegister(email.trim(), password, code));
+        setProving(false);
+        setJustEnrolled(true);
       } catch (error) {
         setAccountTrouble(reason(error));
       } finally {
@@ -607,23 +655,31 @@ function Setup(): JSX.Element {
             {greeted
               ? `Hello, ${signedIn ?? ''}`
               : askingCode
-                ? 'Enter your code'
+                ? justEnrolled
+                  ? 'Test it once'
+                  : 'Enter your code'
                 : enrolment
                   ? 'One more thing'
-                  : joining
-                    ? 'Create your account'
-                    : 'Welcome back'}
+                  : proving
+                    ? 'Check your email'
+                    : joining
+                      ? 'Create your account'
+                      : 'Welcome back'}
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
             {greeted
               ? 'Every machine on this account now knows about this one, and this one knows about them.'
               : askingCode
-                ? `Six digits from your authenticator, for ${email.trim()}.`
+                ? justEnrolled
+                  ? 'Enter what your authenticator shows now, so you know it works before you need it.'
+                  : `Six digits from your authenticator, for ${email.trim()}.`
                 : enrolment
                   ? 'Set up the second factor now. It is the only time it is shown.'
-                  : joining
-                    ? 'An account is how your machines find each other, and how this one is recognised when it asks.'
-                    : 'Sign in and every machine on your account finds this one.'}
+                  : proving
+                    ? `Six digits went to ${email.trim()}. Nothing is created until they come back.`
+                    : joining
+                      ? 'An account is how your machines find each other, and how this one is recognised when it asks.'
+                      : 'Sign in and every machine on your account finds this one.'}
           </p>
 
           {greeted ? null : askingCode ? (
@@ -631,6 +687,13 @@ function Setup(): JSX.Element {
               disabled={working}
               onComplete={(code) => {
                 signIn(code);
+              }}
+            />
+          ) : proving ? (
+            <CodeBoxes
+              disabled={working}
+              onComplete={(code) => {
+                proveAddress(code);
               }}
             />
           ) : enrolment ? (
@@ -649,15 +712,6 @@ function Setup(): JSX.Element {
               <code className="block text-center text-fine tracking-[0.06em] select-all text-ink-3">
                 {enrolment.secret}
               </code>
-              {/* Said here rather than left to be discovered at the sign-in that refuses. The
-                  account exists but cannot be used yet, and somebody who does not know that
-                  reads the refusal as a wrong password and retypes it. */}
-              {enrolment.verifySent && (
-                <p className="mx-auto mt-4 max-w-[36ch] text-note leading-normal text-amber">
-                  Then open the link sent to {email.trim()}. Until you do, this account cannot
-                  sign in.
-                </p>
-              )}
               <button
                 type="button"
                 className="btn-primary-sm no-drag mx-auto mt-5 block"
@@ -667,7 +721,7 @@ function Setup(): JSX.Element {
                   setAskingCode(true);
                 }}
               >
-                {enrolment.verifySent ? 'Done — sign in' : 'I have it — sign in'}
+                I have it — test it
               </button>
             </div>
           ) : (
