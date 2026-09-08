@@ -138,22 +138,23 @@ impl IntoResponse for ApiError {
     /// the password and the code was wrong would be an error worth guessing against.
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            ApiError::Malformed(what) => (StatusCode::BAD_REQUEST, format!("{what} is malformed")),
-            ApiError::Refused => (
-                StatusCode::UNAUTHORIZED,
-                "the name, password or code is wrong".to_owned(),
+            ApiError::Malformed(what) => (
+                StatusCode::BAD_REQUEST,
+                format!("The application sent a {what} this server could not read."),
             ),
+            ApiError::Refused => (StatusCode::UNAUTHORIZED, AccountError::Refused.to_string()),
             ApiError::Conflict(reason) => (StatusCode::CONFLICT, reason),
             ApiError::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "the server could not complete that".to_owned(),
+                "The server could not finish that. Try again in a moment.".to_owned(),
             ),
-            // Said plainly rather than hidden behind a generic failure. Nothing here is about
-            // whoever is registering — it is this server's own mail credentials — and somebody
-            // staring at a form deserves to know the account was not created.
+            // The outcome first, because that is the part that changes what somebody does
+            // next. Nothing here is about whoever is registering — it is this server's own
+            // mail credentials — and they deserve to know no account was made rather than
+            // wondering whether to try a different address.
             ApiError::Mail(reason) => (
                 StatusCode::BAD_GATEWAY,
-                format!("the confirmation could not be sent, so no account was made: {reason}"),
+                format!("No account was made: the confirmation could not be sent. {reason}"),
             ),
         };
 

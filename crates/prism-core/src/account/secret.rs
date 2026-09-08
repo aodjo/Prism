@@ -101,13 +101,16 @@ pub enum SecretError {
     ///
     /// Not something a person can cause; it means this build asked for parameters the library
     /// rejects, which is a mistake in the constants above rather than in what was typed.
-    #[error("the password could not be hashed: {reason}")]
+    #[error("The password could not be hashed: {reason}")]
     Hash {
         /// What the library said.
         reason: String,
     },
     /// The password is too short to be worth hashing.
-    #[error("a password needs at least {minimum} characters")]
+    ///
+    /// Reaches somebody as a sentence under the form they typed it into, so it is written as
+    /// one — see [`crate::account`] and the account server's own errors for the same reason.
+    #[error("A password needs at least {minimum} characters.")]
     TooShort {
         /// The shortest accepted.
         minimum: usize,

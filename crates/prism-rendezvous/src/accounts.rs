@@ -101,35 +101,48 @@ const fn made_before_this_was_asked() -> bool {
 }
 
 /// Why something could not be done to an account.
+///
+/// # These are the words somebody reads
+///
+/// Not a log line and not a code the interface translates: the sentence written here is the
+/// sentence rendered under the form, so it is written as one — what happened, and what to do
+/// about it. Rust's convention of a lowercase fragment is set aside for that reason. An error
+/// that only says what failed leaves somebody retyping a password that was never wrong.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AccountError {
     /// Somebody already registered that address, and proved it was theirs.
-    #[error("that email address already has an account")]
+    #[error("That address already has an account — sign in instead.")]
     EmailTaken,
     /// The address is registered but nobody has opened what was sent to it.
-    #[error("open the link sent to that address before signing in")]
+    #[error("Open the link sent to that address, then sign in.")]
     NotVerified,
     /// The link is not one this server sent, or it has already been used, or it has lapsed.
-    #[error("that link is no longer good — register again to get a new one")]
+    #[error(
+        "That link has been used already, or it is more than a day old. Register again to get a new one."
+    )]
     BadToken,
     /// What was given is not an address anything could be delivered to.
-    #[error("that does not look like an email address")]
+    #[error("That does not look like an email address.")]
     BadEmail,
     /// The sign-in did not succeed.
     ///
     /// One error for every reason: no such account, wrong password, wrong code. Telling them
-    /// apart tells somebody guessing which half they got right, and whether a name exists at
-    /// all.
-    #[error("the email, password or code is wrong")]
+    /// apart tells somebody guessing which half they got right, and whether an address has an
+    /// account at all.
+    #[error("The email, password or code is wrong.")]
     Refused,
     /// A field was not the length it has to be.
-    #[error("{field} is malformed")]
+    ///
+    /// Nothing a person typed: these are the fields the application derives and sends. Said so
+    /// plainly, because somebody looking at it should not go hunting through their own
+    /// typing for a mistake that is not there.
+    #[error("The application sent a {field} this server could not read.")]
     Malformed {
         /// Which one.
         field: &'static str,
     },
     /// The store could not be read or written.
-    #[error("the account store could not be {doing}: {reason}")]
+    #[error("The account store could not be {doing}: {reason}")]
     Store {
         /// What was being attempted.
         doing: &'static str,
