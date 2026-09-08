@@ -89,6 +89,12 @@ pnpm lint:cross   # linux, windows 타깃 clippy (링커 없이 clippy만 수행
 크로스 컴파일러가 없는 맥에서는 빌드 자체가 실패한다. 리눅스·윈도우 실제 컴파일은 CI가 각 OS에서
 네이티브로 수행한다.
 
+윈도우 타깃에서는 `prism-cli`도 제외한다. 클라이언트 창·오디오가 SDL을 소스에서 빌드하는데,
+MSVC용 C 툴체인이 없는 맥에서는 cmake 단계에서 실패한다. **따라서 윈도우 클라이언트 코드
+(`render/d3d11.rs`, `render/hud.rs`, `display/d3d11.rs`)는 로컬 `lint:cross`가 검사하지 못한다.**
+CI의 `windows-latest` 잡이 `cargo clippy --workspace --all-targets`로 네이티브 검사하며,
+그 코드를 건드렸다면 푸시 전에 실제 윈도우 머신에서 빌드해 보는 편이 빠르다.
+
 최초 1회 `rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-msvc` 필요.
 
 ## 핫패스 금지 사항

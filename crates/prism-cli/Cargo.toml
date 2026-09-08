@@ -11,9 +11,14 @@ repository.workspace = true
 prism-core.workspace = true
 clap = { version = "4", features = ["derive"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+# The window, the relative mouse capture and the audio output, on every platform that has a
+# client. Built from source and linked statically so a machine running the client needs no SDL
+# installed; that costs a C toolchain and CMake on the machine doing the building.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 sdl3 = { version = "0.18", features = ["build-from-source-static"] }
 sdl3-sys = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }
 objc2-metal = { version = "0.3", features = ["MTLPixelFormat"] }
 

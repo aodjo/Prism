@@ -39,11 +39,12 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaBuffer, IMFSample, IMFTransform,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFCreateDXGIDeviceManager, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFStartup,
-    MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+    MF_LOW_LATENCY, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
+    MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFMediaType_Video, MFSTARTUP_NOSOCKET, MFStartup, MFT_CATEGORY_VIDEO_DECODER,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
+    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
     MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
@@ -225,6 +226,21 @@ impl MediaFoundationDecoder {
     /// and profile it is, which arrive with the first keyframe.
     #[must_use]
     pub fn new(codec: Codec) -> Self {
+        Self::on(codec, None)
+    }
+
+    /// Creates a decoder that decodes onto a device somebody else owns.
+    ///
+    /// A client showing the stream passes the device its renderer draws with, so a decoded
+    /// picture is already on the GPU the window is on. Two devices would mean copying every
+    /// picture between them, which is the copy this whole path exists to avoid.
+    #[must_use]
+    pub fn with_device(codec: Codec, device: ID3D11Device, context: ID3D11DeviceContext) -> Self {
+        Self::on(codec, Some((device, context)))
+    }
+
+    /// Creates a decoder with no transform yet, on a given device or on one of its own.
+    fn on(codec: Codec, gpu: Option<(ID3D11Device, ID3D11DeviceContext)>) -> Self {
         STARTUP.call_once(|| {
             // SAFETY: called once for the process, before anything else here touches Media
             // Foundation. A failure is left to surface at the first call that needs it, which
@@ -232,10 +248,14 @@ impl MediaFoundationDecoder {
             let _ = unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) };
         });
 
+        let (device, context) = gpu.map_or((None, None), |(device, context)| {
+            (Some(device), Some(context))
+        });
+
         Self {
             codec,
-            device: None,
-            context: None,
+            device,
+            context,
             manager: None,
             transform: None,
             sets: Vec::new(),
@@ -286,7 +306,21 @@ impl MediaFoundationDecoder {
         let sample = build_sample(&self.scratch, pts_us)?;
 
         // SAFETY: the transform is alive and the sample holds its own buffer.
-        let status = unsafe { transform.ProcessInput(0, &sample, 0) };
+        let mut status = unsafe { transform.ProcessInput(0, &sample, 0) };
+
+        // A transform that will not take the frame because it is holding finished pictures is
+        // not refusing the frame, it is asking to be emptied first. Emptying it and offering
+        // the frame once more is the whole of the answer, and dropping the frame instead would
+        // cost every picture after it until the next keyframe.
+        if status
+            .as_ref()
+            .is_err_and(|err| err.code() == MF_E_NOTACCEPTING)
+        {
+            self.drain(&transform);
+            // SAFETY: the same live transform and the same sample, which `ProcessInput` did
+            // not take ownership of when it refused it.
+            status = unsafe { transform.ProcessInput(0, &sample, 0) };
+        }
 
         if let Err(err) = status {
             self.errors.push(err.code().0);
@@ -475,17 +509,29 @@ impl MediaFoundationDecoder {
     }
 
     /// Creates the device, the manager and the transform, in that order.
+    ///
+    /// The device may already be there, when the caller handed one over so that decoding and
+    /// drawing happen on the same GPU. The manager is built either way, because it is the
+    /// decoder's own wrapper around whichever device it ended up with.
     fn build(&mut self, width: u32, height: u32) -> Result<(), DecodeError> {
         if self.device.is_none() {
             let (device, context) = create_device()?;
-            let manager = create_manager(&device)?;
 
             self.device = Some(device);
             self.context = Some(context);
-            self.manager = Some(manager);
+        }
+
+        if self.manager.is_none() {
+            let device = self.device.as_ref().ok_or(DecodeError::SessionCreate {
+                reason: "no Direct3D device with video support",
+                status: E_FAIL.0,
+            })?;
+            self.manager = Some(create_manager(device)?);
         }
 
         let transform = find_transform(self.codec)?;
+
+        ask_for_low_latency(&transform);
 
         if let Some(manager) = self.manager.as_ref() {
             // A transform that will not take a device manager decodes into system memory
@@ -562,13 +608,36 @@ impl MediaFoundationDecoder {
     }
 }
 
+/// Asks a transform to stop buffering pictures it could already hand back.
+///
+/// A decoder's default is to hold a queue deep enough to reorder a stream that arrives out of
+/// order, which for H.264 and HEVC means as many pictures as the profile's reordering allows —
+/// measured here at about eighteen, which at sixty frames a second is three hundred
+/// milliseconds of delay that no amount of network tuning would ever get back. Two of them
+/// eventually got the transform refusing input altogether, because a queue that never drains
+/// fills.
+///
+/// This stream has nothing to reorder: the encoder is configured with no B-frames, so every
+/// picture is finished when it arrives. `MF_LOW_LATENCY` is how Media Foundation is told that.
+///
+/// Not being able to say so is not a failure — a decoder that ignores the request still
+/// decodes, only further behind — so this reports nothing.
+fn ask_for_low_latency(transform: &IMFTransform) {
+    // SAFETY: the transform is alive, and the attribute store it returns belongs to it.
+    unsafe {
+        if let Ok(attributes) = transform.GetAttributes() {
+            let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
+        }
+    }
+}
+
 /// Creates a Direct3D device the decoder and the renderer can share.
 ///
 /// Video support is asked for because without it the device cannot back a decoder at all.
 /// Multithread protection is turned on because the decode thread and the draw thread both
 /// issue work against this device, and Direct3D's own contract is that they may not do so at
 /// once unless it is.
-fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext), DecodeError> {
+pub fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext), DecodeError> {
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
 

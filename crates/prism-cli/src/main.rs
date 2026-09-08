@@ -4,10 +4,12 @@
 //! with no Electron and no window, so the latency numbers describe the pipeline rather
 //! than a compositor. CI drives it for protocol regression runs.
 
-#[cfg(target_os = "macos")]
+/// Playing the stream's sound, which only a client with a window does.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod audio;
 mod client;
-#[cfg(target_os = "macos")]
+/// Showing the stream, which needs both a decoder and a renderer for the platform.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod display;
 #[cfg(target_os = "macos")]
 mod encode;
@@ -828,9 +830,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             let offset =
                 std::sync::Arc::new(std::sync::atomic::AtomicI64::new(client::OFFSET_UNKNOWN));
 
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
-                let _ = (window_width, window_height, pacing_us, no_input);
+                let _ = (window_width, window_height, pacing_us, no_input, display);
                 if config.decode {
                     return Err("decoding is not implemented on this platform yet".into());
                 }
@@ -844,7 +846,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 )?)
             }
 
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
                 if display {
                     display::run(
