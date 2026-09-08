@@ -517,7 +517,13 @@ void app.whenReady().then(() => {
   // window this machine's own state would not otherwise show.
   const forced = process.env['PRISM_WINDOW_PAGE'];
 
-  if (forced === 'setup.html' || (!settings.setupDone && forced !== 'home.html')) {
+  // Being signed in is itself an answer to every question setup asks, so somebody who is does
+  // not get asked again — whatever the settings file says. The two can disagree: a settings
+  // file that was lost or copied from another machine would otherwise send somebody who has
+  // been using this for weeks back to the first screen.
+  const settled = settings.setupDone || Holder.signedInBefore();
+
+  if (forced === 'setup.html' || (!settled && forced !== 'home.html')) {
     setup = createStage('setup.html');
   } else if (forced === 'index.html') {
     window = createWindow();

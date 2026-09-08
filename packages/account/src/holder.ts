@@ -263,6 +263,19 @@ export class Holder {
    * @async
    * @returns {Promise<boolean>} Whether the machines are different from what was known before.
    */
+  /**
+   * Whether this machine has a session it can resume.
+   *
+   * Read from the file rather than from what has been resumed, because a launch asks this
+   * before it has had time to reach the server — and the question is whether somebody signed
+   * in here, not whether the server can be reached right now.
+   *
+   * @returns {boolean} Whether a session is stored.
+   */
+  static signedInBefore(): boolean {
+    return storedSession() !== null;
+  }
+
   async refresh(): Promise<boolean> {
     const before = this.devices.map((device) => device.publicKey).join(',');
 
