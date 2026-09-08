@@ -1,18 +1,20 @@
 # The rendezvous server, as a static binary in an image with nothing else in it.
 #
-# Nothing in this server is platform specific and nothing it depends on is C, so it links
-# statically against musl and the final image needs no libraries, no shell, and no package
-# manager. What ships is one file of a few megabytes, which is also the entire attack surface.
+# Nothing in this server is platform specific, so it links statically against musl and the
+# final image needs no libraries, no shell, and no package manager. What ships is one file,
+# which is also the entire attack surface.
 #
-# The account API it serves is plain HTTP, deliberately: TLS belongs to the reverse proxy in
-# front of it, which is a thing that already exists and already knows how to renew a
-# certificate. Terminating TLS here would mean a cryptographic provider, and the ones worth
-# trusting are C — which would cost exactly the property this file is about.
+# The account API it *serves* is plain HTTP, deliberately: TLS belongs to the reverse proxy in
+# front of it, which already exists and already knows how to renew a certificate. The server is
+# nonetheless a TLS *client* — it calls a mail provider to send verification codes — and that
+# is `rustls` on `ring`, which is C and assembly. So this build is not the pure-Rust one it
+# once was, and the base image has to carry a C toolchain.
 
 FROM rust:1-alpine AS build
 
-# musl-dev supplies the linker's startup files. No other C is involved: every dependency in
-# this binary is pure Rust, which is why the resulting image can be empty.
+# musl-dev supplies the linker's startup files, and the base image already carries gcc for the
+# Rust linker itself. Both are needed: `ring` compiles C and assembles for the target, and
+# without them the build stops at its build script rather than at anything of ours.
 RUN apk add --no-cache musl-dev
 
 WORKDIR /src

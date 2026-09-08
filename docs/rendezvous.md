@@ -33,9 +33,12 @@ From a clone of this repository, on the machine that will run it:
 docker compose -f deploy/rendezvous/compose.yaml up -d --build
 ```
 
-The image is built from source and comes out at about **1.5 MB**: one statically linked binary
-in an otherwise empty image, with no shell, no package manager, and no libraries. Every
-dependency in the binary is pure Rust, which is what makes that possible.
+The image is built from source and comes out at **2.4 MB**: one statically linked binary in an
+otherwise empty image, with no shell, no package manager, and no libraries.
+
+Build it on the machine that will run it, which is what the command above does. Building it
+elsewhere for another architecture works but goes through emulation and takes many times
+longer — the TLS client the account API needs compiles C, and emulated C is slow.
 
 To watch it:
 
@@ -49,20 +52,27 @@ connecting.
 
 ### As a plain binary, with no root at all
 
-The server binds one unprivileged port, reads nothing and writes nothing, so it needs no
-privilege at any point. Every dependency is pure Rust, which means it links statically against
-musl and can be cross-compiled from any machine with a Rust toolchain — no C compiler, on
-either end:
+The server binds one unprivileged port and needs no privilege at any point.
 
-```sh
-rustup target add x86_64-unknown-linux-musl
-RUSTFLAGS="-C linker=rust-lld -C target-feature=+crt-static" \
-  cargo build --release -p prism-rendezvous --target x86_64-unknown-linux-musl
-scp target/x86_64-unknown-linux-musl/release/prism-rendezvous server:~/bin/
+Build it **on the machine that will run it**. It used to cross-compile from anywhere with a
+Rust toolchain and no C compiler at either end, and that stopped being true when the account
+API brought in a TLS client: `reqwest` pulls in `rustls`, which pulls in `ring`, which is C and
+assembly. Cross-compiling from a Mac now ends here:
+
+```
+error: failed to run custom build command for `ring v0.17.14`
+  failed to find tool "x86_64-linux-musl-gcc"
 ```
 
-That is a **1.2 MB** file with nothing beside it. As a user service, so it survives a reboot
-and restarts if it dies:
+Installing a musl cross toolchain fixes it, and so does not needing one:
+
+```sh
+# on the server, which already has the right C toolchain for itself
+cargo build --release -p prism-rendezvous
+install -D target/release/prism-rendezvous ~/bin/prism-rendezvous
+```
+
+As a user service, so it survives a reboot and restarts if it dies:
 
 ```ini
 # ~/.config/systemd/user/prism-rendezvous.service
