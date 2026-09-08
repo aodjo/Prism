@@ -134,9 +134,11 @@ pub fn run(path: &Path, codec: Option<Codec>, verify: bool) -> Result<(), Box<dy
         }
     }
 
-    // Anything still inside the decoder. A decoder several frames deep has pictures left when
-    // the last frame goes in, and a run that stopped counting there would under-report every
-    // time.
+    // A decoder runs several pictures behind what it has been given, because it needs the
+    // frames that follow one before it can finish it. At the end of a recording those never
+    // arrive, so it has to be told none are coming before the last few come out.
+    decoder.finish();
+
     while let Some(picture) = decoder.poll(PATIENCE) {
         report.decoded += 1;
         report.size.get_or_insert((picture.width, picture.height));

@@ -43,7 +43,8 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFCreateDXGIDeviceManager, MFCreateMediaType,
     MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFStartup,
     MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
     MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
 };
@@ -309,6 +310,26 @@ impl MediaFoundationDecoder {
         self.pending.pop_front()
     }
 
+    /// Says no more frames are coming, and takes what the decoder was still holding.
+    ///
+    /// A decoder runs several pictures behind what it has been given: it needs the frames that
+    /// follow one before it can finish it. At the end of a stream those never arrive, so the
+    /// last few would simply never come out — which is invisible on a live stream and wrong
+    /// everywhere else, because the tail is exactly what a recording is judged on.
+    pub fn finish(&mut self) {
+        let Some(transform) = self.transform.clone() else {
+            return;
+        };
+
+        // SAFETY: the transform is alive, and both messages take no parameter.
+        unsafe {
+            let _ = transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            let _ = transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+        }
+
+        self.drain(&transform);
+    }
+
     /// Returns and clears any status codes the transform reported.
     pub fn take_errors(&mut self) -> Vec<i32> {
         core::mem::take(&mut self.errors)
@@ -328,12 +349,19 @@ impl MediaFoundationDecoder {
                 Ok(()) => {}
                 Err(err) if err.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return,
                 Err(err) if err.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-                    // The picture size changed under us. Renegotiating the output type is what
-                    // the transform is asking for; failing that, the next keyframe rebuilds
-                    // the whole thing anyway.
-                    if self.accept_output_type(transform).is_err() {
-                        self.transform = None;
+                    // The transform has read the real picture size out of the bitstream and is
+                    // asking to settle its output again. This is not an unusual event: it is
+                    // how the size becomes known at all. What was configured beforehand came
+                    // from the parameter sets, or from a guess when those could not be read,
+                    // and this is the moment that stops being what the pictures are called.
+                    match self.accept_output_type(transform) {
+                        Ok((width, height)) => {
+                            self.width = width;
+                            self.height = height;
+                        }
+                        Err(_) => self.transform = None,
                     }
+
                     return;
                 }
                 Err(err) => {
@@ -347,9 +375,13 @@ impl MediaFoundationDecoder {
             };
 
             if let Some(frame) = self.picture_from(&sample) {
+                // The oldest goes when the queue is full. A picture nobody has taken by the
+                // time four more have arrived is one that is already too late to show, and
+                // holding it would only delay the ones behind it.
                 while self.pending.len() >= OUTPUT_QUEUE_DEPTH {
                     self.pending.pop_front();
                 }
+
                 self.pending.push_back(frame);
             }
         }
@@ -431,11 +463,13 @@ impl MediaFoundationDecoder {
             return Ok(());
         }
 
-        let (width, height) = dimensions_from(self.codec, &sets).unwrap_or((1920, 1080));
-
         self.sets = sets.iter().map(|set| set.to_vec()).collect();
-        self.width = width;
-        self.height = height;
+
+        // A size is needed to configure the transform, and the parameter sets are the only
+        // place to get one before it exists. It is a starting point rather than an answer:
+        // what the pictures are actually reported as comes back from the transform once it has
+        // settled its output type, which is the thing that knows.
+        let (width, height) = dimensions_from(self.codec, &sets).unwrap_or((1920, 1080));
 
         self.build(width, height)
     }
@@ -463,7 +497,10 @@ impl MediaFoundationDecoder {
         }
 
         set_input_type(&transform, self.codec, width, height)?;
-        self.accept_output_type(&transform)?;
+
+        let (width, height) = self.accept_output_type(&transform)?;
+        self.width = width;
+        self.height = height;
 
         // SAFETY: the transform is alive and has both types set.
         unsafe {
@@ -481,7 +518,7 @@ impl MediaFoundationDecoder {
     ///
     /// NV12 because it is what every hardware decoder produces and what the renderer's shader
     /// expects. A transform with no NV12 output is one this project cannot draw from.
-    fn accept_output_type(&self, transform: &IMFTransform) -> Result<(), DecodeError> {
+    fn accept_output_type(&self, transform: &IMFTransform) -> Result<(u32, u32), DecodeError> {
         for index in 0..32u32 {
             // SAFETY: the transform is alive; enumeration ends with an error status.
             let Ok(candidate) = (unsafe { transform.GetOutputAvailableType(0, index) }) else {
@@ -500,7 +537,13 @@ impl MediaFoundationDecoder {
                     }
                 })?;
 
-                return Ok(());
+                // What the pictures will actually be. Asked of the type that was accepted
+                // rather than of the one that was offered, because a transform is free to
+                // settle on something else and this is the moment it has stopped moving.
+                // SAFETY: the type was accepted immediately above.
+                let packed = unsafe { candidate.GetUINT64(&MF_MT_FRAME_SIZE) }.unwrap_or_default();
+
+                return Ok(unpack(packed));
             }
         }
 
@@ -743,6 +786,11 @@ const fn pack(width: u32, height: u32) -> u64 {
     ((width as u64) << 32) | height as u64
 }
 
+/// Reads one back out.
+const fn unpack(packed: u64) -> (u32, u32) {
+    ((packed >> 32) as u32, packed as u32)
+}
+
 /// Reads the picture size out of a sequence parameter set.
 ///
 /// A decoder can be created without this — Media Foundation reads the real size from the
@@ -768,5 +816,12 @@ mod tests {
     fn a_frame_size_packs_width_above_height() {
         assert_eq!(pack(1920, 1080), (1920u64 << 32) | 1080);
         assert_eq!(pack(0, 0), 0);
+    }
+
+    #[test]
+    fn a_packed_frame_size_reads_back_as_what_went_in() {
+        for size in [(1920, 1080), (1280, 720), (3840, 2160), (0, 0), (1, 1)] {
+            assert_eq!(super::unpack(pack(size.0, size.1)), size);
+        }
     }
 }

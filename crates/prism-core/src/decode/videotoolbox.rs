@@ -232,6 +232,25 @@ impl VideoToolboxDecoder {
         self.output.recv_timeout(timeout).ok()
     }
 
+    /// Says no more frames are coming, and waits for anything still being decoded.
+    ///
+    /// The same word as every other backend, so a caller that has run out of input can ask the
+    /// same thing of all of them. Here it has little to do: pictures arrive through a callback
+    /// as they finish rather than being held for a later call, so what this asks for is only
+    /// that the ones already in flight are finished before the session goes away.
+    pub fn finish(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+
+        // SAFETY: the session is alive, and this returns once every frame handed to it has
+        // been through the callback.
+        unsafe {
+            let _ = session.finish_delayed_frames();
+            let _ = session.wait_for_asynchronous_frames();
+        }
+    }
+
     /// Returns and clears any decode errors reported asynchronously by VideoToolbox.
     ///
     /// Frames fail on the decoder's own thread, so a failure cannot be returned from
