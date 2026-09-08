@@ -14,6 +14,8 @@ import type { JSX, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import type { AccountEnrolmentView, AccountState, PrismApi, Settings } from './api.js';
+import { PRISM_RENDEZVOUS, findingOf } from './rendezvous.js';
+import type { Finding } from './rendezvous.js';
 import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -73,6 +75,98 @@ function Row({ label, children }: { label: string; children: ReactNode }): JSX.E
 /** The one shape every text box in this window has. */
 const FIELD =
   'w-[190px] rounded-tile border border-line-2 bg-base px-2.5 py-1.5 text-fine text-ink placeholder:text-dim focus:border-[rgba(124,92,255,0.6)] focus:outline-none';
+
+/**
+ * Chooses how this machine finds the other one.
+ *
+ * Three answers rather than a box to type an address into. The address is what the session
+ * needs, but it is not what a person is deciding — they are deciding whether to use the
+ * servers this project runs, one of their own, or none at all.
+ *
+ * Nothing is trusted to a rendezvous either way: the two machines prove who they are to each
+ * other, so the worst a hostile one can do is refuse to introduce them. That is what makes
+ * running your own a setting rather than a fork, and what makes the default safe.
+ *
+ * @param {object} props - The address and what to do when it changes.
+ * @param {string} props.value - The rendezvous setting as it is stored.
+ * @param {(next: string) => void} props.onChange - Called as the address is typed.
+ * @param {(next: string) => void} props.onCommit - Called when the address should be saved.
+ * @returns {JSX.Element} The chooser and, when one is wanted, the address field.
+ */
+function Rendezvous({
+  value,
+  onChange,
+  onCommit,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onCommit: (next: string) => void;
+}): JSX.Element {
+  const finding = findingOf(value);
+
+  const choose = (next: Finding): void => {
+    if (next === 'automatic') {
+      onChange(PRISM_RENDEZVOUS);
+      onCommit(PRISM_RENDEZVOUS);
+      return;
+    }
+
+    if (next === 'off') {
+      onChange('');
+      onCommit('');
+      return;
+    }
+
+    // Left empty for the person to fill in. Carrying the previous address over would have
+    // them editing the project's own, which is not what choosing "my own server" meant.
+    onChange('');
+  };
+
+  return (
+    <>
+      <Row label="Find machines">
+        <select
+          className={FIELD}
+          value={finding}
+          onChange={(event) => {
+            choose(event.target.value as Finding);
+          }}
+        >
+          <option value="automatic">Automatically</option>
+          <option value="custom">My own server</option>
+          <option value="off">Same network only</option>
+        </select>
+      </Row>
+
+      {finding === 'custom' && (
+        <Row label="Server">
+          <input
+            type="text"
+            spellCheck={false}
+            placeholder="host:47300"
+            className={FIELD}
+            value={value}
+            onChange={(event) => {
+              onChange(event.target.value);
+            }}
+            onBlur={(event) => {
+              onCommit(event.target.value.trim());
+            }}
+          />
+        </Row>
+      )}
+
+      <p className="text-tiny text-dim">
+        {finding === 'automatic' &&
+          'Uses the servers this project runs, whichever is nearest. They introduce the two machines and never see the picture.'}
+        {finding === 'custom' &&
+          'Your own rendezvous server. Nothing is trusted to it — see docs/rendezvous.md for running one.'}
+        {finding === 'off' &&
+          'Machines are found only where this one can already reach them: the same network, a VPN, or a forwarded port.'}
+      </p>
+    </>
+  );
+}
 
 /**
  * The settings window.
@@ -388,21 +482,15 @@ function Panel(): JSX.Element {
               }}
             />
           </Row>
-          <Row label="Rendezvous">
-            <input
-              type="text"
-              spellCheck={false}
-              placeholder="host:47300"
-              className={FIELD}
-              value={settings?.rendezvous ?? ''}
-              onChange={(event) => {
-                setSettings((was) => (was ? { ...was, rendezvous: event.target.value } : was));
-              }}
-              onBlur={(event) => {
-                save({ rendezvous: event.target.value.trim() });
-              }}
-            />
-          </Row>
+          <Rendezvous
+            value={settings?.rendezvous ?? ''}
+            onChange={(rendezvous) => {
+              setSettings((was) => (was ? { ...was, rendezvous } : was));
+            }}
+            onCommit={(rendezvous) => {
+              save({ rendezvous });
+            }}
+          />
           <Row label="Send input">
             <input
               type="checkbox"
