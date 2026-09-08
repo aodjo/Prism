@@ -111,6 +111,15 @@ struct Cli {
     #[arg(long, env = "PRISM_MAIL_FROM")]
     mail_from: Option<String>,
 
+    /// A token that lets whoever holds it list and delete accounts on this server.
+    ///
+    /// Omitted means those endpoints do not exist, which is the default: a rendezvous server
+    /// is not an administration console unless somebody says it is. From the environment for
+    /// the same reason as the mail key — a secret on a command line is a secret in every
+    /// process listing.
+    #[arg(long, env = "PRISM_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
+
     /// Refuse to carry traffic for peers that could not reach each other directly.
     ///
     /// Relaying costs this machine's bandwidth and adds its distance to every round trip, so
@@ -163,6 +172,9 @@ fn serve(cli: &Cli) -> io::Result<()> {
                 key: cli.mail_key.clone(),
                 from: cli.mail_from.clone(),
             },
+            cli.admin_token
+                .clone()
+                .filter(|token| !token.trim().is_empty()),
         )?;
     }
 
@@ -535,6 +547,7 @@ fn spawn_accounts(
     insecure: bool,
     advertise: String,
     post: Post,
+    admin: Option<String>,
 ) -> io::Result<()> {
     use prism_rendezvous::accounts::Accounts;
     use prism_rendezvous::api::{Service, routes};
@@ -587,7 +600,15 @@ fn spawn_accounts(
     }
 
     let mailer = post.into_mailer()?;
-    let service = Service::new(accounts, sessions, advertise, mailer);
+
+    if admin.is_some() {
+        println!(
+            "prism-rendezvous: accounts can be listed and deleted by whoever holds the admin \
+             token"
+        );
+    }
+
+    let service = Service::new(accounts, sessions, advertise, mailer, admin);
 
     std::thread::Builder::new()
         .name("prism-accounts".into())

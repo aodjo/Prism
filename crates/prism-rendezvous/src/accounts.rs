@@ -272,6 +272,31 @@ impl Accounts {
         self.by_email.is_empty()
     }
 
+    /// Removes an account and anything waiting against its address.
+    ///
+    /// Everything: the verifier, the second factor, the sealed key and the machines. None of it
+    /// can be reconstructed, which is the point — an account somebody asked to be rid of that
+    /// left a shadow behind would not have been deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountError::Store`] if the result cannot be written.
+    pub fn forget(&mut self, email: &str) -> Result<bool, AccountError> {
+        let had = self.by_email.remove(email).is_some();
+        let waiting = self.challenges.remove(email).is_some();
+
+        if had || waiting {
+            self.save()?;
+        }
+
+        Ok(had)
+    }
+
+    /// Every account, for an operator looking at what is on their own server.
+    pub fn all(&self) -> impl Iterator<Item = &Account> {
+        self.by_email.values()
+    }
+
     /// Says whether an address is still going spare, without doing anything about it.
     ///
     /// # Errors

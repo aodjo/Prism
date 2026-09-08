@@ -59,6 +59,12 @@ pub struct Service {
     advertise: String,
     /// How a link is sent to an address, or `None` when this server does not prove addresses.
     mailer: Option<Mailer>,
+    /// What an operator has to present to manage accounts, or `None` when nobody can.
+    ///
+    /// Absent by default, and the endpoints it guards do not exist when it is: a server that
+    /// grew a way to delete every account on it without anybody asking for one would be a
+    /// server with a surface its operator never agreed to.
+    admin: Option<String>,
 }
 
 impl Service {
@@ -73,13 +79,45 @@ impl Service {
         sessions: Sessions,
         advertise: String,
         mailer: Option<Mailer>,
+        admin: Option<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             accounts: Mutex::new(accounts),
             sessions: Mutex::new(sessions),
             advertise,
             mailer,
+            admin,
         })
+    }
+
+    /// Checks what an operator presented against what this server was started with.
+    ///
+    /// Compared without stopping early, so how long the check takes says nothing about how
+    /// much of the token was right.
+    fn is_operator(&self, headers: &HeaderMap) -> bool {
+        let Some(wanted) = self.admin.as_deref() else {
+            return false;
+        };
+
+        let Some(given) = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+        else {
+            return false;
+        };
+
+        let (wanted, given) = (wanted.as_bytes(), given.as_bytes());
+
+        if wanted.len() != given.len() {
+            return false;
+        }
+
+        wanted
+            .iter()
+            .zip(given)
+            .fold(0u8, |seen, (a, b)| seen | (a ^ b))
+            == 0
     }
 
     /// Returns the name a token belongs to, if it is still good.
@@ -175,6 +213,24 @@ impl From<AccountError> for ApiError {
             AccountError::Store { .. } => ApiError::Unavailable,
         }
     }
+}
+
+/// One account, as an operator sees it.
+#[derive(Debug, Serialize)]
+struct AccountLine {
+    email: String,
+    verified: bool,
+    devices: usize,
+    relay_allowed: bool,
+}
+
+/// What deleting an account came to.
+#[derive(Debug, Serialize)]
+struct ForgottenBody {
+    /// Whether there was an account to delete.
+    deleted: bool,
+    /// How many signed-in machines were signed out with it.
+    signed_out: usize,
 }
 
 /// The body every failure carries.
@@ -304,7 +360,77 @@ pub fn routes(service: Arc<Service>) -> Router {
         .route("/v1/devices", get(list_devices).post(add_device))
         .route("/v1/devices/{public_key}", delete(remove_device))
         .route("/v1/account/key", put(replace_key))
+        // Only when an operator asked for them. Without a token these two are not routes at
+        // all, so a server nobody configured for administration answers as though they were
+        // never written.
+        .merge(if service.admin.is_some() {
+            Router::new()
+                .route("/v1/admin/accounts", get(list_accounts))
+                .route("/v1/admin/accounts/{email}", delete(forget_account))
+        } else {
+            Router::new()
+        })
         .with_state(service)
+}
+
+/// Lists every account, for an operator looking at their own server.
+///
+/// Names and counts, and nothing that could sign anybody in: no verifier, no second factor,
+/// no sealed key. An operator who wanted those has the file.
+async fn list_accounts(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AccountLine>>, ApiError> {
+    if !service.is_operator(&headers) {
+        return Err(ApiError::Refused);
+    }
+
+    let accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
+
+    let mut listed: Vec<AccountLine> = accounts
+        .all()
+        .map(|account| AccountLine {
+            email: account.email.clone(),
+            verified: account.verified,
+            devices: account.devices.len(),
+            relay_allowed: account.relay_allowed,
+        })
+        .collect();
+
+    listed.sort_by(|one, two| one.email.cmp(&two.email));
+
+    Ok(Json(listed))
+}
+
+/// Deletes an account and signs out every machine that was using it.
+async fn forget_account(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+    Path(email): Path<String>,
+) -> Result<Json<ForgottenBody>, ApiError> {
+    if !service.is_operator(&headers) {
+        return Err(ApiError::Refused);
+    }
+
+    let existed = {
+        let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
+        accounts.forget(&email)?
+    };
+
+    // Even when there was no account. A token outliving the record it was issued against is a
+    // machine that stays signed in to something that is not there, and the tidy-up costs
+    // nothing when there is nothing to tidy.
+    let signed_out = service
+        .sessions
+        .lock()
+        .map_err(|_| ApiError::Unavailable)?
+        .remove_for(&email)
+        .map_err(|_| ApiError::Unavailable)?;
+
+    Ok(Json(ForgottenBody {
+        deleted: existed,
+        signed_out,
+    }))
 }
 
 /// Says the server is up and how many accounts it holds.

@@ -135,6 +135,28 @@ impl Sessions {
         self.save()
     }
 
+    /// Forgets every session belonging to one account.
+    ///
+    /// What deleting an account has to do as well as deleting the account: a token outlives the
+    /// record it was issued against, and one still being honoured for a name that no longer
+    /// exists is a signed-in machine nobody can sign out.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from writing the file.
+    pub fn remove_for(&mut self, name: &str) -> io::Result<usize> {
+        let before = self.by_hash.len();
+        self.by_hash.retain(|_, session| session.name != name);
+
+        let dropped = before - self.by_hash.len();
+
+        if dropped > 0 {
+            self.save()?;
+        }
+
+        Ok(dropped)
+    }
+
     /// Writes the store, moving it into place so a reader never sees a half-written file.
     fn save(&self) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(&File {

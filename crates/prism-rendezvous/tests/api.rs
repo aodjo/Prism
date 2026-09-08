@@ -44,6 +44,7 @@ fn service(label: &str) -> (axum::Router, std::path::PathBuf) {
             // No mailer, so these tests exercise a server that does not prove addresses —
             // which is the same server anybody running this without a mail key gets.
             None,
+            Some("operator-token".to_owned()),
         )),
         accounts_path,
     )
@@ -168,6 +169,75 @@ async fn sign_in(router: &axum::Router, name: &str, secret: &[u8]) -> String {
     assert_eq!(status, StatusCode::OK, "sign-in failed: {body}");
 
     body["token"].as_str().expect("a token").to_owned()
+}
+
+#[tokio::test]
+async fn an_operator_can_list_and_delete_accounts() {
+    let (router, _path) = service("admin-list");
+
+    register(&router, "someone@example.com").await;
+
+    let (status, listed) = send(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri("/v1/admin/accounts")
+            .header("authorization", "Bearer operator-token")
+            .body(Body::empty())
+            .expect("a request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed[0]["email"], "someone@example.com");
+
+    let (status, gone) = send(
+        &router,
+        Request::builder()
+            .method("DELETE")
+            .uri("/v1/admin/accounts/someone@example.com")
+            .header("authorization", "Bearer operator-token")
+            .body(Body::empty())
+            .expect("a request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(gone["deleted"], true);
+
+    // Gone for good: the address is free again, which it would not be if anything had been
+    // left behind.
+    let (status, _) = send(
+        &router,
+        Request::builder()
+            .method("GET")
+            .uri("/v1/admin/accounts")
+            .header("authorization", "Bearer operator-token")
+            .body(Body::empty())
+            .expect("a request"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn managing_accounts_needs_the_operator_token() {
+    let (router, _path) = service("admin-guard");
+
+    for headers in [None, Some("Bearer wrong")] {
+        let mut request = Request::builder()
+            .method("DELETE")
+            .uri("/v1/admin/accounts/someone@example.com");
+
+        if let Some(value) = headers {
+            request = request.header("authorization", value);
+        }
+
+        let (status, _) = send(&router, request.body(Body::empty()).expect("a request")).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 }
 
 #[tokio::test]

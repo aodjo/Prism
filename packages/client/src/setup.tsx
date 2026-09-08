@@ -364,6 +364,14 @@ function Setup(): JSX.Element {
    * already true the second time would react once and then sit still.
    */
   const [refused, setRefused] = useState(0);
+  /**
+   * Whether anything has moved yet.
+   *
+   * The first screen is not arriving from anywhere — there is nothing to its right for it to
+   * have come from — so it fades up instead of sliding across. A slide would be the window
+   * claiming a history it does not have, on the one screen somebody has no context for.
+   */
+  const [moved, setMoved] = useState(false);
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
   const [working, setWorking] = useState(false);
@@ -472,6 +480,7 @@ function Setup(): JSX.Element {
     setBack(STEPS.indexOf(next) < STEPS.indexOf(step));
     setLeaving(step);
     setStep(next);
+    setMoved(true);
   };
 
   /**
@@ -1176,7 +1185,11 @@ function Setup(): JSX.Element {
           <div
             key={step}
             className={`col-start-1 row-start-1 ${
-              back ? 'animate-[slide-in-back_420ms_ease-out_both]' : 'animate-[slide-in-forward_420ms_ease-out_both]'
+              moved
+                ? back
+                  ? 'animate-[slide-in-back_420ms_ease-out_both]'
+                  : 'animate-[slide-in-forward_420ms_ease-out_both]'
+                : 'animate-[fade-in_620ms_ease-out_both]'
             }`}
           >
             {screenFor(step, `${SCREEN} rise`)}
