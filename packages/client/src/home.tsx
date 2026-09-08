@@ -421,10 +421,19 @@ function Home(): JSX.Element {
                   alt=""
                   className="block size-[7px] flex-none overflow-visible"
                 />
-                <span className="truncate text-[13.5px] text-muted-2">
+                {/* What it is doing, not where it is. Nobody types an address any more — the
+                    account is what finds a machine — so putting one here is asking somebody to
+                    read a number they will never use. It stays on the hover for the one case
+                    that still needs it: a deployment with no rendezvous server, where the
+                    other end has to be told by hand. */}
+                <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
                   {mine?.phase === 'failed'
                     ? 'Sharing failed'
-                    : (reachable ?? (shared ? 'Opening' : 'Not shared'))}
+                    : shared
+                      ? mine?.local === null
+                        ? 'Opening'
+                        : 'Shared'
+                      : 'Not shared'}
                 </span>
               </span>
               <span
