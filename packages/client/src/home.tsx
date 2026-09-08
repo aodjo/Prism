@@ -331,13 +331,14 @@ function Home(): JSX.Element {
   const listed = everything ? history : history.slice(0, RECENT);
 
   useEffect(() => {
-    if (!tuning) {
+    if (!tuning && !terms) {
       return;
     }
 
     const close = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         setTuning(false);
+        setTerms(false);
       }
     };
 
@@ -346,7 +347,7 @@ function Home(): JSX.Element {
     return () => {
       window.removeEventListener('keydown', close);
     };
-  }, [tuning]);
+  }, [tuning, terms]);
 
   /**
    * Whether this is the only machine there is.
@@ -469,8 +470,7 @@ function Home(): JSX.Element {
         {/* This machine, given the top of the window because it is the one machine that is
             always here and the one switch somebody came to flip. Everything below it is a
             machine somebody might watch; this is the one they might be watched on. */}
-        <div className="relative mt-6 flex-none">
-        <div className="relative overflow-hidden rounded-card border border-line-4 bg-gradient-to-r from-[rgba(255,255,255,0.08)] to-[rgba(255,255,255,0.03)]">
+        <div className="relative mt-6 flex-none overflow-hidden rounded-card border border-line-4 bg-gradient-to-r from-[rgba(255,255,255,0.08)] to-[rgba(255,255,255,0.03)]">
           <div className="pointer-events-none absolute top-[-151px] left-[59%] h-[400px] w-[700px] mix-blend-screen">
             <img
               src="assets/resume-glow.svg"
@@ -483,6 +483,12 @@ function Home(): JSX.Element {
             <div className="flex min-w-0 flex-1 flex-col gap-2.5">
               <span className="truncate text-[30px] leading-none font-semibold tracking-[-0.7px] text-ink">
                 This machine
+                {/* The name its owner gave it, after the one everybody's machine has. Somebody
+                    with two of these is looking at two cards that say the same thing, and the
+                    thing that tells them apart is the part they chose. */}
+                {settings?.nickname ? (
+                  <span className="font-normal text-muted-2"> ({settings.nickname})</span>
+                ) : null}
               </span>
               {/* What it is doing, not where it is. Nobody types an address any more — the
                   account is what finds a machine — so putting one here is asking somebody to
@@ -508,7 +514,7 @@ function Home(): JSX.Element {
               </span>
             </div>
 
-            <div className="relative flex flex-none flex-col items-end gap-3.5">
+            <div className="flex flex-none flex-col items-end gap-3.5">
               {watched && (
                 <Chip tone="text-violet" wash="rgba(124, 92, 255, 0.13)">
                   {(Number(mine?.bitrateBps ?? 0n) / 1e6).toFixed(0)} Mbps
@@ -548,29 +554,38 @@ function Home(): JSX.Element {
           </div>
         </div>
 
-        {/* The terms are opened from beside the switch they belong to, and the popover
-            hangs under it rather than over the middle of the window: what is being
-            changed is this card, and it should stay in sight while it changes. */}
+        {/* A modal rather than a popover hanging off the card. What is being set here is
+            typed — a name, a rate, an address — and a panel that closes when a click lands
+            slightly wrong is a panel that throws away what was being typed into it. */}
         {terms && (
-          <div className="absolute top-full right-0 z-[3] mt-2.5 w-[330px] overflow-hidden rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 py-4 text-left shadow-[0_20px_48px_rgba(0,0,0,0.5)]">
-            <div className="mb-1.5 flex items-center justify-between">
-              <h3 className="m-0 text-note font-semibold text-ink-3">Sharing terms</h3>
-              <button
-                type="button"
-                aria-label="Close sharing terms"
-                className="rounded-pill px-1.5 text-ui text-dim transition-colors hover:text-ink"
-                onClick={() => {
-                  setTerms(false);
-                }}
-              >
-                ✕
-              </button>
+          <div
+            className="absolute inset-0 z-[3] flex items-start justify-center overflow-y-auto bg-[rgba(6,6,10,0.62)] px-6 py-16 backdrop-blur-[3px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                setTerms(false);
+              }
+            }}
+          >
+            <div className="w-full max-w-[460px] flex-none overflow-hidden rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+                  Sharing this machine
+                </h2>
+                <button
+                  type="button"
+                  aria-label="Close sharing terms"
+                  className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
+                  onClick={() => {
+                    setTerms(false);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+              <SharingTerms />
             </div>
-            <SharingTerms />
           </div>
         )}
-
-        </div>
 
         <Trouble
           message={

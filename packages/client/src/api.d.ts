@@ -113,6 +113,14 @@ export interface Settings {
    */
   accountServer: string;
 
+  /**
+   * What the person at this machine calls it, or empty for none.
+   *
+   * Shown beside its name here and nowhere else: the account already carries a label that
+   * every other machine reads, and this is the one somebody gives a machine for their own
+   * sake — the one in the study, the loud one, the one with the good graphics card.
+   */
+  nickname: string;
   /** Address to listen on while shared. Port zero lets the operating system choose. */
   bind: string;
   /** Frames per second to capture at while shared. */

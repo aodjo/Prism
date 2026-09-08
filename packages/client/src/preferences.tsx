@@ -79,7 +79,13 @@ const WIDE = `${FIELD} w-[210px]`;
  * A number in a box built for a URL reads as a fragment of something longer. Sizing the box to
  * what goes in it is what says a frame rate is expected rather than an address.
  */
-const NUMBER = `${FIELD} w-[74px] text-right tabular-nums`;
+const NUMBER =
+  `${FIELD} w-[74px] text-right tabular-nums ` +
+  // The browser's own steppers, which arrive grey, square and sized for a form on a web page.
+  // Nothing else in this window came from a stylesheet nobody wrote, and these should not
+  // either — the value is typed, and a pair of arrows is not what makes it changeable.
+  '[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none ' +
+  '[&::-webkit-outer-spin-button]:appearance-none';
 
 /** The one shape every switch in this window has. */
 const TOGGLE = 'size-[15px] accent-violet';
@@ -417,6 +423,21 @@ export function SharingTerms(): JSX.Element {
 
   return (
     <div className="flex flex-col">
+      <Row label="Name">
+        <input
+          type="text"
+          spellCheck={false}
+          placeholder="This machine"
+          className={WIDE}
+          value={settings?.nickname ?? ''}
+          onChange={(event) => {
+            setSettings((was) => (was ? { ...was, nickname: event.target.value } : was));
+          }}
+          onBlur={(event) => {
+            save({ nickname: event.target.value.trim() });
+          }}
+        />
+      </Row>
       <Row label="Frame rate">
         <input
           type="number"

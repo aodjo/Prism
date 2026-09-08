@@ -19,6 +19,7 @@ export const DEFAULTS: Settings = {
   accountServer: PRISM_ACCOUNT_SERVER,
   control: true,
   smooth: false,
+  nickname: '',
   addresses: {},
   pinned: [],
   // The port is fixed rather than left to the operating system. With a rendezvous server it
