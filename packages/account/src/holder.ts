@@ -253,6 +253,24 @@ export class Holder {
    * @async
    * @returns {Promise<void>}
    */
+  /**
+   * Asks the account again who its machines are, and records the answer.
+   *
+   * The list is not a thing this machine decides, so it goes stale the moment somebody signs
+   * in somewhere else. Cheap enough to do whenever a window comes forward, which is the moment
+   * somebody is about to look at the list and expect it to be right.
+   *
+   * @async
+   * @returns {Promise<boolean>} Whether the machines are different from what was known before.
+   */
+  async refresh(): Promise<boolean> {
+    const before = this.devices.map((device) => device.publicKey).join(',');
+
+    await this.resume();
+
+    return this.devices.map((device) => device.publicKey).join(',') !== before;
+  }
+
   private async resume(): Promise<void> {
     const stored = storedSession();
 

@@ -42,6 +42,12 @@ const api: PrismApi = {
 
   accountState: (): Promise<AccountState> => ipcRenderer.invoke('account:state'),
 
+  onAccount: (listener: (state: AccountState) => void): void => {
+    ipcRenderer.on('account:state', (_event, state: AccountState) => {
+      listener(state);
+    });
+  },
+
   accountChallenge: (email: string): Promise<boolean> =>
     ipcRenderer.invoke('account:challenge', email),
 

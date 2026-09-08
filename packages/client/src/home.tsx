@@ -205,6 +205,18 @@ function Home(): JSX.Element {
     prism.onSharing(setMine);
     prism.onSessions(setHistory);
     prism.onStream(setStream);
+
+    // The account is asked again whenever this window comes forward, so a machine signed in
+    // somewhere else turns up here without anybody restarting anything.
+    prism.onAccount((state) => {
+      setDevices(state.devices);
+      setAccount({ email: state.email, relay: state.relayAllowed });
+      setMachines(
+        state.devices
+          .map((device) => device.publicKey)
+          .filter((key) => key !== state.publicKey),
+      );
+    });
   }, []);
 
   const pinned = useMemo(() => new Set(settings?.pinned ?? []), [settings]);

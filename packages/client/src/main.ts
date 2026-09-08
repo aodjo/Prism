@@ -149,6 +149,61 @@ function keepSession(session: Session): void {
 const sharing = new Sharing(prism, broadcastSharing);
 
 /**
+ * The account's other machines, as one comparable string.
+ *
+ * This machine is left out because it is never the thing that changed: it is always there, and
+ * it is the one key a session does not admit.
+ *
+ * @async
+ * @returns {Promise<string>} Their keys, sorted, joined.
+ */
+async function others(): Promise<string> {
+  const state = await account.view();
+
+  return state.devices
+    .filter((device) => !device.isThisMachine)
+    .map((device) => device.publicKey)
+    .sort()
+    .join(',');
+}
+
+/**
+ * Asks the account who its machines are, and acts on a change.
+ *
+ * Two things go stale together. The list a window draws is one; the list a running session
+ * admits is the other, and that one is read when the session opens. So a machine added to the
+ * account after sharing started would knock on a door this one has already decided not to
+ * answer — which looks, from the new machine, exactly like a fault.
+ *
+ * Reopening the session is what fixes that, and it costs nothing while nobody is watching:
+ * there is no picture to interrupt. A session with somebody in it is left alone — they are
+ * already admitted, and dropping them to let somebody else in is not a trade worth making.
+ *
+ * @async
+ * @returns {Promise<void>}
+ */
+async function catchUp(): Promise<void> {
+  const before = await others();
+
+  await account.refresh();
+
+  const state = await account.view();
+
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('account:state', state);
+    }
+  }
+
+  const own = sharing.snapshot();
+
+  if ((await others()) !== before && own && own.peer === null && own.phase !== 'failed') {
+    sharing.stop();
+    sharing.start(settings);
+  }
+}
+
+/**
  * Builds the window.
  *
  * An ordinary window rather than a tray panel: a person picks a machine, watches it, and comes
@@ -433,6 +488,12 @@ async function captureWindow(path: string): Promise<void> {
 
   app.quit();
 }
+
+// Whenever a window comes forward. That is the moment somebody is about to look at the list
+// of their machines, and the moment they are most likely to have just signed in on another one.
+app.on('browser-window-focus', () => {
+  void catchUp();
+});
 
 void app.whenReady().then(() => {
   settings = loadSettings();

@@ -333,6 +333,17 @@ export interface PrismApi {
   accountState(): Promise<AccountState>;
 
   /**
+   * Registers a listener for the account, which is asked again whenever a window comes forward.
+   *
+   * Somebody who signs in on a second machine expects to see it here without restarting
+   * anything, and the list is the account's to answer rather than this machine's to remember.
+   *
+   * @param {(state: AccountState) => void} listener - Called when the machines change.
+   * @returns {void}
+   */
+  onAccount(listener: (state: AccountState) => void): void;
+
+  /**
    * Asks the server to send a signup code to an address.
    *
    * Nothing is created by this. An account that existed before its address was proved would be
