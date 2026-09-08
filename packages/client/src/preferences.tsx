@@ -421,6 +421,47 @@ export function SharingTerms(): JSX.Element {
     })();
   };
 
+  /**
+   * What has been typed into a field that commits when it loses focus, but has not yet.
+   *
+   * The two text fields wait for focus to leave rather than writing every keystroke, because
+   * the name is also sent to the account and that would be a request per letter. But a sheet
+   * that closes does not blur its fields — it removes them — so without this, everything typed
+   * into one and not tabbed out of goes with it.
+   */
+  const pending = useRef<Partial<Settings>>({});
+
+  /**
+   * Writes whatever is waiting, and forgets it.
+   *
+   * Called both when a field loses focus and when the sheet goes away, so that the two cannot
+   * disagree about what was saved.
+   *
+   * @returns {void}
+   */
+  const flush = useCallback((): void => {
+    const waiting = pending.current;
+    pending.current = {};
+
+    if (Object.keys(waiting).length === 0) {
+      return;
+    }
+
+    // Deliberately not through `save`: this also runs as the sheet is being taken apart, and
+    // a component that sets state on its way out is a warning in the console and nothing else.
+    void prism.setSettings(waiting);
+
+    // The account carries the name every other machine reads, so the one typed here is sent
+    // there too — two names for one machine would be two answers to the same question. A
+    // machine nobody has signed in on has nowhere to send it, and that is not a failure worth
+    // interrupting anybody over.
+    if (waiting.nickname !== undefined && waiting.nickname !== '') {
+      void prism.accountRename(waiting.nickname).catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => flush, [flush]);
+
   return (
     <div className="flex flex-col">
       <Row label="Name">
@@ -431,20 +472,12 @@ export function SharingTerms(): JSX.Element {
           className={WIDE}
           value={settings?.nickname ?? ''}
           onChange={(event) => {
-            setSettings((was) => (was ? { ...was, nickname: event.target.value } : was));
-          }}
-          onBlur={(event) => {
-            const named = event.target.value.trim();
-            save({ nickname: named });
+            const typed = event.target.value;
 
-            // The account carries the name every other machine reads, so the one typed here
-            // is sent there too — two names for one machine would be two answers to the
-            // same question. A machine nobody has signed in on has nowhere to send it, and
-            // that is not a failure worth interrupting anybody over.
-            if (named !== '') {
-              void prism.accountRename(named).catch(() => {});
-            }
+            setSettings((was) => (was ? { ...was, nickname: typed } : was));
+            pending.current = { ...pending.current, nickname: typed.trim() };
           }}
+          onBlur={flush}
         />
       </Row>
       <Row label="Frame rate">
@@ -481,11 +514,12 @@ export function SharingTerms(): JSX.Element {
           className={WIDE}
           value={settings?.bind ?? ''}
           onChange={(event) => {
-            setSettings((was) => (was ? { ...was, bind: event.target.value } : was));
+            const typed = event.target.value;
+
+            setSettings((was) => (was ? { ...was, bind: typed } : was));
+            pending.current = { ...pending.current, bind: typed.trim() };
           }}
-          onBlur={(event) => {
-            save({ bind: event.target.value.trim() });
-          }}
+          onBlur={flush}
         />
       </Row>
     </div>

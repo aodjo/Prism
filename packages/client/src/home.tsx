@@ -591,6 +591,21 @@ function Home(): JSX.Element {
                 </button>
               </div>
               <SharingTerms />
+
+              {/* It says Done rather than Save because nothing here is waiting to be saved: a
+                  figure applies as it is typed. What the button is for is ending the detour,
+                  and having somewhere deliberate to click that is not the corner. */}
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  className="btn-primary-sm"
+                  onClick={() => {
+                    setTerms(false);
+                  }}
+                >
+                  Done
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -819,6 +834,18 @@ function Home(): JSX.Element {
             </div>
 
             <Preferences />
+
+            <div className="flex justify-end border-t border-line-1 px-5 py-4">
+              <button
+                type="button"
+                className="btn-primary-sm"
+                onClick={() => {
+                  setTuning(false);
+                }}
+              >
+                Done
+              </button>
+            </div>
           </div>
         </div>
       )}
