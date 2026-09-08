@@ -26,3 +26,6 @@ packages/client/renderer/setup.js.map
 packages/client/renderer/home.js
 packages/client/renderer/home.js.map
 packages/client/renderer/prism.css
+
+# Scratch snapshots and logs from browser automation, never part of the tree.
+.playwright-mcp/

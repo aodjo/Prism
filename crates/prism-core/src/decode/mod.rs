@@ -142,14 +142,49 @@ pub fn hevc_nal_type(nal: &[u8]) -> Option<u8> {
 /// ```
 #[must_use]
 pub fn h264_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
+    let payload = unescape(sps.get(1..)?);
+    let fields = read_sps(&payload)?;
+
+    (fields.width > 0 && fields.height > 0).then_some((fields.width, fields.height))
+}
+
+/// What a sequence parameter set says, read once and used by everything that asks.
+///
+/// The walk through a set is the same whichever field is wanted, and it is long enough — three
+/// optional blocks and a scaling list — that a second copy of it would be a second copy that
+/// drifts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpsFields {
+    /// Picture width in luma samples, after cropping.
+    pub width: u32,
+    /// Picture height in luma samples, after cropping.
+    pub height: u32,
+    /// How many pictures the stream may hold as references.
+    pub max_num_ref_frames: u32,
+    /// Where `vui_parameters_present_flag` sits, in bits from the start of the payload.
+    ///
+    /// The payload here is the set with its emulation prevention bytes taken out and its NAL
+    /// header dropped, which is what [`unescape`] produces. Everything before this offset can
+    /// be copied to a new set unchanged, which is what makes a set rewritable without
+    /// modelling every field in it.
+    pub vui_flag_at: usize,
+    /// Whether the set already carries video usability information.
+    pub has_vui: bool,
+}
+
+/// Reads a sequence parameter set's payload.
+///
+/// `payload` is the set with its NAL header dropped and its emulation prevention bytes taken
+/// out. Returns nothing if the set ends early or claims something the syntax does not allow,
+/// because reading on from a damaged set produces plausible answers that are wrong.
+pub(crate) fn read_sps(payload: &[u8]) -> Option<SpsFields> {
     /// Profiles that carry the chroma format and bit depths the baseline leaves out.
     const EXTENDED: [u32; 13] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
 
     /// Luma samples across and down one macroblock.
     const MACROBLOCK: u32 = 16;
 
-    let payload = unescape(sps.get(1..)?);
-    let mut bits = BitReader::new(&payload);
+    let mut bits = BitReader::new(payload);
 
     let profile = bits.bits(8)?;
     bits.bits(8)?;
@@ -202,7 +237,7 @@ pub fn h264_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
         _ => {}
     }
 
-    bits.ue()?;
+    let max_num_ref_frames = bits.ue()?;
     bits.flag()?;
 
     let across = bits.ue()?.checked_add(1)?;
@@ -239,7 +274,16 @@ pub fn h264_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
         height = height.checked_sub(top.checked_add(bottom)?.checked_mul(down_unit)?)?;
     }
 
-    (width > 0 && height > 0).then_some((width, height))
+    let vui_flag_at = bits.position();
+    let has_vui = bits.flag()?;
+
+    Some(SpsFields {
+        width,
+        height,
+        max_num_ref_frames,
+        vui_flag_at,
+        has_vui,
+    })
 }
 
 /// Removes the emulation prevention bytes a bitstream carries.
@@ -247,7 +291,7 @@ pub fn h264_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
 /// A `0x03` after two zero bytes is there so the payload cannot contain a start code, and it
 /// is not part of what the syntax describes. Reading the syntax without taking them out lands
 /// three bits off for the rest of the set.
-fn unescape(payload: &[u8]) -> Vec<u8> {
+pub(crate) fn unescape(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len());
     let mut zeros = 0;
 
@@ -265,15 +309,23 @@ fn unescape(payload: &[u8]) -> Vec<u8> {
 }
 
 /// Reads the bit-packed syntax a parameter set is written in.
-struct BitReader<'a> {
+pub(crate) struct BitReader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
 impl<'a> BitReader<'a> {
     /// Starts at the first bit.
-    const fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, at: 0 }
+    }
+
+    /// How many bits have been read.
+    ///
+    /// What makes a set rewritable: everything up to a given field can be copied verbatim
+    /// without the copier having to know what any of it means.
+    pub(crate) const fn position(&self) -> usize {
+        self.at
     }
 
     /// Reads one bit, or nothing when the stream has run out.
@@ -286,12 +338,12 @@ impl<'a> BitReader<'a> {
     }
 
     /// Reads a flag.
-    fn flag(&mut self) -> Option<bool> {
+    pub(crate) fn flag(&mut self) -> Option<bool> {
         self.bit().map(|bit| bit == 1)
     }
 
     /// Reads a fixed-width unsigned field, most significant bit first.
-    fn bits(&mut self, count: u32) -> Option<u32> {
+    pub(crate) fn bits(&mut self, count: u32) -> Option<u32> {
         let mut value = 0u32;
 
         for _ in 0..count {
@@ -305,7 +357,7 @@ impl<'a> BitReader<'a> {
     ///
     /// Refuses anything wider than thirty-two bits rather than wrapping: a set that claims one
     /// is damaged, and reading on from a damaged set produces a plausible size that is wrong.
-    fn ue(&mut self) -> Option<u32> {
+    pub(crate) fn ue(&mut self) -> Option<u32> {
         let mut leading = 0u32;
 
         while self.bit()? == 0 {

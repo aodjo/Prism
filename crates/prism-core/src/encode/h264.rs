@@ -246,12 +246,12 @@ impl Sps {
         w.bits(self.fps.max(1) * 2, 32);
         w.flag(true);
 
-        // Neither hardware reference decoder model is described, so no picture timing is sent
-        // and no bitstream restriction is claimed.
+        // Neither hardware reference decoder model is described, so no picture timing is sent.
         w.flag(false);
         w.flag(false);
         w.flag(false);
-        w.flag(false);
+
+        write_bitstream_restriction(&mut w, self.max_ref_frames);
 
         let mut nal = START_CODE.to_vec();
         nal.extend_from_slice(&w.finish());
@@ -324,9 +324,137 @@ impl Pps {
     }
 }
 
+/// The NAL unit type of a sequence parameter set.
+const NAL_SPS: u8 = 7;
+
+/// Rewrites a sequence parameter set so it says the stream never reorders pictures.
+///
+/// # Why a stream has to say this out loud
+///
+/// A decoder may not hand back a picture until it is sure no earlier one is still to come. How
+/// long it must wait is not something it can see from the pictures — it is a property of the
+/// stream, declared in the sequence parameter set's video usability information as
+/// `max_num_reorder_frames`. **A set that does not declare it forces the decoder to assume the
+/// worst the level allows**, which for the levels used here is many frames.
+///
+/// VideoToolbox writes no such information at all: its sets end at
+/// `vui_parameters_present_flag`, which it leaves at zero. Measured against Media Foundation,
+/// that costs about five frames — eighty milliseconds at sixty a second, against a whole budget
+/// of twenty-five — for a stream that has nothing to reorder, since the encoder is configured
+/// with no B-frames. VideoToolbox's own decoder happens not to wait; that is a kindness of one
+/// implementation rather than something the stream has earned.
+///
+/// So the missing sentence is added: the set is copied bit for bit up to the flag, the flag is
+/// turned on, and the smallest usable video usability information is written after it.
+///
+/// Returns `None` if the set is not one, cannot be read, or already carries video usability
+/// information — the last because a set that says something already is a set whose author knew
+/// what it meant, and rewriting it would mean modelling everything it might contain.
+#[must_use]
+pub fn declare_no_reordering(sps: &[u8]) -> Option<Vec<u8>> {
+    use crate::decode::{BitReader, read_sps, unescape};
+
+    let header = *sps.first()?;
+    if header & 0x1f != NAL_SPS {
+        return None;
+    }
+
+    let payload = unescape(sps.get(1..)?);
+    let fields = read_sps(&payload)?;
+
+    if fields.has_vui {
+        return None;
+    }
+
+    let mut w = BitWriter::new();
+
+    // Copied rather than re-encoded. What comes before the flag is the encoder's own choices
+    // about frame numbering, reference counts and cropping, and re-stating them from a parsed
+    // model is how a set stops agreeing with the slices that follow it.
+    let mut copy = BitReader::new(&payload);
+    for _ in 0..fields.vui_flag_at {
+        w.flag(copy.flag()?);
+    }
+
+    w.flag(true);
+    write_no_reorder_vui(&mut w, fields.max_num_ref_frames);
+
+    let mut nal = vec![header];
+    nal.extend_from_slice(&escape(&w.finish()));
+
+    Some(nal)
+}
+
+/// Writes video usability information that says only that nothing is reordered.
+///
+/// Every optional block is left out. What is wanted is one field, and the fewer of its
+/// neighbours are stated the fewer there are to state wrongly.
+fn write_no_reorder_vui(w: &mut BitWriter, max_num_ref_frames: u32) {
+    // aspect_ratio_info, overscan_info, video_signal_type, chroma_loc_info, timing_info,
+    // nal_hrd, vcl_hrd, pic_struct — none of them present.
+    for _ in 0..8 {
+        w.flag(false);
+    }
+
+    write_bitstream_restriction(w, max_num_ref_frames);
+}
+
+/// Writes the part of the video usability information that says nothing is reordered.
+///
+/// The one field that matters here is `max_num_reorder_frames`, and a decoder reads the block
+/// positionally, so its neighbours have to be written whether or not they say anything.
+///
+/// Every encoder this project drives is configured without B-frames, so every picture is
+/// finished when it arrives and none of them wait for another. Saying so is what lets a decoder
+/// hand each one over immediately instead of holding as many as the level allows.
+fn write_bitstream_restriction(w: &mut BitWriter, max_num_ref_frames: u32) {
+    /// How far a motion vector may reach, as a log2 in quarter samples.
+    ///
+    /// The largest the syntax allows, which is what a stream says when it does not wish to
+    /// constrain itself. Claiming less than the encoder actually used would be a lie a decoder
+    /// is entitled to act on.
+    const MAX_MV_LOG2: u32 = 15;
+
+    w.flag(true); // bitstream_restriction_flag
+    w.flag(true); // motion_vectors_over_pic_boundaries_flag, which is the default when absent
+    w.ue(0); // max_bytes_per_pic_denom, meaning unconstrained
+    w.ue(0); // max_bits_per_mb_denom, meaning unconstrained
+    w.ue(MAX_MV_LOG2);
+    w.ue(MAX_MV_LOG2);
+
+    // The sentence this whole block exists to say.
+    w.ue(0);
+
+    // And how many pictures the decoder must be able to hold, which may not be fewer than
+    // either the reordering depth or the reference count.
+    w.ue(max_num_ref_frames);
+}
+
+/// Puts back the emulation prevention bytes a payload needs to survive as a NAL unit.
+///
+/// Two zero bytes followed by anything below four would otherwise read as a start code, or as
+/// an escape that is not there. The inserted `0x03` is removed again by whoever reads the
+/// syntax, which is what [`crate::decode`] does on the way in.
+fn escape(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + payload.len() / 64);
+    let mut zeros = 0usize;
+
+    for &byte in payload {
+        if zeros >= 2 && byte <= 3 {
+            out.push(3);
+            zeros = 0;
+        }
+
+        out.push(byte);
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BitWriter, Pps, Sps};
+    use super::{BitWriter, Pps, Sps, declare_no_reordering, escape};
 
     #[test]
     fn bits_are_written_most_significant_first() {
@@ -437,6 +565,169 @@ mod tests {
 
         assert_eq!(sps.macroblocks(), (80, 45));
         assert_eq!(sps.crop_rows(), 0);
+    }
+
+    /// A sequence parameter set as VideoToolbox actually writes one, captured from this
+    /// project's own encoder at 1280x720. Ten bytes, ending at `vui_parameters_present_flag`
+    /// with nothing after it — which is the whole reason `declare_no_reordering` exists.
+    const VIDEOTOOLBOX_SPS: [u8; 10] = [0x27, 0x64, 0x00, 0x20, 0xac, 0x56, 0x80, 0x50, 0x05, 0xb9];
+
+    /// Reads `max_num_reorder_frames` out of a set that carries a bitstream restriction.
+    ///
+    /// Written out longhand rather than reusing the encoder's own writer, so that a mistake in
+    /// the writer cannot agree with itself and pass.
+    fn reorder_depth(nal: &[u8]) -> Option<u32> {
+        let payload = crate::decode::unescape(&nal[1..]);
+        let fields = crate::decode::read_sps(&payload)?;
+
+        if !fields.has_vui {
+            return None;
+        }
+
+        let mut bits = crate::decode::BitReader::new(&payload);
+        for _ in 0..=fields.vui_flag_at {
+            bits.flag()?;
+        }
+
+        if bits.flag()? {
+            bits.bits(8)?; // aspect_ratio_idc
+        }
+        for _ in 0..3 {
+            // overscan, video signal type, chroma location — each absent in what is written
+            // here, and each a flag that has to be stepped over regardless.
+            if bits.flag()? {
+                return None;
+            }
+        }
+        if bits.flag()? {
+            bits.bits(32)?;
+            bits.bits(32)?;
+            bits.flag()?;
+        }
+        for _ in 0..3 {
+            if bits.flag()? {
+                return None;
+            }
+        }
+
+        bits.flag()?.then_some(())?; // bitstream_restriction_flag
+        bits.flag()?; // motion_vectors_over_pic_boundaries_flag
+        bits.ue()?;
+        bits.ue()?;
+        bits.ue()?;
+        bits.ue()?;
+
+        bits.ue()
+    }
+
+    #[test]
+    fn videotoolbox_writes_no_video_usability_information_at_all() {
+        // The finding this change is built on. If a future VideoToolbox starts writing one,
+        // this test says so and `declare_no_reordering` steps aside on its own.
+        let payload = crate::decode::unescape(&VIDEOTOOLBOX_SPS[1..]);
+        let fields = crate::decode::read_sps(&payload).expect("a readable set");
+
+        assert!(!fields.has_vui, "the captured set should carry none");
+        assert_eq!((fields.width, fields.height), (1280, 720));
+        assert_eq!(fields.max_num_ref_frames, 1);
+    }
+
+    #[test]
+    fn a_set_without_the_information_gains_it_and_keeps_everything_else() {
+        let after = declare_no_reordering(&VIDEOTOOLBOX_SPS).expect("rewritable");
+
+        assert_eq!(after[0], VIDEOTOOLBOX_SPS[0], "the NAL header is untouched");
+        assert_eq!(
+            crate::decode::h264_dimensions(&after),
+            Some((1280, 720)),
+            "the picture size has to survive the rewrite"
+        );
+        assert_eq!(
+            reorder_depth(&after),
+            Some(0),
+            "the rewritten set should say it never reorders"
+        );
+    }
+
+    #[test]
+    fn the_set_this_project_writes_itself_already_says_it() {
+        // The VAAPI host writes its own sets, and they carried the same silence until now.
+        for (width, height) in [(1280, 720), (1920, 1080), (2560, 1440)] {
+            let nal = Sps {
+                width,
+                height,
+                fps: 60,
+                max_ref_frames: 1,
+            }
+            .to_nal();
+
+            assert_eq!(
+                reorder_depth(&nal[4..]),
+                Some(0),
+                "{width}x{height} should declare no reordering"
+            );
+            assert_eq!(
+                crate::decode::h264_dimensions(&nal[4..]),
+                Some((width, height)),
+                "{width}x{height} should still read back"
+            );
+        }
+    }
+
+    #[test]
+    fn a_set_that_already_says_it_is_left_alone() {
+        let ours = Sps {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            max_ref_frames: 1,
+        }
+        .to_nal();
+
+        assert_eq!(
+            declare_no_reordering(&ours[4..]),
+            None,
+            "a set that carries the information should not be rewritten"
+        );
+
+        let once = declare_no_reordering(&VIDEOTOOLBOX_SPS).expect("the first pass adds one");
+        assert_eq!(
+            declare_no_reordering(&once),
+            None,
+            "and rewriting one twice should do nothing the second time"
+        );
+    }
+
+    #[test]
+    fn anything_that_is_not_a_sequence_parameter_set_is_refused() {
+        let pps = Pps::default().to_nal();
+
+        assert_eq!(declare_no_reordering(&pps[4..]), None);
+        assert_eq!(declare_no_reordering(&[]), None);
+        // A set whose payload stops in the middle of a field.
+        assert_eq!(declare_no_reordering(&[0x67, 0x64]), None);
+    }
+
+    #[test]
+    fn a_start_code_cannot_appear_inside_a_rewritten_set() {
+        // What the emulation prevention bytes are for. A set carrying three zero bytes would
+        // be split by whoever scans for start codes, and the half that survived would be read
+        // as a different set.
+        let escaped = escape(&[0, 0, 0, 1, 0, 0, 1, 0, 0, 2, 0, 0, 3]);
+
+        for window in escaped.windows(3) {
+            assert!(
+                window != [0, 0, 0] && window != [0, 0, 1],
+                "escaped payload still contains a start code: {escaped:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn escaping_leaves_a_payload_that_needs_nothing_alone() {
+        let plain = [0x64, 0x00, 0x20, 0xac, 0x56, 0x80];
+
+        assert_eq!(escape(&plain), plain);
     }
 
     #[test]

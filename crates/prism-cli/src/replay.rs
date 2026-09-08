@@ -43,6 +43,18 @@ struct Report {
     refused: u32,
     /// The size of the first picture, once there is one.
     size: Option<(u32, u32)>,
+    /// How many frames went in before the first one came out.
+    ///
+    /// This is the decoder's reordering depth, measured rather than asked about, and it is the
+    /// delay that no amount of network tuning gets back: at sixty frames a second every frame
+    /// of it is sixteen milliseconds. One means the decoder hands each picture over as it
+    /// arrives; more means it is holding some back in case an earlier picture is still to come.
+    ///
+    /// What decides it is the stream, not the decoder — a sequence parameter set that does not
+    /// say `max_num_reorder_frames` leaves a decoder no choice but to assume the worst its
+    /// level allows. Which makes this the number to watch when changing what the encoder
+    /// declares.
+    reorder_depth: Option<u32>,
 }
 
 /// Decodes a recorded bitstream and reports what came out.
@@ -113,6 +125,10 @@ pub fn run(path: &Path, codec: Option<Codec>, verify: bool) -> Result<(), Box<dy
         for picture in ready {
             report.decoded += 1;
             report.size.get_or_insert((picture.width, picture.height));
+            // How many frames had gone in by the time the first came out, which is the depth
+            // the decoder decided to hold. Recorded once, because after the pipeline has
+            // filled every later frame comes out one submission behind whatever it started at.
+            report.reorder_depth.get_or_insert(report.submitted);
 
             if verify {
                 picture.copy_luma(&mut luma)?;
@@ -157,6 +173,15 @@ pub fn run(path: &Path, codec: Option<Codec>, verify: bool) -> Result<(), Box<dy
 
     if let Some((width, height)) = report.size {
         println!("replay: pictures are {width} x {height}");
+    }
+
+    if let Some(depth) = report.reorder_depth {
+        println!(
+            "replay: the first picture came out after {depth} frame{}, which is {:.1} ms of \
+             reordering at 60 fps",
+            if depth == 1 { "" } else { "s" },
+            f64::from(depth.saturating_sub(1)) * 1000.0 / 60.0,
+        );
     }
 
     println!(
