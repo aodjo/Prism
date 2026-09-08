@@ -4,11 +4,20 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./src/index.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./holder": "./dist/holder.js",
-    "./stored-session": "./dist/stored-session.js"
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./holder": {
+      "types": "./src/holder.ts",
+      "default": "./dist/holder.js"
+    },
+    "./stored-session": {
+      "types": "./src/stored-session.ts",
+      "default": "./dist/stored-session.js"
+    }
   },
   "files": [
     "dist"
