@@ -43,8 +43,27 @@ const STEPS = [
 
 type Step = (typeof STEPS)[number];
 
-/** The screens that are counted. The welcome screen comes before the count starts. */
-const COUNTED = STEPS.slice(1);
+/**
+ * What the dots count, which is screens rather than stages.
+ *
+ * The account stage is not one screen: it is a form, an address to prove, a second factor to
+ * set up and then to try, and a greeting. A single dot standing still through all five reads
+ * as a flow that has stopped, so each of them gets its own.
+ */
+type Marker =
+  | 'account'
+  | 'account:prove'
+  | 'account:enrol'
+  | 'account:code'
+  | 'account:done'
+  | 'intro'
+  | 'permissions'
+  | 'device'
+  | 'connecting'
+  | 'ready';
+
+/** Everything after the account stage, which is one screen each. */
+const AFTER: readonly Marker[] = ['intro', 'permissions', 'device', 'connecting', 'ready'];
 
 /**
  * The screens that offer a Continue rather than doing something else with the bottom right.
@@ -146,28 +165,17 @@ const SCREEN = 'flex flex-col items-center text-center';
  * @param {number} props.of - How many there are.
  * @returns {JSX.Element} The dots.
  */
-function Steps({ at, of, within }: { at: number; of: number; within: number }): JSX.Element {
+function Steps({ at, of }: { at: number; of: number }): JSX.Element {
   return (
     <div className="flex h-1.5 items-center gap-[7px]">
       {Array.from({ length: of }, (_, index) => (
         <span
           // A fixed run that never reorders: position is what identifies one of these.
           key={index}
-          className={`block h-1.5 overflow-hidden rounded-full transition-all duration-300 ${
-            index === at ? 'w-[18px] bg-[rgba(255,255,255,0.26)]' : 'w-1.5 bg-white opacity-[0.18]'
+          className={`block h-1.5 rounded-full bg-white transition-all duration-300 ${
+            index === at ? 'w-[18px] opacity-90' : 'w-1.5 opacity-[0.18]'
           }`}
-        >
-          {/* The one being stood on fills as the screens inside it go by. A step that holds
-              five screens and never moves reads as a flow that has stopped, and dividing it
-              into five dots of its own would answer that by making the whole thing look twice
-              as long as it is. */}
-          {index === at && (
-            <span
-              className="block h-full rounded-full bg-white transition-[width] duration-300 ease-out"
-              style={{ width: `${Math.round(Math.min(Math.max(within, 0), 1) * 100)}%` }}
-            />
-          )}
-        </span>
+        />
       ))}
     </div>
   );
@@ -1169,35 +1177,53 @@ function Setup(): JSX.Element {
     </>
   );
 
-  const shownSteps = COUNTED.filter((which) => !answered(which));
-  const counted = shownSteps.indexOf(step as (typeof COUNTED)[number]);
-
   /**
-   * How far through the step being stood on somebody is.
+   * Every screen this run will show, decided by the path rather than discovered as it goes.
    *
-   * Only the account step has anything inside it — a form, an address to prove, a second
-   * factor to set up and then to try — so every other step is simply whole.
+   * Somebody signed in already never sees the account stage at all. Somebody signing in sees
+   * three of its screens and somebody creating an account sees five — a choice they made on
+   * the welcome screen, before any of these dots are drawn, so the count is settled by the
+   * time anybody can read it.
    */
-  const within = (():number => {
+  // Not `joining` on its own: that flag doubles as which form is showing, and the button
+  // under the second factor turns it off so the screen after it signs in. Reading it here
+  // would shorten the row of dots halfway through, which is the one thing a count of what is
+  // left must never do.
+  const creating = joining || justEnrolled;
+
+  const shownSteps: readonly Marker[] = arrivedSignedIn
+    ? AFTER
+    : creating
+      ? ['account', 'account:prove', 'account:enrol', 'account:code', 'account:done', ...AFTER]
+      : ['account', 'account:code', 'account:done', ...AFTER];
+
+  /** Which of them is on screen. */
+  const marker = ((): Marker | null => {
+    if (step === 'welcome') {
+      return null;
+    }
+
     if (step !== 'account') {
-      return 1;
+      return step;
     }
 
     if (greeted) {
-      return 1;
+      return 'account:done';
     }
     if (askingCode) {
-      return joining ? 0.8 : 0.55;
+      return 'account:code';
     }
     if (enrolment) {
-      return 0.6;
+      return 'account:enrol';
     }
     if (proving) {
-      return 0.35;
+      return 'account:prove';
     }
 
-    return 0.1;
+    return 'account';
   })();
+
+  const counted = marker === null ? -1 : shownSteps.indexOf(marker);
 
   return (
     <>
@@ -1261,11 +1287,7 @@ function Setup(): JSX.Element {
           key={`nav-${step}`}
           className="flex h-14 flex-none animate-[fade-in_420ms_ease-out_both] items-center justify-between"
         >
-          {counted >= 0 ? (
-            <Steps at={counted} of={shownSteps.length} within={within} />
-          ) : (
-            <span />
-          )}
+          {counted >= 0 ? <Steps at={counted} of={shownSteps.length} /> : <span />}
           {step === 'welcome' && (
             <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>
           )}
