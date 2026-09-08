@@ -17,5 +17,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/setup.tsx", "src/home.tsx", "src/panel.tsx", "src/api.d.ts"]
+  "include": ["src/setup.tsx", "src/home.tsx", "src/panel.tsx", "src/bridge.ts", "src/api.d.ts"]
 }

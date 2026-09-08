@@ -31,7 +31,7 @@ import type {
 
 declare global {
   interface Window {
-    prism: PrismApi;
+    readonly prism: PrismApi;
     /** Tauri's own injection, present only when this page is running inside the Tauri shell. */
     readonly __TAURI_INTERNALS__?: {
       invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -99,11 +99,16 @@ export function installBridge(): void {
 
   const api: PrismApi = {
     // ── Ported: these are calls into prism-core with nothing in between ──────────────────
-    identity: async (): Promise<Identity> => ({
-      version: await call<string>('version'),
-      wireFormat: await call<number>('wire_format_version'),
-      publicKey: await call<string>('identity_public_key'),
-    }),
+    identity: async (): Promise<Identity> => {
+      const [version, wireFormat, publicKey, hosts] = await Promise.all([
+        call<string>('version'),
+        call<number>('wire_format_version'),
+        call<string>('identity_public_key'),
+        call<string[]>('paired_peers'),
+      ]);
+
+      return { version, wireFormat, publicKey, hosts };
+    },
 
     getSettings: (): Promise<Settings> => call<Settings>('get_settings'),
 
@@ -134,9 +139,9 @@ export function installBridge(): void {
 
     fit: (): void => {},
 
-    connect: (): Promise<void> => Promise.reject(NOT_YET('stream:connect')),
+    connect: (): Promise<StreamState> => Promise.reject(NOT_YET('stream:connect')),
 
-    disconnect: (): Promise<void> => Promise.reject(NOT_YET('stream:disconnect')),
+    disconnect: (): Promise<StreamState> => Promise.reject(NOT_YET('stream:disconnect')),
 
     streamState: (): Promise<StreamState> => Promise.resolve(NO_STREAM),
 
@@ -146,7 +151,7 @@ export function installBridge(): void {
 
     onSessions: (): void => {},
 
-    rendezvousServers: (): Promise<readonly RendezvousServer[]> => Promise.resolve([]),
+    rendezvousServers: (): Promise<RendezvousServer[]> => Promise.resolve([]),
 
     accountState: (): Promise<AccountState> => Promise.resolve(NO_ACCOUNT),
 
@@ -167,7 +172,9 @@ export function installBridge(): void {
       Promise.reject(NOT_YET('account:forgetDevice')),
   };
 
-  window.prism = api;
+  // `readonly` on the declaration is what stops a window reassigning the surface it talks to.
+  // This is the one place that installs it, and the shell that does so is not the window.
+  (window as { prism: PrismApi }).prism = api;
 }
 
 // Installed as a side effect, and loaded by the page as a classic script rather than a module,
