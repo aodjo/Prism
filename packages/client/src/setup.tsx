@@ -1,10 +1,14 @@
 /**
  * The setup flow.
  *
- * Six screens in one window, shown once. Everything on them is real: the permissions are the
- * ones this machine actually holds, the code pairs, the connection is a connection, and the
- * numbers on the last screen came off the stream. A flow that showed a plausible picture
- * instead would be a flow that passes when the thing behind it is broken.
+ * Five screens in one window, shown once. Everything on them is real: the account is really
+ * made, the codes are really checked, and the permissions are the ones this machine actually
+ * holds. A flow that showed a plausible picture instead would be one that passes when the
+ * thing behind it is broken.
+ *
+ * It stops at being set up. Connecting to another machine is not part of it — there is no
+ * other machine yet on the first run, and offering to reach one before any exists is a screen
+ * that can only ever be empty.
  */
 
 import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
@@ -12,14 +16,11 @@ import type { CSSProperties, JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import type {
-  AccountDeviceView,
   AccountEnrolmentView,
   HostPermissions,
   PrismApi,
   Settings,
-  StreamState,
 } from './api.js';
-import { latency } from './format.js';
 import { Backdrop, Primary, STEP_SKY, Trouble, WELCOME_SKY, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -31,15 +32,7 @@ declare global {
 const prism = window.prism;
 
 /** The screens, in the order somebody sees them. */
-const STEPS = [
-  'welcome',
-  'account',
-  'intro',
-  'permissions',
-  'device',
-  'connecting',
-  'ready',
-] as const;
+const STEPS = ['welcome', 'account', 'intro', 'permissions', 'ready'] as const;
 
 type Step = (typeof STEPS)[number];
 
@@ -58,12 +51,10 @@ type Marker =
   | 'account:done'
   | 'intro'
   | 'permissions'
-  | 'device'
-  | 'connecting'
   | 'ready';
 
 /** Everything after the account stage, which is one screen each. */
-const AFTER: readonly Marker[] = ['intro', 'permissions', 'device', 'connecting', 'ready'];
+const AFTER: readonly Marker[] = ['intro', 'permissions', 'ready'];
 
 /**
  * The screens that offer a Continue rather than doing something else with the bottom right.
@@ -236,99 +227,6 @@ function PrismArt(): JSX.Element {
   );
 }
 
-/* ── 05 · Connecting ──────────────────────────────────────────────────────────────────── */
-
-/**
- * The rings that travel outward while a connection is being made.
- *
- * The only motion in the flow, and it is here because this is the only screen that is waiting
- * for something.
- *
- * @returns {JSX.Element} The illustration.
- */
-function Pulse(): JSX.Element {
-  return (
-    <div className="relative size-[320px]">
-      <img
-        src="assets/ring-1.svg"
-        alt=""
-        className="absolute left-0 top-0 block size-[320px] origin-center animate-[ripple_3s_ease-out_infinite_0.8s]"
-      />
-      <img
-        src="assets/ring-2.svg"
-        alt=""
-        className="absolute left-10 top-10 block size-[240px] origin-center animate-[ripple_3s_ease-out_infinite_0.4s]"
-      />
-      <img
-        src="assets/ring-3.svg"
-        alt=""
-        className="absolute left-[78px] top-[78px] block size-[164px] origin-center animate-[ripple_3s_ease-out_infinite]"
-      />
-      <div className="absolute left-[60px] top-[60px] size-[200px] mix-blend-screen">
-        <img
-          src="assets/core-glow.svg"
-          alt=""
-          className="absolute inset-[-27.5%] block max-w-none"
-        />
-      </div>
-      {/* The wordmark's own triangle, at the size this screen gives it. The same file the top
-          left corner uses: a mark rendered larger is still the mark, and drawing a second one
-          for this spot is how two versions of a logo start to drift apart. */}
-      <img
-        src="assets/mark.svg"
-        alt=""
-        className="absolute left-[126px] top-[132px] block h-[58.1px] w-[68px]"
-      />
-    </div>
-  );
-}
-
-/** How far along one of the three things a connection does has got. */
-type StageState = 'waiting' | 'doing' | 'done';
-
-/**
- * One line of the connection's progress.
- *
- * @param {object} props - What to draw.
- * @param {StageState} props.state - How far along it is.
- * @param {string} props.what - What it is.
- * @param {string} props.detail - What it settled on, once it has.
- * @returns {JSX.Element} The row.
- */
-function Stage({
-  state,
-  what,
-  detail,
-}: {
-  state: StageState;
-  what: string;
-  detail: string;
-}): JSX.Element {
-  return (
-    <div className="flex items-center gap-3 px-[18px] py-3.5 not-first:border-t not-first:border-wash-3">
-      {/* A dashed ring rather than a spinner: it says this one is open without implying a
-          proportion of it is finished, which nothing here can honestly report. */}
-      <span
-        className={
-          state === 'done'
-            ? 'flex size-5 flex-none items-center justify-center rounded-pill bg-[rgba(77,232,176,0.16)] text-tiny font-medium text-mint'
-            : state === 'doing'
-              ? 'size-5 flex-none rounded-pill border-2 border-dashed border-[rgba(124,92,255,0.85)]'
-              : 'size-5 flex-none rounded-pill border-2 border-line-4'
-        }
-      >
-        {state === 'done' ? '✓' : ''}
-      </span>
-      <span
-        className={`text-ui font-medium ${state === 'doing' ? 'text-ink' : 'text-ink-3'}`}
-      >
-        {what}
-      </span>
-      <span className="ml-auto text-fine-2 text-dim">{detail}</span>
-    </div>
-  );
-}
-
 /* ── The flow ─────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -344,19 +242,7 @@ function Setup(): JSX.Element {
   const [back, setBack] = useState(false);
   const [version, setVersion] = useState('');
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
-  const [known, setKnown] = useState<readonly string[]>([]);
   const [held, setHeld] = useState<HostPermissions | null>(null);
-  const [stream, setStream] = useState<StreamState>({
-    phase: 'idle',
-    host: null,
-    terms: null,
-    stats: null,
-    log: [],
-  });
-  const [target, setTarget] = useState<string | null>(null);
-  const [connectError, setConnectError] = useState<string | null>(null);
-
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -431,18 +317,6 @@ function Setup(): JSX.Element {
   const [arrivedSignedIn, setArrivedSignedIn] = useState(false);
   const [accountTrouble, setAccountTrouble] = useState<string | null>(null);
 
-  /**
-   * Returns what to call a machine.
-   *
-   * The account is asked first, because a person named their machines and a public key is what
-   * is left when nobody has.
-   */
-  const machineName = useCallback(
-    (key: string): string =>
-      devices.find((device) => device.publicKey === key)?.label || short(key),
-    [devices],
-  );
-
   useEffect(() => {
     void (async () => {
       const [identity, account, stored] = await Promise.all([
@@ -453,34 +327,10 @@ function Setup(): JSX.Element {
 
       setVersion(identity.version);
       setSettings(stored);
-      setDevices(account.devices);
       setSignedIn(account.email);
       setArrivedSignedIn(account.email !== null);
-
-      // The account's machines, and only those. A machine is reachable from here because it
-      // is on the same account, which is the only way one becomes reachable at all.
-      setKnown(
-        account.devices
-          .map((device) => device.publicKey)
-          .filter((key) => key !== identity.publicKey),
-      );
     })();
   }, []);
-
-  useEffect(() => {
-    prism.onStream(setStream);
-  }, []);
-
-  // The last screen is reached by the connection working, not by anybody pressing anything.
-  useEffect(() => {
-    if (step === 'connecting' && stream.phase === 'streaming' && (stream.stats?.frames ?? 0) > 0) {
-      go('ready');
-    }
-
-    if (step === 'connecting' && stream.phase === 'failed' && stream.log.length > 0) {
-      setConnectError(stream.log.slice(-6).join('\n'));
-    }
-  }, [step, stream]);
 
   useEffect(() => {
     if (step !== 'permissions') {
@@ -559,12 +409,6 @@ function Setup(): JSX.Element {
         );
 
         setSignedIn(state.email);
-        setDevices(state.devices);
-        setKnown((was) =>
-          [...new Set([...state.devices.map((device) => device.publicKey), ...was])].filter(
-            (key) => key !== state.publicKey,
-          ),
-        );
         setPassed(true);
         await new Promise((settled) => setTimeout(settled, SUCCESS_HOLD_MS));
 
@@ -645,21 +489,6 @@ function Setup(): JSX.Element {
         setWorking(false);
       }
     })();
-  };
-
-  /**
-   * Opens a stream onto a machine.
-   */
-  const open = async (host: string, where: string): Promise<void> => {
-    setConnectError(null);
-    setTarget(host);
-    go('connecting');
-
-    try {
-      setStream(await prism.connect(host, where));
-    } catch (error) {
-      setConnectError(reason(error));
-    }
   };
 
   useEffect(() => {
@@ -1009,164 +838,52 @@ function Setup(): JSX.Element {
         </section>
       )}
 
-      {which === 'device' && (
-        <section className={cls}>
-          <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-            Your machines
-          </h2>
-          <p className="mt-3.5 max-w-[min(580px,40.3vw)] text-body-2 text-muted">
-            Install PRISM on the machine you want to reach, sign in to the same account, and
-            press Share on it. It appears here.
-          </p>
-
-          <div className="mt-11 flex w-[min(620px,43.1vw)] flex-col gap-2.5 text-left">
-            {known.length === 0 ? (
-              <div className="py-[18px] text-center text-note text-dim">
-                Nothing yet — the next machine you sign in on shows up here
-              </div>
-            ) : (
-              known.map((key) => {
-                const where = settings?.addresses[key] ?? '';
-
-                return (
-                  <div
-                    key={key}
-                    className="flex items-center gap-3.5 rounded-panel border border-line-2 bg-wash-1 py-3.5 pr-3.5 pl-[18px]"
-                  >
-                    <img
-                      src={where ? 'assets/status-live-04.svg' : 'assets/status-idle-04.svg'}
-                      alt=""
-                      className="block size-2 flex-none overflow-visible"
-                    />
-                    <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
-                      <span className="text-row font-medium">{machineName(key)}</span>
-                      <span className="text-fine-2 leading-tight text-muted-2">
-                        {where || 'through the rendezvous server'}
-                      </span>
-                    </span>
-                    <button
-                      type="button"
-                      className="btn-secondary no-drag"
-                      onClick={() => {
-                        void open(key, where);
-                      }}
-                    >
-                      Connect
-                    </button>
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          {/* A second machine may not be to hand yet, and nothing else in the flow is waiting
-              on one. This is a step to come back to rather than a way out of setup. */}
-          <button type="button" className="btn-ghost no-drag mt-7" onClick={finish}>
-            Not now
-          </button>
-        </section>
-      )}
-
-      {which === 'connecting' && (
-        <section className={cls}>
-          <Pulse />
-          <h2 className="mt-5 max-w-[min(700px,48.6vw)] text-title font-semibold">
-            Connecting to {machineName(target ?? '')}
-          </h2>
-          <p className="mt-2.5 whitespace-pre-wrap text-fine text-muted-2">
-            {settings?.addresses[target ?? '']
-              ? `${settings.addresses[target ?? '']}  ·  direct on your LAN  ·  no relay`
-              : 'through the rendezvous server'}
-          </p>
-          <div className="mt-[59px] w-[min(500px,34.7vw)] overflow-hidden rounded-panel border border-line-2 bg-wash-1 text-left">
-            <Stage
-              state={stream.terms !== null || stream.phase === 'streaming' ? 'done' : 'doing'}
-              what="Secure handshake"
-              detail="Ed25519"
-            />
-            <Stage
-              state={
-                stream.terms !== null
-                  ? 'done'
-                  : stream.phase === 'streaming'
-                    ? 'doing'
-                    : 'waiting'
-              }
-              what="Negotiating codec"
-              detail={
-                stream.terms
-                  ? stream.stats
-                    ? `${stream.terms.codec} · ${stream.stats.mbps.toFixed(0)} Mbps`
-                    : stream.terms.codec
-                  : '—'
-              }
-            />
-            <Stage
-              state={
-                (stream.stats?.frames ?? 0) > 0
-                  ? 'done'
-                  : stream.terms !== null
-                    ? 'doing'
-                    : 'waiting'
-              }
-              what="Opening video stream"
-              detail={
-                stream.terms
-                  ? stream.terms.width
-                    ? `${stream.terms.width} × ${stream.terms.height} @ ${stream.terms.fps} Hz`
-                    : `the host's screen @ ${stream.terms.fps} Hz`
-                  : '—'
-              }
-            />
-          </div>
-          <button
-            type="button"
-            className="btn-ghost no-drag mt-[22px]"
-            onClick={() => {
-              void (async () => {
-                setStream(await prism.disconnect());
-                go('device');
-              })();
-            }}
-          >
-            Cancel
-          </button>
-          <Trouble message={connectError} className="mt-4" />
-        </section>
-      )}
-
       {which === 'ready' && (
         <section className={cls}>
           <span className="inline-flex items-center gap-2 rounded-pill border border-[rgba(77,232,176,0.24)] bg-[rgba(77,232,176,0.12)] py-2 pr-4 pl-3.5 text-note-2 font-medium tracking-[0.3px] text-mint">
             <img src="assets/dot-ready.svg" alt="" className="block size-[7px] overflow-visible" />
-            Connected
+            Ready
           </span>
           <h2 className="mt-[19px] max-w-[min(760px,52.8vw)] text-triumph font-semibold">
             You&rsquo;re all set.
           </h2>
           <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
-            {machineName(stream.host ?? target ?? '')} is live. Press ⌘↵ from anywhere to
-            jump straight back in.
+            {signedIn === null
+              ? 'This machine is ready. Sign in to an account to reach it from anywhere else.'
+              : `Signed in as ${signedIn}. Every machine you sign in to this account keeps its own screen, and can reach the others.`}
           </p>
-          <div className="card mt-[26px] flex w-[min(560px,38.9vw)]">
-            <Figure
-              label="LATENCY"
-              tone="text-mint"
-              value={stream.stats ? `${latency(stream.stats.rttMs)} ms` : '—'}
-            />
-            <Figure label="CODEC" tone="text-cyan" value={stream.terms?.codec ?? '—'} />
-            <Figure
-              label="DISPLAY"
-              tone="text-violet"
-              value={
-                stream.terms
-                  ? stream.terms.height
-                    ? `${stream.terms.height}p · ${stream.terms.fps} Hz`
-                    : `${stream.terms.fps} Hz`
-                  : '—'
-              }
-            />
+
+          {/* What to do next, rather than a picture of something already happening. Setup can
+              honestly say this machine is ready; it cannot say anything is connected, because
+              connecting needs a second machine and this is the first one.
+
+              Numbered because they are in fact an order: sharing a machine nothing else can
+              reach does nothing, so the second one has to exist first. */}
+          <div className="card mt-[30px] w-[min(560px,38.9vw)] text-left">
+            <div className="flex items-start gap-4 px-[22px] py-5">
+              <span className="flex size-[38px] flex-none items-center justify-center rounded-badge border border-[rgba(124,92,255,0.28)] bg-[rgba(124,92,255,0.16)] text-body-2 font-medium text-violet">
+                1
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col gap-1">
+                <span className="text-body-2 font-medium">Add another machine</span>
+                <span className="text-note text-muted-2">
+                  Install PRISM on it and sign in to the same account. The two find each other.
+                </span>
+              </span>
+            </div>
+            <div className="flex items-start gap-4 border-t border-line-1 px-[22px] py-5">
+              <span className="flex size-[38px] flex-none items-center justify-center rounded-badge border border-[rgba(53,214,255,0.28)] bg-[rgba(53,214,255,0.16)] text-body-2 font-medium text-cyan">
+                2
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col gap-1">
+                <span className="text-body-2 font-medium">Share the one you want to watch</span>
+                <span className="text-note text-muted-2">
+                  Press Share on it, and it turns up on the home screen of the other.
+                </span>
+              </span>
+            </div>
           </div>
+
           <div className="mt-[23px]">
             <Primary keys="⌘↵" onClick={finish}>
               Enter PRISM
@@ -1299,32 +1016,6 @@ function Setup(): JSX.Element {
         </div>
       </div>
     </>
-  );
-}
-
-/**
- * One of the three figures on the last screen.
- *
- * @param {object} props - What to draw.
- * @param {string} props.label - What it measures.
- * @param {string} props.value - What it measured.
- * @param {string} props.tone - The colour class for the value.
- * @returns {JSX.Element} The figure.
- */
-function Figure({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: string;
-}): JSX.Element {
-  return (
-    <div className="flex min-w-0 flex-1 flex-col items-center gap-[7px] py-5 not-first:border-l not-first:border-line-1">
-      <span className="text-label font-medium text-dim">{label}</span>
-      <span className={`text-[17px] font-medium ${tone}`}>{value}</span>
-    </div>
   );
 }
 
