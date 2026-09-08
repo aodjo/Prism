@@ -527,16 +527,24 @@ function Home(): JSX.Element {
                   aria-label="Sharing terms"
                   aria-expanded={terms}
                   title="Frame rate, bitrate and where it listens"
-                  className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 transition-colors ${
-                    terms ? 'bg-[rgba(255,255,255,0.12)] text-ink' : 'text-muted-2 hover:text-ink'
+                  className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 text-ink transition-colors ${
+                    terms ? 'bg-[rgba(255,255,255,0.12)]' : ''
                   }`}
                   onClick={() => {
                     setTerms(!terms);
                   }}
                 >
                   {/* The same drawing as the one in the header, taken out of it rather than
-                      redrawn, so the two gears cannot drift apart. */}
-                  <img src="assets/gear.svg" alt="" className="block size-[17px]" />
+                      redrawn, so the two gears cannot drift apart.
+
+                      Stencilled rather than drawn: an SVG behind `src` is its own document, and
+                      the `currentColor` in it resolves against that document's black rather
+                      than against this button. Masking paints the shape with the button's own
+                      colour, which is the thing that was meant all along. */}
+                  <span
+                    aria-hidden
+                    className="block size-[17px] bg-current [mask-image:url(assets/gear.svg)] [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain]"
+                  />
                 </button>
 
               {shared ? (
