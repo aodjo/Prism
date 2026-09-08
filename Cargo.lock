@@ -3088,6 +3088,7 @@ dependencies = [
 name = "prism-tauri"
 version = "0.0.0"
 dependencies = [
+ "objc2",
  "prism-core",
  "serde",
  "serde_json",

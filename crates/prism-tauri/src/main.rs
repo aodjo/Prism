@@ -13,25 +13,32 @@
 // A second console behind the window on Windows is a developer's tool, not a product's.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod harness;
+mod settings;
+
+use std::sync::Mutex;
+
 use prism_core::identity;
+use settings::Settings;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// The settings as they stand, read once at launch and written when somebody changes something.
+struct Held(Mutex<Settings>);
 
 /// Turns a failure into the sentence a window should show.
 ///
 /// Commands return `Result<_, String>` rather than a typed error because what reaches the
-/// webview is text somebody reads. A structured error would be a shape the frontend then has
-/// to translate, and there is nothing on the other side that would do anything different with
-/// one kind than another.
-///
-/// @param error What went wrong.
-/// @returns The message.
+/// webview is text somebody reads. A structured error would be a shape the frontend then has to
+/// translate, and there is nothing on the other side that would do anything different with one
+/// kind than another.
 fn say(error: &dyn std::error::Error) -> String {
     error.to_string()
 }
 
 /// Returns the Prism version string.
 ///
-/// The first thing a window asks for, and the proof that the shell and the core were built
-/// from one commit.
+/// The first thing a window asks for, and the proof that the shell and the core were built from
+/// one commit.
 #[tauri::command]
 #[must_use]
 fn version() -> String {
@@ -56,8 +63,8 @@ fn wire_format_version() -> u32 {
 ///
 /// # Errors
 ///
-/// Fails if the key cannot be read or written, which on a machine with a home directory means
-/// a permissions problem worth showing rather than working around.
+/// Fails if the key cannot be read or written, which on a machine with a home directory means a
+/// permissions problem worth showing rather than working around.
 #[tauri::command]
 fn identity_public_key() -> Result<String, String> {
     let path = identity::default_path().map_err(|error| say(&error))?;
@@ -83,13 +90,81 @@ fn paired_peers() -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Returns everything a person has chosen.
+///
+/// # Errors
+///
+/// Never fails: a settings file that cannot be read is an absent one, and absent means defaults.
+#[tauri::command]
+fn get_settings(held: tauri::State<'_, Held>) -> Result<Settings, String> {
+    held.0
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| "the settings lock was poisoned".to_owned())
+}
+
+/// Writes what changed and returns the settings as they now stand.
+///
+/// Takes the whole object rather than one field, because the window already holds a copy and
+/// sending back the part it changed would mean two places deciding what the rest still is.
+///
+/// # Errors
+///
+/// Fails if there is no home directory, or the file cannot be written.
+#[tauri::command]
+fn set_settings(next: Settings, held: tauri::State<'_, Held>) -> Result<Settings, String> {
+    let mut settings = held
+        .0
+        .lock()
+        .map_err(|_| "the settings lock was poisoned".to_owned())?;
+
+    settings::save(&next)?;
+    *settings = next;
+
+    Ok(settings.clone())
+}
+
+/// The page a launch opens.
+///
+/// Being signed in is the answer to what setup asks, so it is the whole of the question here.
+/// The harness may override it, which is how a picture gets taken of a window this machine's own
+/// state would not otherwise show.
+fn opening_page() -> String {
+    harness::forced_page().unwrap_or_else(|| "home.html".to_owned())
+}
+
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            app.manage(Held(Mutex::new(settings::load())));
+
+            let window =
+                WebviewWindowBuilder::new(app, "home", WebviewUrl::App(opening_page().into()))
+                    .title("Prism")
+                    .inner_size(1280.0, 800.0)
+                    .min_inner_size(1040.0, 720.0)
+                    .center()
+                    // The design puts its own content where a title bar would be, and carries the
+                    // traffic lights over the top left of it.
+                    .title_bar_style(tauri::TitleBarStyle::Overlay)
+                    // The window is named in the markup, and a second name printed over it by the
+                    // system is the design's own header with a title bar drawn on top of it.
+                    .hidden_title(true)
+                    .background_color(tauri::window::Color(8, 8, 11, 255))
+                    .build()?;
+
+            harness::run(&window);
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             version,
             wire_format_version,
             identity_public_key,
-            paired_peers
+            paired_peers,
+            get_settings,
+            set_settings,
+            harness::drive_result
         ])
         .run(tauri::generate_context!())
         .expect("the shell could not start");

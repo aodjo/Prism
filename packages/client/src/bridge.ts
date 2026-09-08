@@ -105,6 +105,15 @@ export function installBridge(): void {
       publicKey: await call<string>('identity_public_key'),
     }),
 
+    getSettings: (): Promise<Settings> => call<Settings>('get_settings'),
+
+    // Sent whole rather than as the field that changed, because the window already holds a
+    // copy and sending a part would leave two places deciding what the rest still is.
+    setSettings: async (next: Partial<Settings>): Promise<Settings> =>
+      call<Settings>('set_settings', {
+        next: { ...(await call<Settings>('get_settings')), ...next },
+      }),
+
     // ── Pending: still handled by the Electron main process ──────────────────────────────
     permissions: (): Promise<HostPermissions> => Promise.reject(NOT_YET('permissions:get')),
 
@@ -136,10 +145,6 @@ export function installBridge(): void {
     sessions: (): Promise<readonly Session[]> => Promise.resolve([]),
 
     onSessions: (): void => {},
-
-    getSettings: (): Promise<Settings> => Promise.reject(NOT_YET('settings:get')),
-
-    setSettings: (): Promise<Settings> => Promise.reject(NOT_YET('settings:set')),
 
     rendezvousServers: (): Promise<readonly RendezvousServer[]> => Promise.resolve([]),
 

@@ -7,19 +7,7 @@
     "frontendDist": "../../packages/client/renderer"
   },
   "app": {
-    "windows": [
-      {
-        "label": "home",
-        "url": "home.html",
-        "title": "Prism",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 1040,
-        "minHeight": 720,
-        "titleBarStyle": "Overlay",
-        "backgroundColor": "#08080b"
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self' data:"
     }
