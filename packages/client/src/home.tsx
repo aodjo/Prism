@@ -311,15 +311,6 @@ function Home(): JSX.Element {
     prism.onStream(setStream);
   }, []);
 
-  // The same seam the setup flow has, for the same reason: a window whose interesting states
-  // all need a second machine is a window nobody can look at while building it.
-  useEffect(() => {
-    Object.defineProperty(window, 'prismHome', {
-      value: { draw: setStream, share: setMine, recall: setHistory },
-      configurable: true,
-    });
-  }, []);
-
   const pinned = useMemo(
     () => new Set(settings?.pinned ?? []),
     [settings],

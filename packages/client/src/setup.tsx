@@ -400,17 +400,6 @@ function Setup(): JSX.Element {
     })();
   }, [step]);
 
-  // The flow's own controls, so that a screen which needs a second machine to reach can still
-  // be driven and photographed from this one. It adds no privilege — everything here changes
-  // what is displayed and nothing else — and it is the companion to the screenshot harness the
-  // main process already carries for the same reason.
-  useEffect(() => {
-    Object.defineProperty(window, 'prismSetup', {
-      value: { show: go, draw: setStream, aim: setTarget },
-      configurable: true,
-    });
-  }, []);
-
   /**
    * Moves to another screen, and starts the one being left on its way out.
    *
