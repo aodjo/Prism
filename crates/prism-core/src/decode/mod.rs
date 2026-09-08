@@ -355,6 +355,103 @@ impl<'a> BitReader<'a> {
     }
 }
 
+/// Splits a continuous Annex B stream into the frames it was assembled from.
+///
+/// A decoder is fed one picture at a time, but a stream written to a file is one run of bytes
+/// with nothing marking where a picture ended. The boundary has to be recovered from the
+/// syntax: a slice that says it starts at the first macroblock is the first slice of a new
+/// picture, and any parameter sets sitting in front of it belong to that picture rather than
+/// to the one before.
+///
+/// Written for replaying a dump through a decoder, which is the only way to put a stream one
+/// decoder refuses in front of another. Not on the receive path — there a frame arrives as a
+/// frame and none of this guessing is needed.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::decode::access_units;
+/// # use prism_core::net::negotiate::Codec;
+/// // Two pictures, each a single slice that starts at the first macroblock.
+/// let stream = [0, 0, 0, 1, 0x65, 0x88, 0, 0, 0, 1, 0x65, 0x88];
+///
+/// assert_eq!(access_units(&stream, Codec::H264).len(), 2);
+/// ```
+#[must_use]
+pub fn access_units(stream: &[u8], codec: crate::net::negotiate::Codec) -> Vec<&[u8]> {
+    let mut units = Vec::new();
+    let mut unit_start = 0usize;
+    let mut have_picture = false;
+    let mut leading: Option<usize> = None;
+
+    let mut at = 0usize;
+
+    while let Some(code) = find_start_code(stream, at) {
+        let payload = code.end;
+        let end = find_start_code(stream, payload).map_or(stream.len(), |next| next.start);
+        at = end;
+
+        let nal = &stream[payload..end];
+
+        if starts_picture(nal, codec) {
+            if have_picture {
+                // Anything that came in front of this slice introduces it, not what went
+                // before, so the cut goes ahead of the parameter sets rather than behind them.
+                let cut = leading.unwrap_or(code.start);
+
+                if cut > unit_start {
+                    units.push(&stream[unit_start..cut]);
+                    unit_start = cut;
+                }
+            }
+
+            have_picture = true;
+            leading = None;
+        } else if is_picture_data(nal, codec) {
+            leading = None;
+        } else if leading.is_none() {
+            leading = Some(code.start);
+        }
+    }
+
+    // Only when there is a picture in it. A stream can end with parameter sets, or with a
+    // start code and nothing after it, and handing either to a decoder as though it were a
+    // frame would count a picture that does not exist.
+    if have_picture && unit_start < stream.len() {
+        units.push(&stream[unit_start..]);
+    }
+
+    units
+}
+
+/// Whether a NAL unit is the first slice of a picture.
+fn starts_picture(nal: &[u8], codec: crate::net::negotiate::Codec) -> bool {
+    if !is_picture_data(nal, codec) {
+        return false;
+    }
+
+    if codec == crate::net::negotiate::Codec::Hevc {
+        // The flag saying so is the first bit after the two byte header.
+        return nal.get(2).is_some_and(|byte| byte & 0x80 != 0);
+    }
+
+    // H.264 says it by coding the address of the slice's first macroblock, so a slice that
+    // starts a picture is one that starts at zero.
+    let mut bits = BitReader::new(nal.get(1..).unwrap_or_default());
+
+    bits.ue() == Some(0)
+}
+
+/// Whether a NAL unit carries picture data rather than describing the stream.
+fn is_picture_data(nal: &[u8], codec: crate::net::negotiate::Codec) -> bool {
+    if codec == crate::net::negotiate::Codec::Hevc {
+        // Everything below the first parameter set is a slice segment of some kind.
+        return hevc_nal_type(nal).is_some_and(|kind| kind < HEVC_NAL_VPS);
+    }
+
+    matches!(nal_type(nal), Some(1..=5))
+}
+
 /// Iterator over the NAL units of an Annex B bitstream.
 struct NalUnits<'a> {
     stream: &'a [u8],
@@ -394,6 +491,107 @@ fn find_start_code(stream: &[u8], from: usize) -> Option<core::ops::Range<usize>
     }
 
     None
+}
+
+#[cfg(test)]
+mod access_unit_tests {
+    use super::{START_CODE, access_units};
+    use crate::encode::h264::{Pps, Sps};
+    use crate::net::negotiate::Codec;
+
+    /// A slice NAL that says which macroblock it starts at.
+    ///
+    /// `first_mb_in_slice` is an unsigned Exp-Golomb code, so zero is the single bit one and
+    /// anything else is longer. Only the first byte matters here: nothing reads past it.
+    fn slice(idr: bool, first: bool) -> Vec<u8> {
+        let header = if idr { 0x65 } else { 0x41 };
+
+        // 0b1... is ue(0); 0b010... is ue(1), which is a slice that starts further in.
+        let body = if first { 0x88 } else { 0x48 };
+
+        let mut nal = START_CODE.to_vec();
+        nal.extend_from_slice(&[header, body]);
+
+        nal
+    }
+
+    #[test]
+    fn each_first_slice_begins_a_frame() {
+        let mut stream = Vec::new();
+        for _ in 0..3 {
+            stream.extend_from_slice(&slice(false, true));
+        }
+
+        assert_eq!(access_units(&stream, Codec::H264).len(), 3);
+    }
+
+    #[test]
+    fn a_picture_split_across_slices_stays_one_frame() {
+        let mut stream = slice(true, true);
+        stream.extend_from_slice(&slice(true, false));
+        stream.extend_from_slice(&slice(true, false));
+
+        // Four slices of one picture, then four of the next.
+        stream.extend_from_slice(&slice(false, true));
+        stream.extend_from_slice(&slice(false, false));
+
+        assert_eq!(access_units(&stream, Codec::H264).len(), 2);
+    }
+
+    /// The parameter sets in front of a keyframe belong to it, not to what came before.
+    ///
+    /// Cutting behind them hands the decoder a keyframe with nothing describing it, which is
+    /// the one frame that has to be self-contained.
+    #[test]
+    fn parameter_sets_travel_with_the_frame_they_introduce() {
+        let sps = Sps {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            max_ref_frames: 1,
+        }
+        .to_nal();
+        let pps = Pps {
+            init_qp: 26,
+            cabac: true,
+        }
+        .to_nal();
+
+        let mut stream = slice(false, true);
+        let leading = stream.len();
+        stream.extend_from_slice(&sps);
+        stream.extend_from_slice(&pps);
+        stream.extend_from_slice(&slice(true, true));
+
+        let units = access_units(&stream, Codec::H264);
+
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].len(), leading);
+        assert_eq!(&units[1][..sps.len()], sps.as_slice());
+    }
+
+    #[test]
+    fn a_stream_with_nothing_in_it_yields_nothing() {
+        assert!(access_units(&[], Codec::H264).is_empty());
+        assert!(access_units(&[0, 0, 0, 1], Codec::H264).is_empty());
+    }
+
+    /// Put together, the pieces have to add back up to what went in.
+    ///
+    /// True of any stream that ends with a picture, which every dump does. A stream ending
+    /// with parameter sets loses them, and that is deliberate: they are not a frame.
+    #[test]
+    fn the_frames_join_back_into_the_stream_they_came_from() {
+        let mut stream = Vec::new();
+        for at in 0..5 {
+            stream.extend_from_slice(&slice(at == 0, true));
+            stream.extend_from_slice(&slice(at == 0, false));
+        }
+
+        let joined: Vec<u8> = access_units(&stream, Codec::H264).concat();
+
+        assert_eq!(joined, stream);
+    }
 }
 
 #[cfg(test)]

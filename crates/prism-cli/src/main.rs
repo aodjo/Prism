@@ -13,6 +13,9 @@ mod display;
 mod encode;
 mod host;
 mod pattern;
+/// Replaying a dump is only useful where there is a decoder to replay it through.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod replay;
 
 use std::error::Error;
 use std::net::SocketAddr;
@@ -24,6 +27,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use prism_core::identity;
 use prism_core::net::handshake::Identity;
 use prism_core::net::negotiate::{Codecs, H264, Offer};
+
+/// Which codec a recording holds.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DecodeCodec {
+    /// H.264.
+    H264,
+    /// HEVC.
+    Hevc,
+}
 
 /// How the client trades latency against even presentation.
 ///
@@ -257,6 +270,28 @@ enum Command {
         /// Defaults to the one `prism-cli pair` recorded.
         #[arg(long)]
         peer_key: Option<String>,
+    },
+
+    /// Decode a recorded bitstream, with no socket and no window.
+    ///
+    /// The client writes one with `PRISM_DUMP_BITSTREAM`. Replaying it is how a decoder is
+    /// judged on its own, before there is a renderer to show whether it worked.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    Decode {
+        /// The recorded bitstream to read.
+        #[arg(long)]
+        file: PathBuf,
+
+        /// Which codec it was encoded with.
+        #[arg(long, default_value = "h264")]
+        codec: DecodeCodec,
+
+        /// Read each picture back and say whether it is a flat colour.
+        ///
+        /// Costs a copy out of GPU memory per frame, which is exactly what the live path
+        /// exists to avoid — so it is off unless asked for.
+        #[arg(long)]
+        verify: bool,
     },
 
     /// Print this machine's public key, creating its long-term key if there is none.
@@ -565,14 +600,14 @@ fn codec_of(hevc: bool) -> prism_core::net::negotiate::Codec {
 
 /// Works out which client keys a host session will admit.
 ///
-/// Named on the command line, or every machine pairing has recorded. Never everyone: a host
-/// that has paired with nothing admits nobody, which is the right answer rather than an
-/// inconvenience.
+/// Named on the command line, or every machine the account has said is its own. Never
+/// everyone: a host that trusts nothing admits nobody, which is the right answer rather than
+/// an inconvenience.
 ///
 /// # Errors
 ///
-/// Returns [`std::io::ErrorKind::NotFound`] with an instruction to pair when nothing has
-/// been, and [`std::io::ErrorKind::InvalidInput`] for a key that is not one.
+/// Returns [`std::io::ErrorKind::NotFound`] when nothing is trusted, and
+/// [`std::io::ErrorKind::InvalidInput`] for a key that is not one.
 fn admitted_clients(named: Option<&str>) -> Result<Vec<[u8; 32]>, Box<dyn Error>> {
     let peers = identity::default_peers_path()?;
 
@@ -584,7 +619,8 @@ fn admitted_clients(named: Option<&str>) -> Result<Vec<[u8; 32]>, Box<dyn Error>
     if known.is_empty() {
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "no client has been paired; run `prism-cli pair host` and pair one first",
+            "no machine may watch this one yet. Sign in to an account from the application \
+             on both machines, or name a key with --peer-key",
         )));
     }
 
@@ -829,6 +865,20 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        Command::Decode {
+            file,
+            codec,
+            verify,
+        } => replay::run(
+            &file,
+            match codec {
+                DecodeCodec::H264 => prism_core::net::negotiate::Codec::H264,
+                DecodeCodec::Hevc => prism_core::net::negotiate::Codec::Hevc,
+            },
+            verify,
+        ),
 
         Command::Keygen { identity: path } => {
             let path = match path {
