@@ -355,6 +355,70 @@ impl<'a> BitReader<'a> {
     }
 }
 
+/// Works out which codec a recorded stream was encoded with.
+///
+/// Read from the parameter sets, which every recording starts with.
+///
+/// The type alone is not enough. The two numbering schemes overlap: an H.264 slice whose
+/// header byte is `0x41` reads as an HEVC video parameter set, so a reader that trusted the
+/// number would call an H.264 recording HEVC. What tells them apart is the rest of the header
+/// — HEVC's is two bytes and says which layer and temporal sub-layer the unit belongs to, and
+/// an H.264 byte that happened to land on a parameter set type almost never says anything
+/// sane there.
+///
+/// Worth having because the alternative is asking, and being told wrong is silent: a stream
+/// read as the codec it is not yields no frames at all, which looks exactly like a decoder
+/// that cannot read it.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::decode::detect_codec;
+/// # use prism_core::net::negotiate::Codec;
+/// // An HEVC video parameter set, then a sequence parameter set.
+/// assert_eq!(detect_codec(&[0, 0, 0, 1, 0x40, 0x01]), Some(Codec::Hevc));
+/// // An H.264 sequence parameter set.
+/// assert_eq!(detect_codec(&[0, 0, 0, 1, 0x67, 0x42]), Some(Codec::H264));
+/// assert_eq!(detect_codec(&[]), None);
+/// ```
+#[must_use]
+pub fn detect_codec(stream: &[u8]) -> Option<crate::net::negotiate::Codec> {
+    use crate::net::negotiate::Codec;
+
+    for nal in nal_units(stream).take(16) {
+        if matches!(nal_type(nal), Some(NAL_SPS | NAL_PPS)) {
+            return Some(Codec::H264);
+        }
+
+        if matches!(
+            hevc_nal_type(nal),
+            Some(HEVC_NAL_VPS | HEVC_NAL_SPS | HEVC_NAL_PPS)
+        ) && is_hevc_header(nal)
+        {
+            return Some(Codec::Hevc);
+        }
+    }
+
+    None
+}
+
+/// Whether a NAL unit's first two bytes are shaped like an HEVC header.
+///
+/// The layer must be the base one and the temporal sub-layer must be numbered from one, which
+/// is what every stream this project will meet carries. Both fields land in bits an H.264 unit
+/// uses for something else, so a byte pair that satisfies them is HEVC rather than an H.264
+/// unit that happened to collide.
+fn is_hevc_header(nal: &[u8]) -> bool {
+    let Some(&[first, second]) = nal.get(..2) else {
+        return false;
+    };
+
+    let layer = ((first & 1) << 5) | (second >> 3);
+    let temporal = second & 0x07;
+
+    first & 0x80 == 0 && layer == 0 && temporal != 0
+}
+
 /// Splits a continuous Annex B stream into the frames it was assembled from.
 ///
 /// A decoder is fed one picture at a time, but a stream written to a file is one run of bytes
@@ -491,6 +555,66 @@ fn find_start_code(stream: &[u8], from: usize) -> Option<core::ops::Range<usize>
     }
 
     None
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::detect_codec;
+    use crate::encode::h264::{Pps, Sps};
+    use crate::net::negotiate::Codec;
+
+    /// What this project's own encoder writes has to be read back as what it is.
+    #[test]
+    fn a_stream_this_encoder_wrote_is_recognised_as_h264() {
+        let mut stream = Sps {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            max_ref_frames: 1,
+        }
+        .to_nal();
+        stream.extend_from_slice(
+            &Pps {
+                init_qp: 26,
+                cabac: true,
+            }
+            .to_nal(),
+        );
+
+        assert_eq!(detect_codec(&stream), Some(Codec::H264));
+    }
+
+    /// The type numbers overlap, so the rest of the header has to be read as well.
+    #[test]
+    fn each_codecs_parameter_sets_are_recognised_as_its_own() {
+        // 0x40, 0x42, 0x44 are HEVC's video, sequence and picture parameter sets.
+        for header in [0x40u8, 0x42, 0x44] {
+            assert_eq!(
+                detect_codec(&[0, 0, 0, 1, header, 0x01]),
+                Some(Codec::Hevc),
+                "{header:#04x}",
+            );
+        }
+
+        // 0x67 and 0x68 are H.264's sequence and picture parameter sets.
+        for header in [0x67u8, 0x68] {
+            assert_eq!(
+                detect_codec(&[0, 0, 0, 1, header, 0x42]),
+                Some(Codec::H264),
+                "{header:#04x}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_stream_with_no_parameter_sets_says_nothing_rather_than_guessing() {
+        // An H.264 slice, which by type alone reads as an HEVC video parameter set. The rest
+        // of the header is what says it is not one, and this is the case that would otherwise
+        // send an H.264 recording to an HEVC decoder.
+        assert_eq!(detect_codec(&[0, 0, 0, 1, 0x41, 0x88]), None);
+        assert_eq!(detect_codec(&[0, 0, 0, 1, 0x45, 0x88]), None);
+        assert_eq!(detect_codec(&[]), None);
+    }
 }
 
 #[cfg(test)]

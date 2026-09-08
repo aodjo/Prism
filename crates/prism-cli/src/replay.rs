@@ -20,7 +20,7 @@ use std::error::Error;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use prism_core::decode::access_units;
+use prism_core::decode::{access_units, detect_codec};
 use prism_core::net::negotiate::Codec;
 
 /// How long to wait on a picture before deciding the decoder has none.
@@ -52,12 +52,21 @@ struct Report {
 /// Returns an error if the file cannot be read, or if the platform has no decoder for the
 /// codec. A frame the decoder rejects is counted rather than returned: one bad frame in a
 /// recording is a thing to measure, not a reason to stop.
-pub fn run(path: &Path, codec: Codec, verify: bool) -> Result<(), Box<dyn Error>> {
+pub fn run(path: &Path, codec: Option<Codec>, verify: bool) -> Result<(), Box<dyn Error>> {
     let stream = std::fs::read(path)?;
+
+    // Read out of the recording unless somebody insisted. Being told the wrong codec is the
+    // one mistake here that says nothing: the stream simply yields no frames, which looks
+    // exactly like a decoder that cannot read it.
+    let codec = match codec.or_else(|| detect_codec(&stream)) {
+        Some(codec) => codec,
+        None => return Err("the file has no parameter sets, so it says no codec".into()),
+    };
+
     let frames = access_units(&stream, codec);
 
     println!(
-        "replay: {} bytes from {} split into {} frames",
+        "replay: {} bytes from {} split into {} frames of {codec:?}",
         stream.len(),
         path.display(),
         frames.len(),

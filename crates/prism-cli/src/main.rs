@@ -32,6 +32,8 @@ use prism_core::net::negotiate::{Codecs, H264, Offer};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum DecodeCodec {
+    /// Read it out of the recording, which is what it is written in.
+    Auto,
     /// H.264.
     H264,
     /// HEVC.
@@ -282,8 +284,8 @@ enum Command {
         #[arg(long)]
         file: PathBuf,
 
-        /// Which codec it was encoded with.
-        #[arg(long, default_value = "h264")]
+        /// Which codec it was encoded with, or `auto` to read that out of the recording.
+        #[arg(long, default_value = "auto")]
         codec: DecodeCodec,
 
         /// Read each picture back and say whether it is a flat colour.
@@ -874,8 +876,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
         } => replay::run(
             &file,
             match codec {
-                DecodeCodec::H264 => prism_core::net::negotiate::Codec::H264,
-                DecodeCodec::Hevc => prism_core::net::negotiate::Codec::Hevc,
+                DecodeCodec::Auto => None,
+                DecodeCodec::H264 => Some(prism_core::net::negotiate::Codec::H264),
+                DecodeCodec::Hevc => Some(prism_core::net::negotiate::Codec::Hevc),
             },
             verify,
         ),
