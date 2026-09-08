@@ -840,11 +840,7 @@ function Setup(): JSX.Element {
 
       {which === 'ready' && (
         <section className={cls}>
-          <span className="inline-flex items-center gap-2 rounded-pill border border-[rgba(77,232,176,0.24)] bg-[rgba(77,232,176,0.12)] py-2 pr-4 pl-3.5 text-note-2 font-medium tracking-[0.3px] text-mint">
-            <img src="assets/dot-ready.svg" alt="" className="block size-[7px] overflow-visible" />
-            Ready
-          </span>
-          <h2 className="mt-[19px] max-w-[min(760px,52.8vw)] text-triumph font-semibold">
+          <h2 className="max-w-[min(760px,52.8vw)] text-triumph font-semibold">
             You&rsquo;re all set.
           </h2>
           <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
