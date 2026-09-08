@@ -44,6 +44,14 @@ export interface AccountEnrolment {
   readonly totpUri: string;
   /** The same secret as text, for typing in by hand when a camera is not to hand. */
   readonly totpSecret: string;
+  /**
+   * Whether a confirmation was sent that has to be opened before this account can sign in.
+   *
+   * False on a server with no mail configured, where an address is only ever a name. The
+   * difference matters to whoever is looking at the screen: one of them can sign in now and
+   * the other cannot, and nothing else on the screen says which.
+   */
+  readonly verifySent: boolean;
 }
 
 /**
@@ -159,13 +167,23 @@ export class AccountClient {
     const salt = await this.saltFor(email);
     const auth = await this.deriveAuth(password, salt);
 
-    const body = await this.send<{ totp_uri: string; totp_secret: string }>(
+    const body = await this.send<{
+      totp_uri: string;
+      totp_secret: string;
+      verify_sent?: boolean;
+    }>(
       'POST',
       '/v1/accounts',
       { email, salt, auth, sealed_key: '' },
     );
 
-    return { totpUri: body.totp_uri, totpSecret: body.totp_secret };
+    return {
+      totpUri: body.totp_uri,
+      totpSecret: body.totp_secret,
+      // Absent from a server built before addresses had to be proved, which is a server that
+      // does not prove them: the account is usable the moment it exists.
+      verifySent: body.verify_sent ?? false,
+    };
   }
 
   /**

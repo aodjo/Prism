@@ -296,7 +296,11 @@ function registerHandlers(): void {
     // process may. What crosses is a picture of a link the account server already sent.
     const qr = await toDataURL(enrolment.totpUri, { margin: 1, width: 220 });
 
-    return { qr, secret: enrolment.totpSecret } satisfies AccountEnrolmentView;
+    return {
+      qr,
+      secret: enrolment.totpSecret,
+      verifySent: enrolment.verifySent,
+    } satisfies AccountEnrolmentView;
   });
 
   ipcMain.handle(

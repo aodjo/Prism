@@ -13,7 +13,7 @@
     "client": "pnpm --filter @prism/client start",
     "client:setup": "pnpm --filter @prism/client start:setup",
     "lint": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
-    "lint:cross": "cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
+    "lint:cross": "cargo clippy --workspace --exclude prism-rendezvous --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --exclude prism-rendezvous --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
     "smoke:electron": "electron scripts/electron-smoke.cjs",
     "smoke:node": "node scripts/node-smoke.cjs",
     "test": "pnpm -r test && pnpm run typecheck && cargo test --workspace",

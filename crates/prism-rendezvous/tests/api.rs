@@ -41,6 +41,9 @@ fn service(label: &str) -> (axum::Router, std::path::PathBuf) {
             accounts,
             sessions,
             "rv.example.com:47300".to_owned(),
+            // No mailer, so these tests exercise a server that does not prove addresses —
+            // which is the same server anybody running this without a mail key gets.
+            None,
         )),
         accounts_path,
     )

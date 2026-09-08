@@ -62,6 +62,12 @@ export interface AccountEnrolmentView {
   readonly qr: string;
   /** The same secret as text, for typing in when a camera is not to hand. */
   readonly secret: string;
+  /**
+   * Whether a confirmation was sent to the address that has to be opened before signing in.
+   *
+   * False on a server with no mail configured, where the address is only ever a name.
+   */
+  readonly verifySent: boolean;
 }
 
 /** What this machine's own session is doing while it is shared. */

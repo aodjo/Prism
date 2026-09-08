@@ -37,6 +37,7 @@ use prism_core::net::handshake::KEY_LEN;
 use serde::{Deserialize, Serialize};
 
 use crate::accounts::{AccountError, Accounts, Device, Registration};
+use crate::mail::Mailer;
 use crate::sessions::Sessions;
 
 /// How long a session lasts without being used.
@@ -56,6 +57,8 @@ pub struct Service {
     sessions: Mutex<Sessions>,
     /// Where signed-in machines should register, or empty when this server does not say.
     advertise: String,
+    /// How a link is sent to an address, or `None` when this server does not prove addresses.
+    mailer: Option<Mailer>,
 }
 
 impl Service {
@@ -65,11 +68,17 @@ impl Service {
     /// told by hand where the signalling is. It is a string rather than an address because it
     /// is a name as often as a number, and this server never resolves it — it only repeats it.
     #[must_use]
-    pub fn new(accounts: Accounts, sessions: Sessions, advertise: String) -> Arc<Self> {
+    pub fn new(
+        accounts: Accounts,
+        sessions: Sessions,
+        advertise: String,
+        mailer: Option<Mailer>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             accounts: Mutex::new(accounts),
             sessions: Mutex::new(sessions),
             advertise,
+            mailer,
         })
     }
 
@@ -118,6 +127,8 @@ enum ApiError {
     Conflict(String),
     /// Something on this machine failed.
     Unavailable,
+    /// The link could not be sent, so the account was not kept.
+    Mail(String),
 }
 
 impl IntoResponse for ApiError {
@@ -137,6 +148,13 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "the server could not complete that".to_owned(),
             ),
+            // Said plainly rather than hidden behind a generic failure. Nothing here is about
+            // whoever is registering — it is this server's own mail credentials — and somebody
+            // staring at a form deserves to know the account was not created.
+            ApiError::Mail(reason) => (
+                StatusCode::BAD_GATEWAY,
+                format!("the confirmation could not be sent, so no account was made: {reason}"),
+            ),
         };
 
         (status, Json(ErrorBody { error: message })).into_response()
@@ -150,6 +168,8 @@ impl From<AccountError> for ApiError {
             AccountError::Refused => ApiError::Refused,
             AccountError::EmailTaken => ApiError::Conflict(error.to_string()),
             AccountError::BadEmail => ApiError::Conflict(error.to_string()),
+            AccountError::NotVerified => ApiError::Conflict(error.to_string()),
+            AccountError::BadToken => ApiError::Conflict(error.to_string()),
             AccountError::Malformed { field } => ApiError::Malformed(field),
             AccountError::Store { .. } => ApiError::Unavailable,
         }
@@ -195,6 +215,8 @@ struct RegisterBody {
 struct RegisteredBody {
     totp_uri: String,
     totp_secret: String,
+    /// Whether a link was sent that has to be opened before this account can sign in.
+    verify_sent: bool,
 }
 
 /// What signing in needs.
@@ -258,6 +280,7 @@ pub fn routes(service: Arc<Service>) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/salt", get(salt))
         .route("/v1/accounts", post(register))
+        .route("/v1/accounts/verify", get(verify))
         .route("/v1/sessions", post(sign_in))
         .route("/v1/session", get(resume).delete(sign_out))
         .route("/v1/devices", get(list_devices).post(add_device))
@@ -300,18 +323,91 @@ async fn register(
     let auth = unhex_array::<SECRET_LEN>(&body.auth).ok_or(ApiError::Malformed("auth"))?;
     let sealed_key = unhex(&body.sealed_key).ok_or(ApiError::Malformed("sealed key"))?;
 
-    let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
-    let secret = accounts.register(Registration {
-        email: body.email.clone(),
-        salt,
-        auth,
-        sealed_key,
-    })?;
+    let enrolled = {
+        let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
+
+        accounts.register(
+            Registration {
+                email: body.email.clone(),
+                salt,
+                auth,
+                sealed_key,
+            },
+            service.mailer.is_some(),
+            now_unix(),
+        )?
+    };
+
+    // Sent after the account exists rather than before, because the token only means anything
+    // once there is something for it to unlock. If it cannot be sent the account is taken back
+    // out: one that was never told how to prove itself can never sign in, and leaving it there
+    // would also hold the address against the person trying again.
+    if let (Some(mailer), Some(token)) = (service.mailer.as_ref(), enrolled.token.as_ref())
+        && let Err(err) = mailer.send_verification(&body.email, token).await
+    {
+        if let Ok(mut accounts) = service.accounts.lock() {
+            let _ = accounts.forget_unverified(&body.email);
+        }
+
+        return Err(ApiError::Mail(err.to_string()));
+    }
 
     Ok(Json(RegisteredBody {
-        totp_uri: totp::provisioning_uri(&secret, &body.email),
-        totp_secret: totp::to_base32(&secret),
+        totp_uri: totp::provisioning_uri(&enrolled.totp_secret, &body.email),
+        totp_secret: totp::to_base32(&enrolled.totp_secret),
+        verify_sent: enrolled.token.is_some(),
     }))
+}
+
+/// What a verification link carries.
+#[derive(Debug, Deserialize)]
+struct VerifyQuery {
+    token: String,
+}
+
+/// Accepts a verification link and says so in a page a browser can show.
+///
+/// Answers in HTML rather than JSON because the thing opening this is a mail reader's browser,
+/// not the application: nobody is parsing the reply, somebody is reading it.
+async fn verify(State(service): State<Arc<Service>>, Query(query): Query<VerifyQuery>) -> Response {
+    let outcome = service
+        .accounts
+        .lock()
+        .map_err(|_| AccountError::Refused)
+        .and_then(|mut accounts| accounts.verify(&query.token, now_unix()));
+
+    match outcome {
+        Ok(email) => page(
+            StatusCode::OK,
+            "Address confirmed",
+            &format!("{email} is yours. Sign in on Prism and add your machines."),
+        ),
+        Err(err) => page(
+            StatusCode::BAD_REQUEST,
+            "That link did not work",
+            &err.to_string(),
+        ),
+    }
+}
+
+/// Renders one sentence as a page somebody can read.
+fn page(status: StatusCode, heading: &str, sentence: &str) -> Response {
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+         <title>Prism</title>\
+         <div style=\"font:16px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,\
+         sans-serif;max-width:30em;margin:18vh auto;padding:0 1.5em;color:#1a1a1f\">\
+         <h1 style=\"font-size:22px;margin:0 0 .4em\">{heading}</h1>\
+         <p style=\"margin:0;color:#4a4a56\">{sentence}</p></div>"
+    );
+
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
 }
 
 /// Checks a sign-in and issues a token.

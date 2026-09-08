@@ -649,8 +649,15 @@ function Setup(): JSX.Element {
               <code className="block text-center text-fine tracking-[0.06em] select-all text-ink-3">
                 {enrolment.secret}
               </code>
-              {/* Straight to the code. The account exists, the address and password are still
-                  in hand, and the only thing left is the six digits that were just set up. */}
+              {/* Said here rather than left to be discovered at the sign-in that refuses. The
+                  account exists but cannot be used yet, and somebody who does not know that
+                  reads the refusal as a wrong password and retypes it. */}
+              {enrolment.verifySent && (
+                <p className="mx-auto mt-4 max-w-[36ch] text-note leading-normal text-amber">
+                  Then open the link sent to {email.trim()}. Until you do, this account cannot
+                  sign in.
+                </p>
+              )}
               <button
                 type="button"
                 className="btn-primary-sm no-drag mx-auto mt-5 block"
@@ -660,7 +667,7 @@ function Setup(): JSX.Element {
                   setAskingCode(true);
                 }}
               >
-                I have it — sign in
+                {enrolment.verifySent ? 'Done — sign in' : 'I have it — sign in'}
               </button>
             </div>
           ) : (

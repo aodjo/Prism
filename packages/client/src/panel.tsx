@@ -198,6 +198,12 @@ function Panel(): JSX.Element {
                   Scan this with an authenticator app. It is shown once — the server keeps only
                   enough to check codes, which is not enough to show it again.
                 </p>
+                {enrolment.verifySent && (
+                  <p className="mx-auto mb-3 max-w-[42ch] text-tiny leading-normal text-amber">
+                    Then open the link sent to {email.trim()}. Until you do, this account
+                    cannot sign in.
+                  </p>
+                )}
                 <img
                   src={enrolment.qr}
                   alt=""
