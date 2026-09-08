@@ -29,6 +29,18 @@ declare global {
   }
 }
 
+/**
+ * What a machine sends before anybody has changed the settings.
+ *
+ * Stated here as well as in the main process because this window draws the figures before the
+ * settings have arrived, and a card that says nothing for a moment and then something is worse
+ * than one that says the truth immediately.
+ */
+const DEFAULT_FPS = 60;
+
+/** And at what rate. */
+const DEFAULT_BITRATE_BPS = 24_000_000;
+
 const prism = window.prism;
 
 /** The phases where a stream is running or on its way to running. */
@@ -322,6 +334,22 @@ function Home(): JSX.Element {
         ? `${mine.local}  ·  seen at ${mine.observed}`
         : mine.local;
 
+  /**
+   * What this machine would send, as one line.
+   *
+   * The display it is on rather than one it was told about, because the thing being shared is
+   * the screen this window is on. Multiplied by the backing scale, since a Mac reports the
+   * size it draws at and the encoder is handed the pixels behind it.
+   */
+  const specs = useMemo(() => {
+    const across = Math.round(window.screen.width * window.devicePixelRatio);
+    const down = Math.round(window.screen.height * window.devicePixelRatio);
+    const rate = settings?.fps ?? DEFAULT_FPS;
+    const megabits = Math.round((settings?.bitrateBps ?? DEFAULT_BITRATE_BPS) / 1e6);
+
+    return `${across} × ${down}  ·  ${rate} fps  ·  ${megabits} Mbps`;
+  }, [settings?.fps, settings?.bitrateBps]);
+
   return (
     <div className="relative h-full w-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <Backdrop sky={HOME_SKY} />
@@ -412,46 +440,27 @@ function Home(): JSX.Element {
               <span className="truncate text-[30px] leading-none font-semibold tracking-[-0.7px] text-ink">
                 This machine
               </span>
-              {/* The dot belongs beside the sentence it qualifies rather than beside the name.
-                  Against a thirty-pixel title it reads as a bullet; against this line it reads
-                  as the same status light every machine below carries. */}
-              <span className="flex items-center gap-2.5">
-                <img
-                  src={`assets/status-${shared ? 'live' : 'off'}.svg`}
-                  alt=""
-                  className="block size-[7px] flex-none overflow-visible"
-                />
-                {/* What it is doing, not where it is. Nobody types an address any more — the
-                    account is what finds a machine — so putting one here is asking somebody to
-                    read a number they will never use. It stays on the hover for the one case
-                    that still needs it: a deployment with no rendezvous server, where the
-                    other end has to be told by hand. */}
-                <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
-                  {mine?.phase === 'failed'
-                    ? 'Sharing failed'
-                    : shared
-                      ? mine?.local === null
-                        ? 'Opening'
-                        : 'Shared'
-                      : 'Not shared'}
-                </span>
+              {/* What it is doing, not where it is. Nobody types an address any more — the
+                  account is what finds a machine — so putting one here is asking somebody to
+                  read a number they will never use. It stays on the hover for the one case
+                  that still needs it: a deployment with no rendezvous server, where the other
+                  end has to be told by hand. */}
+              <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
+                {mine?.phase === 'failed'
+                  ? 'Sharing failed'
+                  : shared
+                    ? mine?.local === null
+                      ? 'Opening'
+                      : 'Shared'
+                    : 'Not shared'}
               </span>
               <span
                 className={`truncate text-[12.5px] ${mine?.error ? 'text-danger-ink' : 'text-dim'}`}
               >
-                {mine?.error ??
-                  (watched
-                    ? `${machineName(mine?.peer ?? '')} is watching`
-                    : shared
-                      ? // Sharing with nothing to share it with is a real state and not a
-                        // failure: the switch is this machine's own, and somebody may well
-                        // turn it on before installing Prism on the machine they will watch
-                        // from. Saying which of the two waits is going on saves them looking
-                        // for a fault that is not there.
-                        machines.length === 0
-                        ? 'Waiting — no other machine on your account yet'
-                        : 'Waiting for a machine to connect'
-                      : 'Nobody can watch this machine')}
+                {/* What this machine would send, rather than a sentence about waiting. The
+                    line above already says whether it is shared, so saying it again in prose
+                    spent the one line that could have carried something. */}
+                {mine?.error ?? (watched ? `${machineName(mine?.peer ?? '')} is watching` : specs)}
               </span>
             </div>
 
