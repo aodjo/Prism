@@ -521,14 +521,16 @@ function Home(): JSX.Element {
                   aria-label="Sharing terms"
                   aria-expanded={terms}
                   title="Frame rate, bitrate and where it listens"
-                  className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 text-[17px] leading-none transition-colors ${
+                  className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 transition-colors ${
                     terms ? 'bg-[rgba(255,255,255,0.12)] text-ink' : 'text-muted-2 hover:text-ink'
                   }`}
                   onClick={() => {
                     setTerms(!terms);
                   }}
                 >
-                  ⚙
+                  {/* The same drawing as the one in the header, taken out of it rather than
+                      redrawn, so the two gears cannot drift apart. */}
+                  <img src="assets/gear.svg" alt="" className="block size-[17px]" />
                 </button>
 
               {shared ? (
