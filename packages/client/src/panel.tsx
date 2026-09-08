@@ -13,13 +13,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import type {
-  AccountEnrolmentView,
-  AccountState,
-  PrismApi,
-  RendezvousServer,
-  Settings,
-} from './api.js';
+import type { AccountEnrolmentView, AccountState, PrismApi, Settings } from './api.js';
 import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -60,33 +54,17 @@ function Band({ title, children }: { title: string; children: ReactNode }): JSX.
 }
 
 /**
- * A labelled control on its own line, with the reason for it underneath.
- *
- * The hint is where a trade-off goes. Every setting in this window costs something — input
- * costs trust, smoothing costs latency, a fixed port costs a firewall rule — and a person
- * deciding needs that beside the control rather than in a paragraph under the whole group.
+ * A labelled control on its own line.
  *
  * @param {object} props - What to draw.
  * @param {string} props.label - What it sets.
- * @param {string} [props.hint] - What choosing it costs or means.
  * @param {ReactNode} props.children - The control.
  * @returns {JSX.Element} The row.
  */
-function Row({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: ReactNode;
-}): JSX.Element {
+function Row({ label, children }: { label: string; children: ReactNode }): JSX.Element {
   return (
-    <div className="flex min-h-[34px] items-center justify-between gap-5 py-[3px]">
-      <div className="min-w-0">
-        <div className="text-note-2 text-ink-3">{label}</div>
-        {hint && <div className="mt-px text-tiny leading-snug text-dim">{hint}</div>}
-      </div>
+    <div className="flex min-h-[32px] items-center justify-between gap-4">
+      <span className="text-note-2 text-muted">{label}</span>
       <div className="flex-none">{children}</div>
     </div>
   );
@@ -109,81 +87,6 @@ const NUMBER = `${FIELD} w-[74px] text-right tabular-nums`;
 
 /** The one shape every switch in this window has. */
 const TOGGLE = 'size-[15px] accent-violet';
-
-/**
- * The rendezvous servers, and how far away each one is.
- *
- * Shown rather than chosen between. A session is introduced through whichever server answers
- * it first, which is a measurement made at the moment of connecting and not a preference
- * somebody set weeks ago — so what is useful here is seeing what is there, and that the
- * nearest one is near.
- *
- * The round trip is measured by this machine. A server cannot make itself look close; the only
- * thing it says for itself is its name, which is why the number is the part to read.
- *
- * @returns {JSX.Element} The list, or a line saying why there is not one.
- */
-function Regions(): JSX.Element {
-  const [servers, setServers] = useState<RendezvousServer[] | null>(null);
-
-  useEffect(() => {
-    let live = true;
-
-    void (async () => {
-      const found = await prism.rendezvousServers();
-
-      if (live) {
-        setServers(found);
-      }
-    })();
-
-    return () => {
-      live = false;
-    };
-  }, []);
-
-  if (servers === null) {
-    return <p className="text-tiny text-dim">Measuring…</p>;
-  }
-
-  if (servers.length === 0) {
-    return (
-      <p className="text-tiny text-dim">
-        No server answered. Machines can still be reached on this network, or at an address
-        typed in beside one.
-      </p>
-    );
-  }
-
-  return (
-    <>
-      <div className="flex flex-col">
-        {servers.map((server, at) => (
-          <div
-            key={server.address}
-            title={server.address}
-            className="flex items-baseline justify-between gap-4 py-[3px]"
-          >
-            <span className={`truncate text-note-2 ${at === 0 ? 'text-ink' : 'text-muted'}`}>
-              {server.region || server.address}
-            </span>
-            <span
-              className={`flex-none font-mono text-fine tabular-nums ${
-                at === 0 ? 'text-ink' : 'text-dim'
-              }`}
-            >
-              {Math.round(server.roundTripMs)} ms
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <p className="mt-1.5 text-tiny leading-snug text-dim">
-        Whichever answers first introduces the two machines. Neither of them carries the picture.
-      </p>
-    </>
-  );
-}
 
 /**
  * The settings window.
@@ -478,32 +381,28 @@ function Panel(): JSX.Element {
         )}
 
         <Band title="Network">
-          <Regions />
-
-          <div className="mt-3 border-t border-line-1 pt-1">
-            <Row label="Account server" hint="Where machines sign in and find each other's keys.">
-              <input
-                type="text"
-                spellCheck={false}
-                placeholder="https://rv.example.com"
-                className={WIDE}
-                value={settings?.accountServer ?? ''}
-                onChange={(event) => {
-                  setSettings((was) => (was ? { ...was, accountServer: event.target.value } : was));
-                }}
-                onBlur={(event) => {
-                  save({ accountServer: event.target.value.trim() });
-                }}
-              />
-            </Row>
-          </div>
+          <Row label="Account server">
+            <input
+              type="text"
+              spellCheck={false}
+              placeholder="https://rv.example.com"
+              className={WIDE}
+              value={settings?.accountServer ?? ''}
+              onChange={(event) => {
+                setSettings((was) => (was ? { ...was, accountServer: event.target.value } : was));
+              }}
+              onBlur={(event) => {
+                save({ accountServer: event.target.value.trim() });
+              }}
+            />
+          </Row>
         </Band>
 
         {/* What this machine does when it is the one watching. Separate from what it does when
             it is the one being watched, because they are answers to different questions and a
             person is usually here about one of them. */}
         <Band title="Watching">
-          <Row label="Send input" hint="Your keyboard and mouse reach the other machine.">
+          <Row label="Send input">
             <input
               type="checkbox"
               className={TOGGLE}
@@ -513,10 +412,7 @@ function Panel(): JSX.Element {
               }}
             />
           </Row>
-          <Row
-            label="Smooth playback"
-            hint="Evens out arrival jitter, and costs the latency that buys it."
-          >
+          <Row label="Smooth playback">
             <input
               type="checkbox"
               className={TOGGLE}
@@ -542,7 +438,7 @@ function Panel(): JSX.Element {
               }}
             />
           </Row>
-          <Row label="Bitrate" hint="Megabits a second.">
+          <Row label="Bitrate">
             <input
               type="number"
               min={1}
@@ -555,10 +451,7 @@ function Panel(): JSX.Element {
               }}
             />
           </Row>
-          <Row
-            label="Listen on"
-            hint="The port stays fixed so somebody on this network can reach it."
-          >
+          <Row label="Listen on">
             <input
               type="text"
               spellCheck={false}
