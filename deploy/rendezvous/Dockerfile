@@ -3,6 +3,11 @@
 # Nothing in this server is platform specific and nothing it depends on is C, so it links
 # statically against musl and the final image needs no libraries, no shell, and no package
 # manager. What ships is one file of a few megabytes, which is also the entire attack surface.
+#
+# The account API it serves is plain HTTP, deliberately: TLS belongs to the reverse proxy in
+# front of it, which is a thing that already exists and already knows how to renew a
+# certificate. Terminating TLS here would mean a cryptographic provider, and the ones worth
+# trusting are C — which would cost exactly the property this file is about.
 
 FROM rust:1-alpine AS build
 

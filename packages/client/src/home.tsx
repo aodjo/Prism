@@ -1,0 +1,647 @@
+/**
+ * The home window.
+ *
+ * This machine at the top, every machine it can reach below it, and what has been watched
+ * lately under that. Nothing here draws a screen: a picture of a remote machine would have had
+ * to cross into JavaScript to arrive, and it never does — the stream is decoded and drawn by a
+ * process of its own. So this window is names, addresses and figures, which is all it can
+ * honestly be.
+ */
+
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { JSX, ReactNode } from 'react';
+import { createRoot } from 'react-dom/client';
+
+import type {
+  AccountDeviceView,
+  HostSnapshot,
+  PrismApi,
+  Session,
+  Settings,
+  StreamState,
+} from './api.js';
+import { ago, latency, span, when } from './format.js';
+import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
+
+declare global {
+  interface Window {
+    readonly prism: PrismApi;
+  }
+}
+
+const prism = window.prism;
+
+/** The phases where a stream is running or on its way to running. */
+const RUNNING: ReadonlySet<string> = new Set(['connecting', 'streaming']);
+
+/** Nothing is happening, and nothing has happened yet. */
+const NOTHING: StreamState = { phase: 'idle', host: null, terms: null, stats: null, log: [] };
+
+/** How many sessions the list shows before somebody asks for the rest. */
+const RECENT = 3;
+
+/** Which machines the grid is showing. */
+type Which = 'all' | 'online' | 'pinned';
+
+/** The three filters, in the order they are offered. */
+const WHICH: readonly { id: Which; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'online', label: 'Online' },
+  { id: 'pinned', label: 'Pinned' },
+];
+
+/**
+ * The colour a machine is marked with, assigned by key rather than by position.
+ *
+ * A colour that moved when the list reordered would be worse than no colour at all: the whole
+ * of what it is for is recognising the same machine twice in a list of similar names.
+ */
+const MARKS: readonly string[] = [
+  'rgba(124, 92, 255, 0.85)',
+  'rgba(77, 232, 176, 0.85)',
+  'rgba(53, 214, 255, 0.85)',
+  'rgba(255, 92, 168, 0.85)',
+];
+
+/** The frame every machine in the grid has. */
+const CARD =
+  'group relative flex items-center gap-3 rounded-card border bg-wash-3 py-[18px] pr-4 pl-5';
+
+/**
+ * Picks a machine's mark from its key.
+ *
+ * @param {string} key - The machine's public key, as hex.
+ * @returns {string} Its colour, the same one every time.
+ */
+function markOf(key: string): string {
+  let sum = 0;
+
+  for (let at = 0; at < key.length; at += 1) {
+    sum = (sum * 31 + key.charCodeAt(at)) % 65_536;
+  }
+
+  return MARKS[sum % MARKS.length] as string;
+}
+
+/**
+ * One measurement, said in the colour it is measured in.
+ *
+ * @param {object} props - What to draw.
+ * @param {string} props.tone - The Tailwind text colour.
+ * @param {string} props.wash - The tint behind it.
+ * @param {ReactNode} props.children - The figure and its unit.
+ * @returns {JSX.Element} The chip.
+ */
+function Chip({
+  tone,
+  wash,
+  children,
+}: {
+  tone: string;
+  wash: string;
+  children: ReactNode;
+}): JSX.Element {
+  return (
+    <span
+      className={`inline-flex items-center rounded-pill px-[11px] py-1.5 text-fine font-medium ${tone}`}
+      style={{ background: wash }}
+    >
+      {children}
+    </span>
+  );
+}
+
+/**
+ * The home window.
+ *
+ * @returns {JSX.Element} The whole of it.
+ */
+function Home(): JSX.Element {
+  const [machines, setMachines] = useState<readonly string[]>([]);
+  const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
+  const [account, setAccount] = useState<{ email: string | null; relay: boolean }>({
+    email: null,
+    relay: false,
+  });
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [stream, setStream] = useState<StreamState>(NOTHING);
+  const [history, setHistory] = useState<readonly Session[]>([]);
+  /** What this machine's own session is doing, or `null` when it is not shared. */
+  const [mine, setMine] = useState<HostSnapshot | null>(null);
+  const [query, setQuery] = useState('');
+  const [which, setWhich] = useState<Which>('all');
+  const [everything, setEverything] = useState(false);
+  const [trouble, setTrouble] = useState<string | null>(null);
+  const search = useRef<HTMLInputElement | null>(null);
+
+  const machineName = useCallback(
+    (key: string): string =>
+      devices.find((device) => device.publicKey === key)?.label || short(key),
+    [devices],
+  );
+
+  /** Where a machine is, as far as this one knows. */
+  const machineWhere = useCallback(
+    (key: string): string => {
+      const address = settings?.addresses[key];
+
+      if (address) {
+        return address;
+      }
+
+      return settings?.rendezvous ? 'Through the rendezvous server' : 'No address yet';
+    },
+    [settings],
+  );
+
+  /** How a machine is doing: watched, reachable, or neither. */
+  const machineState = useCallback(
+    (key: string): 'live' | 'idle' | 'off' => {
+      if (stream.host === key && RUNNING.has(stream.phase)) {
+        return 'live';
+      }
+
+      return settings?.addresses[key] || settings?.rendezvous ? 'idle' : 'off';
+    },
+    [settings, stream],
+  );
+
+  /** The most recent session on a machine, or `null` if it has never been watched. */
+  const lastOn = useCallback(
+    (key: string): Session | null => history.find((one) => one.host === key) ?? null,
+    [history],
+  );
+
+  useEffect(() => {
+    void (async () => {
+      const [identity, signedIn, stored, state, own, past] = await Promise.all([
+        prism.identity(),
+        prism.accountState(),
+        prism.getSettings(),
+        prism.streamState(),
+        prism.sharing(),
+        prism.sessions(),
+      ]);
+
+      setSettings(stored);
+      setDevices(signedIn.devices);
+      setAccount({ email: signedIn.email, relay: signedIn.relayAllowed });
+      setMine(own);
+      setStream(state);
+      setHistory(past);
+
+      // The account's machines, and only those. What this machine happens to trust locally is
+      // not the same question: that file is a cache of the account's answer, and anything in
+      // it that the account does not name is something nobody may reach from here.
+      setMachines(
+        signedIn.devices
+          .map((device) => device.publicKey)
+          .filter((key) => key !== identity.publicKey),
+      );
+    })();
+  }, []);
+
+  useEffect(() => {
+    prism.onSharing(setMine);
+    prism.onSessions(setHistory);
+    prism.onStream(setStream);
+
+    // The account is asked again whenever this window comes forward, so a machine signed in
+    // somewhere else turns up here without anybody restarting anything.
+    prism.onAccount((state) => {
+      setDevices(state.devices);
+      setAccount({ email: state.email, relay: state.relayAllowed });
+      setMachines(
+        state.devices
+          .map((device) => device.publicKey)
+          .filter((key) => key !== state.publicKey),
+      );
+    });
+  }, []);
+
+  const pinned = useMemo(() => new Set(settings?.pinned ?? []), [settings]);
+
+  /** What the grid is showing, pinned machines first and each group in its own order. */
+  const shown = useMemo(() => {
+    const wanted = query.trim().toLowerCase();
+
+    return machines
+      .filter((key) => wanted === '' || machineName(key).toLowerCase().includes(wanted))
+      .filter((key) => {
+        if (which === 'online') {
+          return machineState(key) !== 'off';
+        }
+
+        if (which === 'pinned') {
+          return pinned.has(key);
+        }
+
+        return true;
+      })
+      .sort((one, two) => Number(pinned.has(two)) - Number(pinned.has(one)));
+  }, [machines, query, which, pinned, machineName, machineState]);
+
+  /** Whether this machine is handing its screen out, or on its way to. */
+  const shared = mine !== null && mine.phase !== 'stopped' && mine.phase !== 'failed';
+
+  /** Whether somebody is actually watching it. */
+  const watched = mine?.phase === 'streaming';
+
+  const watch = useCallback(
+    (key: string): void => {
+      void (async () => {
+        setTrouble(null);
+
+        try {
+          setStream(await prism.connect(key, settings?.addresses[key] ?? ''));
+        } catch (error) {
+          setTrouble(reason(error));
+        }
+      })();
+    },
+    [settings],
+  );
+
+  /** Starts or stops handing this machine's screen out. */
+  const flip = useCallback((): void => {
+    void (async () => {
+      setTrouble(null);
+
+      try {
+        setMine(shared ? await prism.stopSharing() : await prism.startSharing());
+      } catch (error) {
+        setTrouble(reason(error));
+      }
+    })();
+  }, [shared]);
+
+  /** Adds a machine to the front of the list, or takes it back out. */
+  const pin = (key: string): void => {
+    void (async () => {
+      const next = pinned.has(key)
+        ? [...pinned].filter((one) => one !== key)
+        : [...pinned, key];
+
+      setSettings(await prism.setSettings({ pinned: next }));
+    })();
+  };
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (!event.metaKey && !event.ctrlKey) {
+        return;
+      }
+
+      if (event.key === 'k') {
+        event.preventDefault();
+        search.current?.focus();
+      }
+
+      // Only ever starts. Ending a session somebody else is in the middle of is not something
+      // to do by reflex, so the keystroke does nothing once this machine is shared.
+      if (event.key === 'Enter' && !shared) {
+        event.preventDefault();
+        flip();
+      }
+    };
+
+    document.addEventListener('keydown', onKey);
+
+    return () => {
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [shared, flip]);
+
+  const listed = everything ? history : history.slice(0, RECENT);
+
+  /** Where this machine can be reached, once it is listening somewhere. */
+  const reachable =
+    mine?.local === null || mine?.local === undefined
+      ? null
+      : mine.observed && mine.observed !== mine.local
+        ? `${mine.local}  ·  seen at ${mine.observed}`
+        : mine.local;
+
+  return (
+    <div className="relative h-full w-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <Backdrop sky={HOME_SKY} />
+
+      <div className="relative z-[1] mx-auto flex w-full max-w-[1440px] flex-col px-[72px] pt-[46px] pb-[52px]">
+        <header className="drag flex h-10 flex-none items-center gap-4">
+          <Wordmark size="sm" />
+          <div className="flex-1" />
+          <div className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-xl border border-line-1 bg-wash-3 py-2.5 pr-3 pl-3.5">
+            <span className="flex-none text-ui text-dim">⌕</span>
+            <input
+              ref={search}
+              type="text"
+              spellCheck={false}
+              placeholder="Search devices, sessions, files"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+              }}
+              className="min-w-0 flex-1 border-0 bg-transparent p-0 text-note text-ink placeholder:text-dim focus:outline-none"
+            />
+            <kbd className="flex-none font-sans text-tiny font-medium text-dim-2">⌘K</kbd>
+          </div>
+          {/* The gear and the face are one drawing in the design, and one control here: both
+              of them open the only place there is to change anything. */}
+          <button
+            type="button"
+            className="no-drag flex-none rounded-pill"
+            title={account.email ?? 'Not signed in'}
+            aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
+            onClick={prism.openSettings}
+          >
+            <img src="assets/account.svg" alt="" className="block h-7 w-14" />
+          </button>
+        </header>
+
+        <div className="drag mt-[30px] flex h-9 flex-none items-center gap-3">
+          <h1 className="m-0 text-[26px] leading-none font-semibold tracking-[-0.5px] text-ink">
+            Devices
+          </h1>
+          <span className="rounded-pill bg-[rgba(255,255,255,0.09)] px-[9px] py-1 text-fine font-medium text-muted-2">
+            {machines.length + 1}
+          </span>
+          <div className="flex-1" />
+          <div className="no-drag flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]">
+            {WHICH.map((one) => (
+              <button
+                key={one.id}
+                type="button"
+                aria-pressed={which === one.id}
+                onClick={() => {
+                  setWhich(one.id);
+                }}
+                className={`rounded-pill px-3.5 py-1.5 text-[12.5px] font-medium transition-colors ${
+                  which === one.id
+                    ? 'bg-[rgba(255,255,255,0.13)] text-ink'
+                    : 'text-muted-2 hover:text-ink-3'
+                }`}
+              >
+                {one.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={prism.openSettings}
+            className="no-drag inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
+          >
+            <span className="text-ui">+</span>
+            <span>Add device</span>
+          </button>
+        </div>
+
+        {/* This machine, given the top of the window because it is the one machine that is
+            always here and the one switch somebody came to flip. Everything below it is a
+            machine somebody might watch; this is the one they might be watched on. */}
+        <div className="relative mt-6 flex-none overflow-hidden rounded-card border border-line-4 bg-gradient-to-r from-[rgba(255,255,255,0.08)] to-[rgba(255,255,255,0.03)]">
+          <div className="pointer-events-none absolute top-[-151px] left-[59%] h-[400px] w-[700px] mix-blend-screen">
+            <img
+              src="assets/resume-glow.svg"
+              alt=""
+              className="absolute inset-x-[-12.86%] inset-y-[-22.5%] block max-w-none"
+            />
+          </div>
+
+          <div className="relative flex items-center gap-6 px-7 py-6">
+            <div className="flex min-w-0 flex-1 flex-col gap-2.5">
+              <span className="truncate text-[30px] leading-none font-semibold tracking-[-0.7px] text-ink">
+                This machine
+              </span>
+              {/* The dot belongs beside the sentence it qualifies rather than beside the name.
+                  Against a thirty-pixel title it reads as a bullet; against this line it reads
+                  as the same status light every machine below carries. */}
+              <span className="flex items-center gap-2.5">
+                <img
+                  src={`assets/status-${shared ? 'live' : 'off'}.svg`}
+                  alt=""
+                  className="block size-[7px] flex-none overflow-visible"
+                />
+                {/* What it is doing, not where it is. Nobody types an address any more — the
+                    account is what finds a machine — so putting one here is asking somebody to
+                    read a number they will never use. It stays on the hover for the one case
+                    that still needs it: a deployment with no rendezvous server, where the
+                    other end has to be told by hand. */}
+                <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
+                  {mine?.phase === 'failed'
+                    ? 'Sharing failed'
+                    : shared
+                      ? mine?.local === null
+                        ? 'Opening'
+                        : 'Shared'
+                      : 'Not shared'}
+                </span>
+              </span>
+              <span
+                className={`truncate text-[12.5px] ${mine?.error ? 'text-danger-ink' : 'text-dim'}`}
+              >
+                {mine?.error ??
+                  (watched
+                    ? `${machineName(mine?.peer ?? '')} is watching`
+                    : shared
+                      ? // Sharing with nothing to share it with is a real state and not a
+                        // failure: the switch is this machine's own, and somebody may well
+                        // turn it on before installing Prism on the machine they will watch
+                        // from. Saying which of the two waits is going on saves them looking
+                        // for a fault that is not there.
+                        machines.length === 0
+                        ? 'Waiting — no other machine on your account yet'
+                        : 'Waiting for a machine to connect'
+                      : 'Nobody can watch this machine')}
+              </span>
+            </div>
+
+            <div className="flex flex-none flex-col items-end gap-3.5">
+              {watched && (
+                <Chip tone="text-violet" wash="rgba(124, 92, 255, 0.13)">
+                  {(Number(mine?.bitrateBps ?? 0n) / 1e6).toFixed(0)} Mbps
+                </Chip>
+              )}
+              {shared ? (
+                <button type="button" className="btn-danger px-6 py-3.5 text-[15px]" onClick={flip}>
+                  Stop sharing
+                </button>
+              ) : (
+                <button type="button" className="btn-primary-md" onClick={flip}>
+                  Share this machine
+                  <span className="btn-key">⌘↵</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <Trouble
+          message={
+            trouble ??
+            (stream.phase === 'failed' && stream.log.length > 0
+              ? stream.log.slice(-3).join('\n')
+              : null)
+          }
+          className="mt-3 flex-none"
+        />
+
+        <h2 className="mt-10 flex-none text-ui font-medium tracking-[0.2px] text-muted-2">
+          Other devices
+        </h2>
+
+        {/* Three across at the width the design was drawn at, two when the window is narrow
+            enough that a third would be a column of clipped names. */}
+        <div className="mt-2.5 grid flex-none grid-cols-[repeat(auto-fill,minmax(290px,1fr))] gap-3">
+          {shown.map((key) => {
+            const state = machineState(key);
+            const seen = lastOn(key);
+            const held = pinned.has(key);
+            const live = state === 'live' && stream.phase === 'streaming';
+
+            return (
+              <div
+                key={key}
+                className={`${CARD} ${state === 'off' ? 'border-line-1' : 'border-line-4'}`}
+              >
+                {/* The whole card is the target. Laid over it rather than wrapped around it,
+                    because the star is a control of its own and a button inside a button is
+                    not a thing a browser will build. */}
+                <button
+                  type="button"
+                  aria-label={`Watch ${machineName(key)}`}
+                  onClick={() => {
+                    watch(key);
+                  }}
+                  className="absolute inset-0 z-0 rounded-card transition-colors hover:bg-[rgba(255,255,255,0.04)]"
+                />
+
+                <div className="pointer-events-none relative z-[1] flex min-w-0 flex-1 items-center gap-3">
+                  {/* Two states, as the design has them: a machine there is some way to reach,
+                      and one there is not. Whether it is being watched right now is the line
+                      underneath, where it can be said rather than encoded. */}
+                  <img
+                    src={`assets/status-${state === 'off' ? 'off' : 'live'}.svg`}
+                    alt=""
+                    className="block size-[7px] flex-none overflow-visible"
+                  />
+                  <span className="flex min-w-0 flex-1 flex-col gap-1">
+                    <span
+                      title={key}
+                      className={`truncate text-[15.5px] font-semibold tracking-[-0.2px] ${
+                        state === 'off' ? 'text-muted-2' : 'text-ink'
+                      }`}
+                    >
+                      {machineName(key)}
+                    </span>
+                    <span title={machineWhere(key)} className="truncate text-fine text-dim">
+                      {live && stream.stats
+                        ? `Streaming now · ${stream.stats.fps.toFixed(0)} fps · ${stream.stats.mbps.toFixed(0)} Mbps`
+                        : state === 'live'
+                          ? 'Connecting'
+                          : seen
+                            ? `Last seen ${ago(seen.endedAt)}`
+                            : machineWhere(key)}
+                    </span>
+                  </span>
+
+                  {(live && stream.stats ? true : seen !== null) && (
+                    <span className="flex-none rounded-pill bg-[rgba(255,255,255,0.07)] px-2.5 py-[5px] text-fine-2 font-medium text-muted">
+                      {live && stream.stats
+                        ? `${latency(stream.stats.rttMs)} ms`
+                        : `${latency(seen?.rttMs ?? 0)} ms`}
+                    </span>
+                  )}
+
+                  <button
+                    type="button"
+                    aria-pressed={held}
+                    aria-label={held ? `Unpin ${machineName(key)}` : `Pin ${machineName(key)}`}
+                    onClick={() => {
+                      pin(key);
+                    }}
+                    className={`pointer-events-auto flex-none rounded-pill px-2 py-[5px] text-tiny font-medium transition-opacity ${
+                      held
+                        ? 'bg-[rgba(255,176,92,0.14)] text-amber'
+                        : 'text-dim-2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
+                    }`}
+                  >
+                    ★
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+
+          {shown.length === 0 && (
+            <div className="col-span-full py-6 text-note text-dim">
+              {machines.length === 0
+                ? 'No other machines yet. Sign in on another one and it turns up here.'
+                : query.trim() === ''
+                  ? `No ${which} devices.`
+                  : `Nothing here is called “${query.trim()}”.`}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-10 flex flex-none items-center gap-2.5">
+          <h2 className="m-0 text-ui font-medium tracking-[0.2px] text-muted-2">
+            Recent sessions
+          </h2>
+          <div className="flex-1" />
+          {history.length > RECENT && (
+            <button
+              type="button"
+              className="text-[12.5px] text-dim transition-colors hover:text-ink-3"
+              onClick={() => {
+                setEverything(!everything);
+              }}
+            >
+              {everything ? 'Show fewer' : 'View all'}
+            </button>
+          )}
+        </div>
+
+        <div className="mt-2.5 flex flex-none flex-col gap-2">
+          {listed.length === 0 ? (
+            <p className="m-0 py-3 text-note-2 text-dim">
+              Every session you end is listed here, with what it came to.
+            </p>
+          ) : (
+            listed.map((one) => (
+              <button
+                key={`${one.host}-${one.startedAt}`}
+                type="button"
+                disabled={!machines.includes(one.host)}
+                onClick={() => {
+                  watch(one.host);
+                }}
+                className="flex w-full items-center gap-3.5 rounded-xl border border-line-1 bg-[rgba(255,255,255,0.04)] px-4 py-[13px] text-left transition-colors enabled:hover:bg-wash-3 disabled:cursor-default"
+              >
+                <i
+                  className="block size-1.5 flex-none rounded-[2px]"
+                  style={{ background: markOf(one.host) }}
+                />
+                <span className="truncate text-control font-medium text-ink-2">
+                  {machineName(one.host)}
+                </span>
+                <span className="flex-none text-[12.5px] text-dim">{when(one.endedAt)}</span>
+                <span className="flex-1" />
+                <span className="flex-none text-fine text-dim">{latency(one.rttMs)} ms avg</span>
+                <span className="flex-none text-[12.5px] font-medium text-muted">
+                  {span(one.endedAt - one.startedAt)}
+                </span>
+                <span className="flex-none text-[15px] text-dim-2">›</span>
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root') as HTMLElement).render(
+  <StrictMode>
+    <Home />
+  </StrictMode>,
+);

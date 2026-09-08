@@ -12,10 +12,21 @@ import type { Settings } from './api.js';
  * can turn it on and immediately see the trade.
  */
 export const DEFAULTS: Settings = {
+  setupDone: false,
   rendezvous: '',
+  accountServer: '',
   control: true,
   smooth: false,
   addresses: {},
+  pinned: [],
+  // The port is fixed rather than left to the operating system. With a rendezvous server it
+  // makes no difference, since the port is discovered either way — but without one, a machine
+  // on an operating-system-chosen port is a machine nobody can reach: the other end has no way
+  // to learn a number nothing told it.
+  bind: '0.0.0.0:47200',
+  fps: 60,
+  bitrateBps: 24_000_000,
+  shareOnLaunch: false,
 };
 
 /**

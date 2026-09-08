@@ -1,73 +1,11 @@
 //! The calls that block, run off the JavaScript thread.
 //!
-//! Pairing waits for a person: one side puts six digits on a screen and the other waits for
-//! somebody to walk them over and type them. That is seconds at best and two minutes at
-//! worst, and doing it on the thread drawing the window would freeze the window.
-//!
-//! Each task here blocks on a socket rather than working, which is what libuv's thread pool is
-//! for. None of them touches a frame, and none of them ever will: this file is control plane
-//! by construction.
-
-use std::net::SocketAddr;
+//! A session waits on a socket rather than working, which is what libuv's thread pool is for.
+//! Nothing here touches a frame, and nothing here ever will: this file is control plane by
+//! construction.
 
 use napi::{Env, Task};
-use prism_core::control::pair;
 use prism_core::identity;
-use prism_core::net::pairing::Pin;
-
-/// Shows a code and waits for one client to use it.
-pub struct PairAsHost {
-    /// Address to listen on, as text, because that is what a settings field holds.
-    pub bind: String,
-    /// The six digits already on screen.
-    pub code: String,
-}
-
-impl Task for PairAsHost {
-    type Output = [u8; 32];
-    type JsValue = String;
-
-    /// Runs the exchange on the thread pool.
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        let bind: SocketAddr = self.bind.parse().map_err(reason)?;
-        let pin = Pin::parse(&self.code).map_err(reason)?;
-
-        let (identity, peers) = load()?;
-
-        pair::host(bind, &identity, &peers, pin).map_err(reason)
-    }
-
-    /// Hands the client's key back as hex.
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(identity::to_hex(&output))
-    }
-}
-
-/// Carries a typed code to a host.
-pub struct PairAsClient {
-    /// Address the host is showing, as text.
-    pub host: String,
-    /// The six digits a person typed.
-    pub code: String,
-}
-
-impl Task for PairAsClient {
-    type Output = [u8; 32];
-    type JsValue = String;
-
-    /// Runs the exchange on the thread pool.
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        let host: SocketAddr = self.host.parse().map_err(reason)?;
-        let (identity, peers) = load()?;
-
-        pair::client(host, &self.code, &identity, &peers).map_err(reason)
-    }
-
-    /// Hands the host's key back as hex.
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(identity::to_hex(&output))
-    }
-}
 
 /// Loads this machine's identity and the path its paired peers are kept at.
 fn load() -> napi::Result<(prism_core::net::handshake::Identity, std::path::PathBuf)> {
@@ -111,19 +49,16 @@ pub fn host_config(
     Ok(config)
 }
 
-/// Loads this machine's identity and every client it has paired with.
+/// Loads this machine's identity and every machine on the account that may watch it.
 ///
-/// A machine that has paired with nobody cannot host. That is refused here rather than
-/// producing a session that waits forever for a client it would not admit anyway.
+/// An empty list is not refused. Sharing is this machine saying its own screen may be watched
+/// by the account it belongs to — a statement about itself, true whether or not a second
+/// machine exists yet. Somebody who turns it on before installing Prism anywhere else has done
+/// nothing wrong, and a switch that refused to move until some other machine appeared would be
+/// answering a question nobody asked.
 pub fn host_keys() -> napi::Result<prism_core::control::host::HostKeys> {
     let (identity, peers) = load()?;
     let allowed = identity::known_peers(&peers).map_err(reason)?;
-
-    if allowed.is_empty() {
-        return Err(napi::Error::from_reason(
-            "no client has been paired with this machine yet",
-        ));
-    }
 
     Ok(prism_core::control::host::HostKeys { identity, allowed })
 }
@@ -167,4 +102,59 @@ pub fn stopped_snapshot() -> crate::HostSnapshot {
         audio_frames: 0u64.into(),
         error: None,
     }
+}
+
+/// Derives the secret that signs somebody in, on the thread pool.
+///
+/// Deliberately slow — a memory-hard hash over a password takes a few hundred milliseconds —
+/// which is exactly why it may not run on the thread drawing the window.
+pub struct DeriveAuth {
+    /// What was typed.
+    pub password: String,
+    /// The account's salt, as hex.
+    pub salt: String,
+}
+
+impl Task for DeriveAuth {
+    type Output = String;
+    type JsValue = String;
+
+    /// Hashes the password and keeps only the half the server is told.
+    ///
+    /// The wrapping half is derived here too and dropped without leaving this function. It has
+    /// no business in JavaScript: nothing in the window needs it, and a value that never
+    /// crosses that boundary cannot be logged, serialised, or sent somewhere by mistake.
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        use prism_core::account::secret;
+
+        let salt = hex_array::<{ secret::SALT_LEN }>(&self.salt)
+            .ok_or_else(|| napi::Error::from_reason("the salt is not hex"))?;
+
+        let secrets = secret::derive(&self.password, &salt).map_err(reason)?;
+
+        Ok(secrets
+            .auth
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
+
+    /// Hands the secret back as hex.
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Reads hex into an array of a known size.
+fn hex_array<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2 {
+        return None;
+    }
+
+    let bytes: Option<Vec<u8>> = (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect();
+
+    bytes?.try_into().ok()
 }

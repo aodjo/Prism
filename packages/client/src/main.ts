@@ -1,11 +1,16 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { createRequire } from 'node:module';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { Settings, StreamState } from './api.js';
+import { Holder } from '@prism/account/holder';
+import { toDataURL } from 'qrcode';
+
+import type { AccountEnrolmentView, HostSnapshot, Session, Settings, StreamState } from './api.js';
+import { loadSessions, recordSession } from './sessions.js';
 import { DEFAULTS, loadSettings, saveSettings } from './settings.js';
+import { Sharing } from './sharing.js';
 import { Stream } from './stream.js';
 
 const require = createRequire(import.meta.url);
@@ -19,8 +24,20 @@ const here = dirname(fileURLToPath(import.meta.url));
  */
 const prism = require('@prism/native') as typeof import('@prism/native');
 
-/** How wide the window is. Fixed, because its content is a column of hosts and settings. */
+/** How wide the settings window is. Fixed, because its content is a column of rows. */
 const WINDOW_WIDTH = 420;
+
+/**
+ * What the setup flow and the home window open at.
+ *
+ * The design was drawn at 1440 × 900. Opening at that size would fill a laptop display edge to
+ * edge on first launch, so the window starts smaller and the layout is written to hold its
+ * composition at any size rather than only at the one it was drawn at.
+ */
+const STAGE_WIDTH = 1280;
+
+/** And how tall. */
+const STAGE_HEIGHT = 840;
 
 /** The shortest the window goes, so a failed render is not an invisible one. */
 const MIN_WINDOW_HEIGHT = 220;
@@ -28,14 +45,39 @@ const MIN_WINDOW_HEIGHT = 220;
 /** The tallest it goes, so a long list of hosts does not fill the screen. */
 const MAX_WINDOW_HEIGHT = 760;
 
-/** The window. */
+/** The settings window, which is what the original panel became. */
 let window: BrowserWindow | null = null;
+
+/** The setup flow, open only until it is finished or skipped. */
+let setup: BrowserWindow | null = null;
+
+/** The home window, which is where somebody spends their time. */
+let home: BrowserWindow | null = null;
 
 /** The stream process and its state. */
 let stream: Stream | null = null;
 
 /** What this machine is configured to do. */
 let settings: Settings = { ...DEFAULTS };
+
+/** What has been watched from this machine, most recent first. */
+let sessions: readonly Session[] = [];
+
+/**
+ * The account, which both applications hold the same way.
+ *
+ * It reads the server address out of these settings and writes the signalling address back
+ * into them, because where to register is something the account knows and this machine does
+ * not until it has asked.
+ */
+const account = new Holder(prism, {
+  server: () => settings.accountServer,
+  rendezvous: () => settings.rendezvous,
+  setRendezvous: (address: string) => {
+    settings = { ...settings, rendezvous: address };
+    saveSettings(settings);
+  },
+});
 
 /**
  * Sends the stream's state to the window.
@@ -49,6 +91,116 @@ function pushStream(state: StreamState): void {
   }
 
   window.webContents.send('stream:state', state);
+}
+
+/**
+ * Sends the stream's state to every window that is open.
+ *
+ * Three of them can be, and all three draw some part of what a stream is doing. Sending to the
+ * one that happened to start it would leave the others showing what was true a minute ago.
+ *
+ * @param {StreamState} state - What the stream is doing.
+ * @returns {void}
+ */
+function broadcastStream(state: StreamState): void {
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('stream:state', state);
+    }
+  }
+}
+
+/**
+ * Sends what this machine's own session is doing to every window that is open.
+ *
+ * @param {HostSnapshot | null} snapshot - The counters, or `null` when sharing stopped.
+ * @returns {void}
+ */
+function broadcastSharing(snapshot: HostSnapshot | null): void {
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('share:state', snapshot);
+    }
+  }
+}
+
+/**
+ * Records a session that has ended and tells every window that is open.
+ *
+ * @param {Session} session - What just ended.
+ * @returns {void}
+ */
+function keepSession(session: Session): void {
+  sessions = recordSession(sessions, session);
+
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('sessions:list', sessions);
+    }
+  }
+}
+
+/**
+ * This machine's willingness to be watched.
+ *
+ * Beside the stream rather than in a second application: one machine has one identity and one
+ * account, and two applications sharing them was two of everything that had to agree.
+ */
+const sharing = new Sharing(prism, broadcastSharing);
+
+/**
+ * The account's other machines, as one comparable string.
+ *
+ * This machine is left out because it is never the thing that changed: it is always there, and
+ * it is the one key a session does not admit.
+ *
+ * @async
+ * @returns {Promise<string>} Their keys, sorted, joined.
+ */
+async function others(): Promise<string> {
+  const state = await account.view();
+
+  return state.devices
+    .filter((device) => !device.isThisMachine)
+    .map((device) => device.publicKey)
+    .sort()
+    .join(',');
+}
+
+/**
+ * Asks the account who its machines are, and acts on a change.
+ *
+ * Two things go stale together. The list a window draws is one; the list a running session
+ * admits is the other, and that one is read when the session opens. So a machine added to the
+ * account after sharing started would knock on a door this one has already decided not to
+ * answer — which looks, from the new machine, exactly like a fault.
+ *
+ * Reopening the session is what fixes that, and it costs nothing while nobody is watching:
+ * there is no picture to interrupt. A session with somebody in it is left alone — they are
+ * already admitted, and dropping them to let somebody else in is not a trade worth making.
+ *
+ * @async
+ * @returns {Promise<void>}
+ */
+async function catchUp(): Promise<void> {
+  const before = await others();
+
+  await account.refresh();
+
+  const state = await account.view();
+
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('account:state', state);
+    }
+  }
+
+  const own = sharing.snapshot();
+
+  if ((await others()) !== before && own && own.peer === null && own.phase !== 'failed') {
+    sharing.stop();
+    sharing.start(settings);
+  }
 }
 
 /**
@@ -78,9 +230,64 @@ function createWindow(): BrowserWindow {
     },
   });
 
+  echoConsole(created);
   void created.loadFile(join(here, '..', 'renderer', 'index.html'));
 
   return created;
+}
+
+/**
+ * Builds one of the two full-size windows.
+ *
+ * Both are the same window with a different page in it: same chrome, same bridge, same size.
+ * The difference is which of them a launch opens, and that is decided by whether setup has
+ * been through once.
+ *
+ * @param {string} page - The file in `renderer/` to load.
+ * @returns {BrowserWindow} The created window.
+ */
+function createStage(page: string): BrowserWindow {
+  const created = new BrowserWindow({
+    width: STAGE_WIDTH,
+    height: STAGE_HEIGHT,
+    minWidth: 1040,
+    minHeight: 720,
+    title: 'Prism',
+    // The design puts its own content where a title bar would be, and carries the traffic
+    // lights over the top left of it.
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    backgroundColor: '#08080b',
+    webPreferences: {
+      preload: join(here, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  echoConsole(created);
+  void created.loadFile(join(here, '..', 'renderer', page));
+
+  return created;
+}
+
+/**
+ * Opens the home window, and closes setup if that is what was showing.
+ *
+ * @returns {void}
+ */
+function openHome(): void {
+  if (home && !home.isDestroyed()) {
+    home.focus();
+  } else {
+    home = createStage('home.html');
+  }
+
+  if (setup && !setup.isDestroyed()) {
+    setup.close();
+  }
+
+  setup = null;
 }
 
 /**
@@ -96,6 +303,74 @@ function registerHandlers(): void {
     hosts: prism.pairedPeers(),
   }));
 
+  ipcMain.handle('permissions:get', () => prism.permissions(settings.control));
+
+  ipcMain.handle('permissions:request', (_event, id: string) => {
+    // The system prompts at most once. After that it answers the same way forever and shows
+    // nothing, so a refusal here means the only way forward is the settings pane.
+    const granted = prism.requestPermission(id);
+
+    if (!granted) {
+      const grant = prism.permissions(settings.control).missing.find((one) => one.id === id);
+
+      if (grant) {
+        void shell.openExternal(grant.settingsUrl);
+      }
+    }
+
+    return prism.permissions(settings.control);
+  });
+
+  ipcMain.on('setup:done', () => {
+    settings = { ...settings, setupDone: true };
+    saveSettings(settings);
+    openHome();
+  });
+
+  ipcMain.on('window:settings', () => {
+    if (window && !window.isDestroyed()) {
+      window.focus();
+      return;
+    }
+
+    window = createWindow();
+  });
+
+  ipcMain.handle('share:start', () => sharing.start(settings));
+
+  ipcMain.handle('share:stop', () => sharing.stop());
+
+  ipcMain.handle('share:state', () => sharing.snapshot());
+
+  ipcMain.handle('account:state', () => account.view());
+
+  ipcMain.handle('account:challenge', (_event, email: string) => account.challenge(email));
+
+  ipcMain.handle(
+    'account:register',
+    async (_event, email: string, password: string, code: string) => {
+      const enrolment = await account.register(email, password, code);
+
+      // Drawn here rather than in the window, because the window may not load anything and
+      // this process may. What crosses is a picture of a link the account server already sent.
+      const qr = await toDataURL(enrolment.totpUri, { margin: 1, width: 220 });
+
+      return { qr, secret: enrolment.totpSecret } satisfies AccountEnrolmentView;
+    },
+  );
+
+  ipcMain.handle(
+    'account:signIn',
+    (_event, email: string, password: string, code: string, label: string) =>
+      account.signIn(email, password, code, label),
+  );
+
+  ipcMain.handle('account:signOut', () => account.signOut());
+
+  ipcMain.handle('account:forgetDevice', (_event, publicKey: string) =>
+    account.forget(publicKey),
+  );
+
   ipcMain.handle('settings:get', () => settings);
 
   ipcMain.handle('settings:set', (_event, next: Partial<Settings>) => {
@@ -105,14 +380,8 @@ function registerHandlers(): void {
     return settings;
   });
 
-  ipcMain.handle('pairing:run', async (_event, host: string, code: string) => {
-    const peer = await prism.pairAsClient(host, code);
-
-    return { peer, hosts: prism.pairedPeers() };
-  });
-
   ipcMain.handle('stream:connect', (_event, host: string, address: string) => {
-    stream ??= new Stream(pushStream);
+    stream ??= new Stream(broadcastStream, keepSession);
 
     // What the window passed, or what was stored for this host last time. The rendezvous
     // server is the fallback, and `Stream.start` refuses when there is neither.
@@ -124,6 +393,8 @@ function registerHandlers(): void {
   ipcMain.handle('stream:disconnect', () => stream?.stop() ?? idle());
 
   ipcMain.handle('stream:state', () => stream?.state() ?? idle());
+
+  ipcMain.handle('sessions:list', () => sessions);
 
   ipcMain.on('window:fit', (_event, height: number) => {
     if (!window || window.isDestroyed()) {
@@ -143,7 +414,42 @@ function registerHandlers(): void {
  * @returns {StreamState} An idle state.
  */
 function idle(): StreamState {
-  return { phase: 'idle', host: null, log: [] };
+  return { phase: 'idle', host: null, terms: null, stats: null, log: [] };
+}
+
+/**
+ * Forwards a window's own console to this process, while a harness is driving it.
+ *
+ * A renderer that throws while React is drawing it leaves an empty page and says so only in a
+ * console nobody is watching. Under a screenshot or a drive script that is the difference
+ * between a diagnosis and a black rectangle.
+ *
+ * @param {BrowserWindow} target - The window to listen to.
+ * @returns {void}
+ */
+function echoConsole(target: BrowserWindow): void {
+  if (!process.env['PRISM_WINDOW_DRIVE'] && !process.env['PRISM_WINDOW_SCREENSHOT']) {
+    return;
+  }
+
+  target.webContents.on('console-message', (event) => {
+    process.stderr.write(`window: ${event.message}\n`);
+  });
+}
+
+/**
+ * Returns whichever window a person is looking at.
+ *
+ * @returns {BrowserWindow | null} The window, or `null` when none opened.
+ */
+function onScreen(): BrowserWindow | null {
+  for (const open of [home, setup, window]) {
+    if (open && !open.isDestroyed()) {
+      return open;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -158,27 +464,72 @@ function idle(): StreamState {
  * @returns {Promise<void>}
  */
 async function captureWindow(path: string): Promise<void> {
-  if (!window) {
+  const shown = onScreen();
+
+  if (!shown) {
     app.quit();
     return;
   }
 
   await new Promise((resolve) => setTimeout(resolve, 1200));
 
-  const image = await window.webContents.capturePage();
+  // A picture of the window doing nothing only ever shows one of its states. Running a script
+  // first is what makes the others photographable at all.
+  const first = process.env['PRISM_WINDOW_DRIVE'];
+  if (first) {
+    await shown.webContents.executeJavaScript(readFileSync(first, 'utf8'), true);
+  }
+
+  const image = await shown.webContents.capturePage();
   writeFileSync(path, image.toPNG());
 
-  const text = await window.webContents.executeJavaScript('document.body.innerText');
+  const text = await shown.webContents.executeJavaScript('document.body.innerText');
   process.stdout.write(`${String(text)}\n`);
 
   app.quit();
 }
 
+// Whenever a window comes forward. That is the moment somebody is about to look at the list
+// of their machines, and the moment they are most likely to have just signed in on another one.
+app.on('browser-window-focus', () => {
+  void catchUp();
+});
+
 void app.whenReady().then(() => {
   settings = loadSettings();
+  sessions = loadSessions();
   registerHandlers();
+  account.start();
 
-  window = createWindow();
+  if (settings.shareOnLaunch) {
+    try {
+      sharing.start(settings);
+    } catch {
+      // Nothing is on screen yet to be told. The home window reads the session's state when it
+      // opens, and a failure to start shows there as a machine that is not shared.
+    }
+  }
+
+  // A machine that has been through setup goes straight to the thing setup was for. One that
+  // has not is asked the questions setup asks, once.
+  //
+  // A developer affordance too: the page to open, so that a screenshot can be taken of a
+  // window this machine's own state would not otherwise show.
+  const forced = process.env['PRISM_WINDOW_PAGE'];
+
+  // Being signed in is itself an answer to every question setup asks, so somebody who is does
+  // not get asked again — whatever the settings file says. The two can disagree: a settings
+  // file that was lost or copied from another machine would otherwise send somebody who has
+  // been using this for weeks back to the first screen.
+  const settled = settings.setupDone || Holder.signedInBefore();
+
+  if (forced === 'setup.html' || (!settled && forced !== 'home.html')) {
+    setup = createStage('setup.html');
+  } else if (forced === 'index.html') {
+    window = createWindow();
+  } else {
+    home = createStage('home.html');
+  }
 
   const screenshot = process.env['PRISM_WINDOW_SCREENSHOT'];
   if (screenshot) {
@@ -209,7 +560,9 @@ void app.whenReady().then(() => {
  * @returns {Promise<void>}
  */
 async function driveWindow(path: string): Promise<void> {
-  if (!window) {
+  const shown = onScreen();
+
+  if (!shown) {
     app.quit();
     return;
   }
@@ -220,7 +573,19 @@ async function driveWindow(path: string): Promise<void> {
 
   try {
     const source = readFileSync(path, 'utf8');
-    const result: unknown = await window.webContents.executeJavaScript(source, true);
+
+    // A script that ends setup closes the window it is running in, and a promise inside a
+    // destroyed renderer never settles. Racing the close keeps that from hanging forever.
+    const closed = new Promise<string>((resolve) => {
+      shown.once('closed', () => {
+        resolve('the window closed while the script was running');
+      });
+    });
+
+    const result: unknown = await Promise.race([
+      shown.webContents.executeJavaScript(source, true),
+      closed,
+    ]);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (error) {
     process.stdout.write(
@@ -238,6 +603,8 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   // A stream that outlived its window would keep a remote screen on this machine with nothing
-  // on screen to say so, and no way to stop it short of finding the process.
+  // on screen to say so, and no way to stop it short of finding the process. A session that
+  // outlived it would keep handing this screen out, which is worse.
   stream?.stop();
+  sharing.stop();
 });

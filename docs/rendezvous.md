@@ -159,11 +159,36 @@ address, the server is behind something that rewrote it and no amount of retryin
 
 ## What it holds
 
-Two hash maps and a socket. A registered host costs a few tens of bytes; a challenge in flight
-costs the same and expires in ten seconds. Registrations expire ninety seconds after the last
-keepalive, and hosts send one every fifteen. Nothing is written to disk, so there is nothing to
-back up and nothing to migrate — a server that is restarted is repopulated by its hosts within
-fifteen seconds.
+The rendezvous half is two hash maps and a socket. A registered host costs a few tens of bytes;
+a challenge in flight costs the same and expires in ten seconds. Registrations expire ninety
+seconds after the last keepalive, and hosts send one every fifteen. None of it is written down —
+a server that is restarted is repopulated by its hosts within fifteen seconds.
+
+The account half writes two files, both beside the path given to `--accounts`:
+
+| File | What is in it |
+|---|---|
+| `accounts.json` | One record per account: the salt, the verifier, the TOTP secret, the sealed private key, and the machines. |
+| `sessions.json` | One record per signed-in session: **SHA-256 of** the token, the account it belongs to, and when it expires. |
+
+The hash is the point of the second file. A session token is a bearer credential — whoever
+reads one is that account until it expires — so what is stored is enough to recognise a token
+that comes back and no use at all to somebody who reads the file. There is no slower hash here
+on purpose: a token is 32 bytes of randomness, so there is no smaller space to search than the
+whole one.
+
+Sessions are written down so that restarting the server does not sign everybody out. Before
+that they lived in memory, which made every deployment a forced sign-in on every machine, and
+turned "stay signed in" into a promise that held until the next update.
+
+A hardened unit has to be told about that directory, because the two files are the only things
+this server writes:
+
+```ini
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/prism
+```
 
 ## What it refuses
 

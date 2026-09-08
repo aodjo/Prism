@@ -3,7 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 // The resolution mode is stated because this file is CommonJS while the package is a module,
 // and TypeScript will not guess which one a declaration beside it belongs to. Types only:
 // nothing is imported at run time.
-import type { Identity, Paired, PrismApi, Settings, StreamState } from './api.js' with { 'resolution-mode': 'import' };
+import type { AccountEnrolmentView, AccountState, HostPermissions, HostSnapshot, Identity, PrismApi, Session, Settings, StreamState } from './api.js' with { 'resolution-mode': 'import' };
 
 /**
  * The bridge the window talks to the machine through.
@@ -15,13 +15,65 @@ import type { Identity, Paired, PrismApi, Settings, StreamState } from './api.js
 const api: PrismApi = {
   identity: (): Promise<Identity> => ipcRenderer.invoke('prism:identity'),
 
+  permissions: (): Promise<HostPermissions> => ipcRenderer.invoke('permissions:get'),
+
+  requestPermission: (id: string): Promise<HostPermissions> =>
+    ipcRenderer.invoke('permissions:request', id),
+
+  startSharing: (): Promise<HostSnapshot | null> => ipcRenderer.invoke('share:start'),
+
+  stopSharing: (): Promise<null> => ipcRenderer.invoke('share:stop'),
+
+  sharing: (): Promise<HostSnapshot | null> => ipcRenderer.invoke('share:state'),
+
+  onSharing: (listener: (snapshot: HostSnapshot | null) => void): void => {
+    ipcRenderer.on('share:state', (_event, snapshot: HostSnapshot | null) => {
+      listener(snapshot);
+    });
+  },
+
+  finishSetup: (): void => {
+    ipcRenderer.send('setup:done');
+  },
+
+  openSettings: (): void => {
+    ipcRenderer.send('window:settings');
+  },
+
+  accountState: (): Promise<AccountState> => ipcRenderer.invoke('account:state'),
+
+  onAccount: (listener: (state: AccountState) => void): void => {
+    ipcRenderer.on('account:state', (_event, state: AccountState) => {
+      listener(state);
+    });
+  },
+
+  accountChallenge: (email: string): Promise<boolean> =>
+    ipcRenderer.invoke('account:challenge', email),
+
+  accountRegister: (
+    email: string,
+    password: string,
+    code: string,
+  ): Promise<AccountEnrolmentView> =>
+    ipcRenderer.invoke('account:register', email, password, code),
+
+  accountSignIn: (
+    email: string,
+    password: string,
+    code: string,
+    label: string,
+  ): Promise<AccountState> => ipcRenderer.invoke('account:signIn', email, password, code, label),
+
+  accountSignOut: (): Promise<AccountState> => ipcRenderer.invoke('account:signOut'),
+
+  accountForgetDevice: (publicKey: string): Promise<AccountState> =>
+    ipcRenderer.invoke('account:forgetDevice', publicKey),
+
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
 
   setSettings: (next: Partial<Settings>): Promise<Settings> =>
     ipcRenderer.invoke('settings:set', next),
-
-  pair: (host: string, code: string): Promise<Paired> =>
-    ipcRenderer.invoke('pairing:run', host, code),
 
   connect: (host: string, address: string): Promise<StreamState> =>
     ipcRenderer.invoke('stream:connect', host, address),
@@ -29,6 +81,14 @@ const api: PrismApi = {
   disconnect: (): Promise<StreamState> => ipcRenderer.invoke('stream:disconnect'),
 
   streamState: (): Promise<StreamState> => ipcRenderer.invoke('stream:state'),
+
+  sessions: (): Promise<readonly Session[]> => ipcRenderer.invoke('sessions:list'),
+
+  onSessions: (listener: (sessions: readonly Session[]) => void): void => {
+    ipcRenderer.on('sessions:list', (_event, sessions: readonly Session[]) => {
+      listener(sessions);
+    });
+  },
 
   fit: (height: number): void => {
     ipcRenderer.send('window:fit', height);

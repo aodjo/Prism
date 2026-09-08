@@ -4,6 +4,7 @@
     // and a DOM. Compiling it with the main process's settings would let a Node import through
     // that fails only at run time, in a window with no console anybody is watching.
     "target": "ES2023",
+    "jsx": "react-jsx",
     "module": "ES2022",
     "moduleResolution": "Bundler",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
@@ -13,10 +14,8 @@
     "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
-    "outDir": "renderer",
-    "rootDir": "src",
-    "sourceMap": true,
+    "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/panel.ts", "src/api.d.ts"]
+  "include": ["src/setup.tsx", "src/home.tsx", "src/panel.tsx", "src/api.d.ts"]
 }

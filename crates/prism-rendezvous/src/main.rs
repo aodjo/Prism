@@ -23,6 +23,7 @@
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,7 @@ use clap::Parser;
 use prism_core::net::packet::MAX_PACKET_SIZE;
 use prism_core::net::rendezvous::{MAX_MESSAGE_LEN, Message, RELAY_TOKEN_LEN, challenge};
 
+use prism_rendezvous::mail::Mailer;
 use prism_rendezvous::registry::{Proved, Registry};
 use prism_rendezvous::relay::{Forward, Relays};
 
@@ -58,6 +60,65 @@ struct Cli {
     /// Print a line for every message, rather than a summary every minute.
     #[arg(long)]
     verbose: bool,
+
+    /// Where accounts are kept, and the port to serve them on.
+    ///
+    /// Omitted means no account API at all: the server does what it always did, which is
+    /// signalling for machines that paired by reading a code off one screen.
+    #[arg(long)]
+    accounts: Option<PathBuf>,
+
+    /// Address to serve the account API on.
+    ///
+    /// The loopback by default, because this speaks plain HTTP and is meant to sit behind a
+    /// reverse proxy that terminates TLS. Binding it anywhere else is refused unless
+    /// `--api-insecure` says the exposure is deliberate: the value that signs somebody in
+    /// crosses this connection, and a server that put it on the network in the clear would
+    /// look exactly like one that did not.
+    #[arg(long, default_value = "127.0.0.1:47380")]
+    api_bind: SocketAddr,
+
+    /// Serve the account API in the clear on an address other than the loopback.
+    ///
+    /// For a network where something else is providing confidentiality — a tunnel, a private
+    /// link. Not for the internet.
+    #[arg(long)]
+    api_insecure: bool,
+
+    /// Where signed-in machines should look for this server's signalling, as `host:port`.
+    ///
+    /// Handed out when somebody signs in, so that neither end has to be told by hand where to
+    /// register. It cannot be worked out from `--bind`: a server behind a forwarded port or a
+    /// name knows neither, and the address that matters is the one a machine somewhere else
+    /// can reach. Omitted means machines are on their own to find each other, which on a
+    /// single network they can.
+    #[arg(long)]
+    advertise: Option<String>,
+
+    /// The mail provider's key, which is what lets this server prove an address is somebody's.
+    ///
+    /// Taken from the environment rather than typed on a command line, because a key on a
+    /// command line is a key in every process listing and in the shell's history. Without it
+    /// this server cannot send anything, so it creates accounts already verified and says so
+    /// at startup — which is right for a server one person runs for their own machines and
+    /// wrong for one anybody can reach.
+    #[arg(long, env = "PRISM_RESEND_KEY", hide_env_values = true)]
+    mail_key: Option<String>,
+
+    /// The address confirmations come from, whose domain the provider must already hold.
+    ///
+    /// Something like `Prism <no-reply@example.com>`.
+    #[arg(long, env = "PRISM_MAIL_FROM")]
+    mail_from: Option<String>,
+
+    /// A token that lets whoever holds it list and delete accounts on this server.
+    ///
+    /// Omitted means those endpoints do not exist, which is the default: a rendezvous server
+    /// is not an administration console unless somebody says it is. From the environment for
+    /// the same reason as the mail key — a secret on a command line is a secret in every
+    /// process listing.
+    #[arg(long, env = "PRISM_ADMIN_TOKEN", hide_env_values = true)]
+    admin_token: Option<String>,
 
     /// Refuse to carry traffic for peers that could not reach each other directly.
     ///
@@ -98,6 +159,25 @@ fn serve(cli: &Cli) -> io::Result<()> {
     // never has to be told apart from a signalling message — see `relay` for why guessing
     // would be a bug rather than an inefficiency — and its own thread because it carries tens
     // of megabits while this loop handles a message every few minutes.
+    // The account API, if this server keeps accounts. On its own thread with its own runtime,
+    // because it is the only part of this server that is asynchronous and the loop below is
+    // the only part that must never wait on anything.
+    if let Some(path) = cli.accounts.clone() {
+        spawn_accounts(
+            path,
+            cli.api_bind,
+            cli.api_insecure,
+            cli.advertise.clone().unwrap_or_default(),
+            Post {
+                key: cli.mail_key.clone(),
+                from: cli.mail_from.clone(),
+            },
+            cli.admin_token
+                .clone()
+                .filter(|token| !token.trim().is_empty()),
+        )?;
+    }
+
     let relays = Arc::new(Mutex::new(Relays::new()));
     let relay_port = if cli.no_relay {
         println!(
@@ -410,4 +490,156 @@ fn is_timeout(err: &io::Error) -> bool {
         err.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
     )
+}
+
+/// How this server sends the one message it sends, as the command line gave it.
+#[derive(Debug, Clone)]
+struct Post {
+    key: Option<String>,
+    from: Option<String>,
+}
+
+impl Post {
+    /// Builds the mailer, or nothing when this deployment does not prove addresses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a key was given without an address to send from — a half-configured
+    /// mailer would fail at the moment somebody registers rather than at startup, which is the
+    /// wrong end of the day to find out.
+    fn into_mailer(self) -> io::Result<Option<Mailer>> {
+        let Some(key) = self.key.filter(|key| !key.trim().is_empty()) else {
+            println!(
+                "prism-rendezvous: no mail key, so an email address is only ever a name here \
+                 — anybody can register any address without proving it is theirs. Fine for \
+                 your own machines; not for a server strangers can reach."
+            );
+
+            return Ok(None);
+        };
+
+        let Some(from) = self.from.filter(|from| !from.trim().is_empty()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--mail-key was given without --mail-from, so there is no address to send \
+                 signup codes from",
+            ));
+        };
+
+        let mailer =
+            Mailer::new(key, from.clone()).map_err(|err| io::Error::other(err.to_string()))?;
+
+        println!("prism-rendezvous: signup codes sent from {from}");
+
+        Ok(Some(mailer))
+    }
+}
+
+/// Starts the account API on a thread of its own.
+///
+/// # Errors
+///
+/// Returns an error if the account store cannot be opened, if the address would put the API
+/// in the clear on the network, or if the thread cannot be spawned.
+fn spawn_accounts(
+    path: PathBuf,
+    bind: SocketAddr,
+    insecure: bool,
+    advertise: String,
+    post: Post,
+    admin: Option<String>,
+) -> io::Result<()> {
+    use prism_rendezvous::accounts::Accounts;
+    use prism_rendezvous::api::{Service, routes};
+    use prism_rendezvous::sessions::Sessions;
+
+    if !bind.ip().is_loopback() && !insecure {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the account API speaks plain HTTP and {bind} is not the loopback. Put a reverse \
+                 proxy in front of it and bind the loopback, or pass --api-insecure if something \
+                 else is providing confidentiality. The value that signs somebody in crosses \
+                 this connection."
+            ),
+        ));
+    }
+
+    let accounts = Accounts::open(&path)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+
+    println!(
+        "prism-rendezvous: {} account(s) from {}",
+        accounts.len(),
+        path.display()
+    );
+
+    if bind.ip().is_loopback() {
+        println!("prism-rendezvous: accounts on http://{bind} — put TLS in front of it");
+    } else {
+        println!("prism-rendezvous: accounts on http://{bind} IN THE CLEAR, as asked");
+    }
+
+    // Beside the accounts rather than under a flag of its own: it is the same deployment's
+    // state, and a server whose sessions and accounts could be pointed at different places
+    // would have one more way to be configured into signing everybody out.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let sessions = Sessions::open(path.with_file_name("sessions.json"), now);
+    println!("prism-rendezvous: {} session(s) still good", sessions.len());
+
+    if advertise.is_empty() {
+        println!(
+            "prism-rendezvous: no --advertise, so signed-in machines are not told where to \
+             register and can only reach each other directly"
+        );
+    } else {
+        println!("prism-rendezvous: telling signed-in machines to register at {advertise}");
+    }
+
+    let mailer = post.into_mailer()?;
+
+    if admin.is_some() {
+        println!(
+            "prism-rendezvous: accounts can be listed and deleted by whoever holds the admin \
+             token"
+        );
+    }
+
+    let service = Service::new(accounts, sessions, advertise, mailer, admin);
+
+    std::thread::Builder::new()
+        .name("prism-accounts".into())
+        .spawn(move || {
+            // Its own runtime, because this is the only part of the server that is
+            // asynchronous and the receive loop is the only part that must never wait.
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    eprintln!("prism-rendezvous: the account API could not start: {err}");
+                    return;
+                }
+            };
+
+            runtime.block_on(async move {
+                let listener = match tokio::net::TcpListener::bind(bind).await {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        eprintln!("prism-rendezvous: the account API could not bind {bind}: {err}");
+                        return;
+                    }
+                };
+
+                if let Err(err) = axum::serve(listener, routes(service)).await {
+                    eprintln!("prism-rendezvous: the account API stopped: {err}");
+                }
+            });
+        })?;
+
+    Ok(())
 }

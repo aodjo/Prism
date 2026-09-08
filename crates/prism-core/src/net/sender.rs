@@ -267,13 +267,15 @@ impl SliceSender {
     /// # Errors
     ///
     /// Returns [`io::ErrorKind::TimedOut`] if no paired client connects within `patience`,
-    /// and the underlying [`io::Error`] for a socket failure.
+    /// [`io::ErrorKind::Interrupted`] if `cancelled` is set while it waits, and the underlying
+    /// [`io::Error`] for a socket failure.
     pub fn serve_on(
         transport: UdpTransport,
         identity: &Identity,
         allowed: Vec<[u8; KEY_LEN]>,
         ability: HostAbility,
         patience: std::time::Duration,
+        cancelled: &AtomicBool,
     ) -> io::Result<Self> {
         let (established, peer, listener) = crate::control::session::serve(
             &transport,
@@ -281,6 +283,7 @@ impl SliceSender {
             PeerPolicy::Paired(allowed),
             ability,
             patience,
+            cancelled,
         )?;
         transport.set_read_timeout(None)?;
 

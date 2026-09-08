@@ -84,6 +84,11 @@ pnpm lint         # macOS clippy + rustfmt
 pnpm lint:cross   # linux, windows 타깃 clippy (링커 없이 clippy만 수행하므로 로컬에서 동작)
 ```
 
+`lint:cross`는 `prism-rendezvous`를 제외한다. 이 크레이트에는 `cfg(target_os)`가 하나도 없어서
+이 검사가 잡으려는 문제가 애초에 존재할 수 없고, TLS 스택(ring)이 타깃용 C 툴체인을 요구해서
+크로스 컴파일러가 없는 맥에서는 빌드 자체가 실패한다. 리눅스·윈도우 실제 컴파일은 CI가 각 OS에서
+네이티브로 수행한다.
+
 최초 1회 `rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-msvc` 필요.
 
 ## 핫패스 금지 사항

@@ -20,9 +20,6 @@ mod tasks;
 use napi::bindgen_prelude::{AsyncTask, BigInt};
 use napi_derive::napi;
 use prism_core::identity;
-use prism_core::net::pairing::Pin;
-
-use crate::tasks::{PairAsClient, PairAsHost};
 
 /// Returns the Prism version string.
 ///
@@ -79,20 +76,6 @@ pub fn paired_peers() -> napi::Result<Vec<String>> {
         .iter()
         .map(identity::to_hex)
         .collect())
-}
-
-/// Generates a six digit pairing code.
-///
-/// Returned rather than generated inside [`pair_as_host`] because the code has to be on screen
-/// before that call returns, and it does not return until somebody has used it.
-///
-/// # Errors
-///
-/// Fails if the platform has no usable randomness, which is a condition no pairing should
-/// proceed under.
-#[napi]
-pub fn generate_pairing_code() -> napi::Result<String> {
-    Ok(Pin::generate().map_err(to_napi)?.to_display())
 }
 
 /// One thing the system still has to allow.
@@ -176,30 +159,67 @@ pub fn request_permission(id: String) -> napi::Result<bool> {
     Ok(prism_core::control::permissions::request(grant))
 }
 
-/// Waits for one client to pair using `code`, and returns its public key as hex.
-///
-/// The code is single use: whether the attempt succeeds or fails, this call is finished with
-/// it and a second attempt needs a fresh one. That is the whole reason six digits is enough.
+/// Returns a fresh salt for a new account, as hex.
 ///
 /// # Errors
 ///
-/// Rejects if nobody pairs before the code expires, if the code was mistyped, or if the
-/// address cannot be bound.
-#[napi(ts_return_type = "Promise<string>")]
-pub fn pair_as_host(bind: String, code: String) -> AsyncTask<PairAsHost> {
-    AsyncTask::new(PairAsHost { bind, code })
+/// Fails if the platform has no usable randomness.
+#[napi]
+pub fn account_new_salt() -> napi::Result<String> {
+    let salt = prism_core::account::secret::new_salt().map_err(to_napi)?;
+
+    Ok(salt.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// Pairs with a host that is showing `code`, and returns its public key as hex.
+/// Derives the secret that signs somebody in.
+///
+/// Slow on purpose — a memory-hard hash is what makes a stolen database expensive to guess
+/// against — so it runs off the window's thread and returns a promise.
+///
+/// Only the half the server is told comes back. The half that unlocks a private key is derived
+/// alongside it and never leaves the native side, because nothing in a window needs it and a
+/// value that never crosses the boundary cannot be logged or sent somewhere by mistake.
+#[napi(ts_return_type = "Promise<string>")]
+pub fn account_auth(password: String, salt: String) -> AsyncTask<tasks::DeriveAuth> {
+    AsyncTask::new(tasks::DeriveAuth { password, salt })
+}
+
+/// Makes the account's machines the only ones this one will open a session with.
+///
+/// This is what replaced reading a six digit code off one screen and typing it into another:
+/// two machines signed in to the same account are told about each other.
+///
+/// The list is replaced rather than added to. Only machines on the account may reach this one,
+/// so the account's answer is the whole answer — a key that stayed behind after it left the
+/// account, or one recorded by the pairing this replaced, would otherwise still be admitted
+/// with nothing on any screen to say so.
+///
+/// This machine's own key is left out rather than refused, because the account lists it too
+/// and a machine that trusted itself would offer itself as somewhere to connect.
 ///
 /// # Errors
 ///
-/// Rejects if the code was not accepted — which covers a mistyped code, a code already used,
-/// and a machine answering that is not the one showing it, none of which can be told apart —
-/// or if the host does not answer at all.
-#[napi(ts_return_type = "Promise<string>")]
-pub fn pair_as_client(host: String, code: String) -> AsyncTask<PairAsClient> {
-    AsyncTask::new(PairAsClient { host, code })
+/// Fails if a key is not a public key, or if the list cannot be written.
+#[napi]
+pub fn account_trust_devices(public_keys: Vec<String>) -> napi::Result<u32> {
+    let path = identity::default_peers_path().map_err(to_napi)?;
+    let identity_path = identity::default_path().map_err(to_napi)?;
+    let me = identity::load_or_create(&identity_path).map_err(to_napi)?;
+    let mine = *me.public();
+
+    let mut theirs: Vec<[u8; 32]> = Vec::with_capacity(public_keys.len());
+
+    for text in &public_keys {
+        let key = identity::parse_peer_key(text).map_err(napi::Error::from_reason)?;
+
+        if key != mine && !theirs.contains(&key) {
+            theirs.push(key);
+        }
+    }
+
+    identity::set_peers(&path, &theirs).map_err(to_napi)?;
+
+    Ok(u32::try_from(theirs.len()).unwrap_or(u32::MAX))
 }
 
 /// Turns any error into one JavaScript can throw.

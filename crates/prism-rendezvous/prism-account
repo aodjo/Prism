@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Lists and deletes accounts on this machine's rendezvous server.
+#
+# Talks to the running server rather than editing its file. Editing the file underneath a
+# running server is a race it wins: it holds the accounts in memory and writes the whole lot
+# back on the next change, so a deletion made behind its back comes straight back. Going
+# through the server also means nothing has to be stopped and nobody is signed out by a
+# restart that was only meant to remove one address.
+set -euo pipefail
+
+# Read out of the file rather than sourced from it. That file is systemd's, and systemd is not
+# a shell: the address it holds contains angle brackets, which a shell would read as
+# redirection. Taking the one line this needs keeps the file in the form its actual reader
+# expects.
+ENV_FILE="$HOME/.config/prism/mail.env"
+TOKEN=$(sed -n 's/^PRISM_ADMIN_TOKEN=//p' "$ENV_FILE" | tr -d '"' | head -1)
+
+if [ -z "$TOKEN" ]; then
+  echo "no PRISM_ADMIN_TOKEN in $ENV_FILE, so this server has no way to be administered" >&2
+  exit 1
+fi
+
+API=${PRISM_API:-http://192.168.219.115:47380}
+AUTH="authorization: Bearer ${TOKEN}"
+
+case "${1:-list}" in
+list)
+  curl -fsS -H "$AUTH" "$API/v1/admin/accounts" | python3 -m json.tool
+  ;;
+rm | remove | delete)
+  [ $# -ge 2 ] || {
+    echo "usage: prism-account rm <email>" >&2
+    exit 2
+  }
+  curl -fsS -X DELETE -H "$AUTH" "$API/v1/admin/accounts/$2" | python3 -m json.tool
+  ;;
+wipe)
+  emails=$(curl -fsS -H "$AUTH" "$API/v1/admin/accounts" |
+    python3 -c 'import sys, json; [print(a["email"]) for a in json.load(sys.stdin)]')
+
+  if [ -z "$emails" ]; then
+    echo "nothing to remove"
+    exit 0
+  fi
+
+  for email in $emails; do
+    echo "removing $email"
+    curl -fsS -X DELETE -H "$AUTH" "$API/v1/admin/accounts/$email" >/dev/null
+  done
+  echo "done"
+  ;;
+*)
+  echo "usage: prism-account [list | rm <email> | wipe]" >&2
+  exit 2
+  ;;
+esac

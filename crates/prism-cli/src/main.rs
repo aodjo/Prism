@@ -24,7 +24,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 use prism_core::identity;
 use prism_core::net::handshake::Identity;
 use prism_core::net::negotiate::{Codecs, H264, Offer};
-use prism_core::net::pairing::Pin;
 
 /// How the client trades latency against even presentation.
 ///
@@ -260,17 +259,6 @@ enum Command {
         peer_key: Option<String>,
     },
 
-    /// Exchange long-term keys with another machine using a six digit code.
-    ///
-    /// Run once per pair of machines. After it, neither side ever needs a code again, and a
-    /// peer that cannot prove it holds the matching private key is refused before it can send
-    /// a single byte the session acts on.
-    Pair {
-        /// Which side of the exchange to run.
-        #[command(subcommand)]
-        side: PairSide,
-    },
-
     /// Print this machine's public key, creating its long-term key if there is none.
     ///
     /// The two sides exchange these once. Each pins the other's, and from then on a peer
@@ -367,40 +355,6 @@ enum Command {
         /// the encoder's latency from one bounded by its throughput.
         #[arg(long, default_value_t = 1)]
         in_flight: usize,
-    },
-}
-
-/// The two halves of a pairing exchange.
-///
-/// The client dials, because that is where the person who typed the code is waiting. This is
-/// the opposite of a running session, where the host dials — pairing and streaming are
-/// separate exchanges and neither constrains the other.
-#[derive(Debug, Subcommand)]
-enum PairSide {
-    /// Show a code and wait for one client to use it.
-    Host {
-        /// Address to listen on.
-        #[arg(long, default_value = "0.0.0.0:47100")]
-        bind: SocketAddr,
-
-        /// Where this machine's long-term key is kept, generated on first use.
-        #[arg(long)]
-        identity: Option<PathBuf>,
-    },
-
-    /// Type a code the host is showing and pair with it.
-    Client {
-        /// Address the host is waiting on.
-        #[arg(long)]
-        host: SocketAddr,
-
-        /// The six digits the host printed.
-        #[arg(long)]
-        pin: String,
-
-        /// Where this machine's long-term key is kept, generated on first use.
-        #[arg(long)]
-        identity: Option<PathBuf>,
     },
 }
 
@@ -874,36 +828,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     )?)
                 }
             }
-        }
-
-        Command::Pair { side } => {
-            let peers = identity::default_peers_path()?;
-
-            match side {
-                PairSide::Host {
-                    bind,
-                    identity: path,
-                } => {
-                    let identity = open_identity(path.as_deref())?;
-                    let pin = Pin::generate()?;
-                    println!("pairing code: {}", pin.to_display());
-                    println!("waiting on {bind}");
-
-                    let peer = prism_core::control::pair::host(bind, &identity, &peers, pin)?;
-                    println!("paired with {}", identity::to_hex(&peer));
-                }
-                PairSide::Client {
-                    host,
-                    pin,
-                    identity: path,
-                } => {
-                    let identity = open_identity(path.as_deref())?;
-                    let peer = prism_core::control::pair::client(host, &pin, &identity, &peers)?;
-                    println!("paired with {}", identity::to_hex(&peer));
-                }
-            }
-
-            Ok(())
         }
 
         Command::Keygen { identity: path } => {

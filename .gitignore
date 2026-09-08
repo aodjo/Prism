@@ -15,8 +15,14 @@ packages/native/index.d.ts
 # Isolated worktrees created for parallel agent runs; never part of the tree
 .claude/worktrees/
 
-# Compiled from packages/host/src/panel.ts, next to the markup that loads it.
+# Bundled from each application's sources, next to the markup that loads them.
 packages/host/renderer/panel.js
 packages/host/renderer/panel.js.map
+packages/host/renderer/prism.css
 packages/client/renderer/panel.js
 packages/client/renderer/panel.js.map
+packages/client/renderer/setup.js
+packages/client/renderer/setup.js.map
+packages/client/renderer/home.js
+packages/client/renderer/home.js.map
+packages/client/renderer/prism.css

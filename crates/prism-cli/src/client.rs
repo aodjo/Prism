@@ -78,6 +78,13 @@ const DECODE_QUEUE_DEPTH: usize = 8;
 /// find a good one early without adding meaningful traffic.
 const PING_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How often the running client says what it is doing.
+///
+/// Once a second, which is fast enough for a number a person is watching and far under the cap
+/// the interface side is held to. What crosses here is four integers on a line — the frames
+/// themselves never leave this process, and this is the only thing about them that does.
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Sentinel for "no clock offset has been established yet".
 ///
 /// Shared with whoever else needs to convert host timestamps — the display thread reads
@@ -393,6 +400,16 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         f64::from(agreed.bitrate_bps) / 1e6,
         if agreed.audio { "on" } else { "off" },
     );
+    // The same thing again, in a shape a program can read. The line above is written for a
+    // person and has been reworded before; anything parsing it would break the next time it is.
+    println!(
+        "client: terms codec={:?} width={} height={} fps={} audio={}",
+        agreed.codec,
+        agreed.width,
+        agreed.height,
+        agreed.fps,
+        u8::from(agreed.audio),
+    );
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
     let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
@@ -415,6 +432,9 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     let mut unsynced = 0u32;
     let mut sync = ClockSync::new();
     let mut last_ping = Instant::now() - PING_INTERVAL;
+    let mut last_stats = Instant::now();
+    let mut window_frames = 0u32;
+    let mut window_bytes = 0u64;
     let mut pings_sent = 0u32;
     let mut pongs_seen = 0u32;
     let mut ping_buf = [0u8; CLOCK_PING_LEN];
@@ -459,6 +479,26 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             Err(err) if is_timeout(&err) => break,
             Err(err) => return Err(err),
         };
+
+        window_bytes += bytes.len() as u64;
+
+        // Emitted here rather than where a frame completes, so that a stream which has stopped
+        // producing pictures still says so with zeroes instead of going quiet — which is
+        // indistinguishable, from the outside, from a client that has died.
+        if last_stats.elapsed() >= STATS_INTERVAL {
+            let seconds = last_stats.elapsed().as_secs_f64();
+            last_stats = Instant::now();
+
+            println!(
+                "client: stats rtt_us={} fps={:.1} kbps={:.0} frames={frames}",
+                sync.round_trip_us().unwrap_or(0),
+                f64::from(window_frames) / seconds,
+                (window_bytes as f64 * 8.0 / 1000.0) / seconds,
+            );
+
+            window_frames = 0;
+            window_bytes = 0;
+        }
 
         if channel_of(bytes) == Ok(Channel::Control) {
             let t4_us = now_us();
@@ -580,6 +620,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             None => unsynced += 1,
         }
         frames += 1;
+        window_frames += 1;
 
         if config.decode {
             let mut buf = recycle_rx.try_recv().unwrap_or_default();

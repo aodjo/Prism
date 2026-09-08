@@ -1,0 +1,470 @@
+/*
+ * The Prism design system, as the Figma file defines it.
+ *
+ * Shared by both applications. Everything the design names lives in `@theme`, which is what
+ * turns a token into a utility: `--color-ink` becomes `text-ink` and `bg-ink`, `--text-title`
+ * becomes `text-title`. That is the point of doing it in CSS rather than a config file — a
+ * screen exported from Figma comes out as Tailwind classes, and the ones it uses are the ones
+ * this file defines.
+ *
+ * The typeface is not here. Each application bundles its own copy beside its own markup, so
+ * that a packaged build carries the font it loads rather than a path into a sibling.
+ */
+
+@theme {
+  /* Geist, subset to latin, as one variable file covering every weight the design uses.
+     Bundled rather than fetched: this window has no network origin it is allowed to load from,
+     and a typeface that arrives late is a window that reflows in front of somebody. */
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+
+  --color-base: #08080b;
+  --color-sunk: #06060a;
+  --color-sidebar: rgba(12, 12, 18, 0.72);
+
+  /* Surfaces are a white wash over the base rather than opaque greys, so that whatever the
+     aurora is doing behind them still comes through. */
+  --color-wash-1: rgba(255, 255, 255, 0.04);
+  --color-wash-2: rgba(255, 255, 255, 0.05);
+  --color-wash-3: rgba(255, 255, 255, 0.06);
+  --color-wash-4: rgba(255, 255, 255, 0.08);
+
+  --color-line-1: rgba(255, 255, 255, 0.07);
+  --color-line-2: rgba(255, 255, 255, 0.08);
+  --color-line-3: rgba(255, 255, 255, 0.09);
+  --color-line-4: rgba(255, 255, 255, 0.1);
+
+  --color-ink: #f6f6f8;
+  --color-ink-2: #e4e4ec;
+  --color-ink-3: #c9c9d4;
+  --color-muted: #a2a2b2;
+  --color-muted-2: #8a8a99;
+  --color-dim: #62626f;
+  --color-dim-2: #4e4e5c;
+
+  /* The five colours a prism splits light into. Each one means one thing and is not used for
+     decoration anywhere. */
+  --color-violet: #7c5cff;
+  --color-cyan: #35d6ff;
+  --color-mint: #4de8b0;
+  --color-amber: #ffb05c;
+  --color-rose: #ff5ca8;
+  --color-danger: #ff5c6e;
+  --color-danger-ink: #ff8a96;
+
+  --color-on-light: #0b0b10;
+  --color-light: #f0f0f4;
+
+  /* The type scale the design uses, named by what each size is for rather than by how big it
+     is — a heading that gets retuned should not leave a class called `text-38` behind.
+     
+     The display sizes carry their own scaling. The design is drawn at 1440 wide, and 104px
+     held in a 1280 window takes a quarter more of it than it was meant to, breaking lines in
+     places the comp does not. Each one is capped at what the design asked for and shrinks with
+     the window below that, which is why their leading and tracking are relative: a line height
+     in pixels would not follow the size it belongs to. */
+  --text-hero: min(104px, 7.22vw);
+  --text-hero--line-height: 0.98;
+  --text-hero--letter-spacing: 0.029em;
+  --text-triumph: min(61px, 4.24vw);
+  --text-triumph--line-height: 1.066;
+  --text-triumph--letter-spacing: -0.034em;
+  --text-display: min(40px, 2.78vw);
+  --text-display--line-height: 1.175;
+  --text-display--letter-spacing: -0.0275em;
+  --text-title: min(38px, 2.64vw);
+  --text-title--line-height: 1.184;
+  --text-title--letter-spacing: -0.029em;
+  --text-lead: min(19px, 1.32vw);
+  --text-lead--line-height: 1.579;
+  --text-lead-2: min(16px, 1.11vw);
+  --text-lead-2--line-height: 1.688;
+  --text-body: min(15.5px, 1.076vw);
+  --text-body--line-height: 1.677;
+  --text-body-2: min(15px, 1.042vw);
+  --text-body-2--line-height: 1.667;
+
+  /* Everything from here down is interface rather than composition, and stays the size it was
+     drawn at whatever the window is doing. */
+  --text-heading: 23px;
+  --text-heading--line-height: 1.2;
+  --text-heading--letter-spacing: -0.3px;
+  --text-figure: 30px;
+  --text-figure--line-height: 1.1;
+  --text-figure--letter-spacing: -0.8px;
+  --text-digit: 26px;
+  --text-row: 14.5px;
+  --text-row--line-height: 1.2;
+  --text-ui: 14px;
+  --text-control: 13.5px;
+  --text-note: 13px;
+  --text-note-2: 12.5px;
+  --text-fine: 12px;
+  --text-fine-2: 11.5px;
+  --text-tiny: 11px;
+  --text-tiny-2: 10.5px;
+
+  /* Labels the design sets in capitals with the tracking opened up. Two sizes, because the
+     ones on a card are smaller than the ones on a panel. */
+  --text-label: 10px;
+  --text-label--letter-spacing: 1.4px;
+  --text-label-2: 9.5px;
+  --text-label-2--letter-spacing: 1.3px;
+
+  /* The radii the design uses that Tailwind's own scale does not have. `rounded-2xl` is
+     already the 16px some cards want, so only these five need naming. */
+  --radius-tile: 10px;
+  --radius-badge: 11px;
+  --radius-panel: 14px;
+  --radius-card: 18px;
+  --radius-stage: 20px;
+  --radius-pill: 999px;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    color: var(--color-ink);
+    background: var(--color-base);
+    font-family: var(--font-sans);
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-font-smoothing: antialiased;
+    color-scheme: dark;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: default;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-violet);
+    outline-offset: 3px;
+  }
+}
+
+@layer components {
+  /* ── Controls ──────────────────────────────────────────────────────────────────────────
+     Every button in this product is a pill. The three kinds differ by what they are for, not
+     by size: one light-on-dark primary per screen, a washed secondary for everything else,
+     and a red one only where something is being ended. */
+  .btn-primary {
+    @apply inline-flex items-center gap-3 rounded-pill bg-light py-4 pr-6 pl-8
+      text-lead-2 font-medium text-on-light transition-colors
+      hover:not-disabled:bg-white disabled:opacity-45;
+  }
+
+  /* The size between the two: the one action on a page that is a page of many things, rather
+     than the one action on a screen that exists to ask for it. */
+  .btn-primary-md {
+    @apply inline-flex items-center gap-2.5 rounded-pill bg-light py-3.5 pr-5 pl-[26px]
+      text-[15px] font-medium text-on-light transition-colors
+      hover:not-disabled:bg-white disabled:opacity-45;
+  }
+
+  .btn-primary-sm {
+    @apply inline-flex items-center gap-2 rounded-pill bg-light py-[9px] pr-[14px] pl-[18px]
+      text-control font-medium text-on-light transition-colors
+      hover:not-disabled:bg-white disabled:opacity-45;
+  }
+
+  /* What follows the label on a button: an arrow, or the keys that do the same thing.
+     
+     A keystroke is set in a chip because that is what a key looks like, and the shape is half
+     of what makes it read as one. An arrow is not a key and gets no chip — a box around it
+     only draws the eye to the box. */
+  .btn-trailing {
+    @apply text-note font-medium text-[rgba(11,11,16,0.6)];
+  }
+
+  .btn-key {
+    @apply rounded-[6px] bg-[rgba(11,11,16,0.09)] px-2 py-[3px] text-note font-medium
+      text-[rgba(11,11,16,0.6)];
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center gap-1.5 rounded-pill border border-line-4 bg-wash-3
+      px-[15px] py-[9px] text-note font-medium text-ink-2 transition-colors
+      hover:not-disabled:bg-[rgba(255,255,255,0.1)] disabled:opacity-45;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center rounded-pill border border-[rgba(255,92,110,0.24)]
+      bg-[rgba(255,92,110,0.12)] px-[15px] py-[9px] text-note font-medium text-danger-ink
+      transition-colors hover:not-disabled:bg-[rgba(255,92,110,0.2)];
+  }
+
+  /* A button that is only a sentence. Used where the action is the one somebody takes when
+     they do not want the one beside it.
+     
+     Quiet, but not to the point of being missed: these sit over the brightest part of the
+     aurora on more than one screen, and at the dim end of the scale they disappear into it. */
+  .btn-ghost {
+    @apply bg-none px-0.5 py-[3px] text-control text-muted transition-colors
+      hover:not-disabled:text-ink;
+  }
+
+  /* A grant that has already been given is stated, not offered. */
+  .tag-granted {
+    @apply inline-flex items-center gap-1.5 rounded-pill bg-[rgba(77,232,176,0.14)] px-4
+      py-[9px] text-note font-medium text-mint;
+  }
+
+  .card {
+    @apply overflow-hidden rounded-2xl border border-line-3 bg-wash-2;
+  }
+
+  /* Every direct child of a screen rises, each one a beat after the one above it. Written
+     against position rather than given a class per element, so a screen that gains a line does
+     not also have to be told where that line sits in the order. */
+  .rise > * {
+    animation: rise 460ms cubic-bezier(0.22, 1.2, 0.36, 1) both;
+  }
+
+  .rise > *:nth-child(1) {
+    animation-delay: 120ms;
+  }
+
+  .rise > *:nth-child(2) {
+    animation-delay: 175ms;
+  }
+
+  .rise > *:nth-child(3) {
+    animation-delay: 230ms;
+  }
+
+  .rise > *:nth-child(4) {
+    animation-delay: 285ms;
+  }
+
+  .rise > *:nth-child(5) {
+    animation-delay: 340ms;
+  }
+
+  .rise > *:nth-child(6) {
+    animation-delay: 395ms;
+  }
+
+  .rise > *:nth-child(7) {
+    animation-delay: 450ms;
+  }
+
+  .rise > *:nth-child(n + 8) {
+    animation-delay: 505ms;
+  }
+}
+
+@layer utilities {
+  /* Windows have no title bar of their own, so the surface says which parts of it drag. */
+  .drag {
+    -webkit-app-region: drag;
+  }
+
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+}
+
+/* Moving between screens.
+   The page arrives from the side it came from, and what is on it lifts into place a beat
+   behind — a page that simply replaced the last one would leave somebody checking whether
+   anything happened. The lift overshoots very slightly and settles, which is what makes it
+   read as rising rather than as sliding up. */
+@keyframes slide-in-forward {
+  from {
+    transform: translateX(64px);
+  }
+}
+
+@keyframes slide-in-back {
+  from {
+    transform: translateX(-64px);
+  }
+}
+
+@keyframes slide-out-forward {
+  to {
+    opacity: 0;
+    transform: translateX(-64px);
+  }
+}
+
+@keyframes slide-out-back {
+  to {
+    opacity: 0;
+    transform: translateX(64px);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Entering a code ───────────────────────────────────────────────────────────────────
+   The one place in the flow that earns real motion. Everything else here is a form somebody
+   fills in at their own pace; this is six characters typed one at a time, from a message they
+   are reading off another screen, and every one of them is a chance to lose their place. So
+   each keystroke gets an answer, and so does getting it wrong. */
+
+/* The boxes arrive in order rather than as a block. A row that appears whole reads as a
+   picture of a row; a row that arrives left to right reads as six things to fill. */
+@keyframes code-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.9);
+  }
+}
+
+/* A character landing. It overshoots and settles, which is what makes it feel like something
+   was put down rather than something was repainted. */
+@keyframes code-set {
+  0% {
+    transform: scale(0.9);
+  }
+  55% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* Refused. Short and lateral, the way a head shake is — and the row empties itself as it runs,
+   because six wrong characters that stay put are six backspaces before anybody can try
+   again. */
+@keyframes code-refused {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  15% {
+    transform: translateX(-8px);
+  }
+  32% {
+    transform: translateX(7px);
+  }
+  50% {
+    transform: translateX(-5px);
+  }
+  68% {
+    transform: translateX(3px);
+  }
+  85% {
+    transform: translateX(-1px);
+  }
+}
+
+/* All six in. The row draws together into one thing and the answer happens there, so the wait
+   has somewhere to be: the boxes are what somebody was filling, and this is what they made.
+   The mark arrives a beat behind them, once there is a middle for it to arrive in. */
+@keyframes code-sealed {
+  from {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+  60% {
+    transform: scale(1.04);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* The mark inside it draws itself rather than appearing. A tick that is simply there is a
+   picture of a tick; one that is drawn is the answer arriving. */
+@keyframes code-mark {
+  from {
+    stroke-dashoffset: var(--mark-length);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Waiting on the server, on the one element there now is. */
+@keyframes code-checking {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(0.97);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* The rings on the connecting screen travel outward, one after the other, and stop when the
+   connection is made. */
+@keyframes ripple {
+  0% {
+    opacity: 0.15;
+    transform: scale(0.94);
+  }
+  45% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.15;
+    transform: scale(1.06);
+  }
+}
+
+/* A gradient this wide and this dark bands into visible rings at eight bits a channel, which
+   is what the aurora is made of. A little noise over the top dithers it away — it is below the
+   threshold of being seen as texture and above the one that breaks up the steps. */
+.dither::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.055;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='1' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* The light falls off towards the edges so that the centre of the window is where the eye
+   goes. A gradient because the design's own is one — an SVG holding nothing but a radial fill
+   is a gradient written the long way. */
+.vignette {
+  background: radial-gradient(
+    ellipse 38.46% 38.46% at 50% 50%,
+    rgba(8, 8, 11, 0) 0%,
+    rgba(8, 8, 11, 0.22) 55%,
+    rgba(6, 6, 10, 0.96) 100%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
