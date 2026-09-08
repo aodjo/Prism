@@ -7,14 +7,16 @@
  * cannot tell the difference — which is the whole point, because that code is three thousand
  * lines and none of it should have to care which shell is underneath.
  *
- * Loaded by every page, under both shells. It stands aside when `window.prism` is already
- * there, so the Electron build behaves exactly as it did.
+ * Loaded by every page, under both shells. It stands aside when `window.prism` is already there,
+ * so the Electron build behaves exactly as it did.
  *
- * This is a migration in progress. Everything under `ported` is a real call into Rust;
- * everything under `pending` is a placeholder that lets the window draw while the rest of the
- * shell moves across, and each one names the Electron handler it is waiting on. The list
- * shrinking to nothing is what finishing this migration means.
+ * Two things do not survive the boundary unchanged and are repaired here rather than upstream.
+ * JSON has no integer wider than a double, so counters cross as decimal text and are rebuilt as
+ * `BigInt`. And the shell hands over the provisioning link rather than a picture of it, because
+ * a main process drew that picture only for a renderer that could not — this one can.
  */
+
+import { toDataURL } from 'qrcode';
 
 import type {
   AccountEnrolmentView,
@@ -35,6 +37,8 @@ declare global {
     /** Tauri's own injection, present only when this page is running inside the Tauri shell. */
     readonly __TAURI_INTERNALS__?: {
       invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+      /** Registers a function and returns the number the shell calls it back by. */
+      transformCallback: (callback: (payload: unknown) => void) => number;
     };
   }
 }
@@ -62,6 +66,32 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 }
 
 /**
+ * Subscribes to something the shell announces.
+ *
+ * Tauri's event system is a plugin reached through the same entry point as any other command,
+ * so this needs no package either: a callback is registered with the runtime, and the number it
+ * comes back as is what the shell is told to call.
+ *
+ * @template T What the event carries.
+ * @param {string} event - The event's name, as `emit` spells it.
+ * @param {(payload: T) => void} listener - Called with each one.
+ * @returns {void}
+ */
+function listen<T>(event: string, listener: (payload: T) => void): void {
+  const internals = window.__TAURI_INTERNALS__;
+
+  if (!internals) {
+    return;
+  }
+
+  const handler = internals.transformCallback((message) => {
+    listener((message as { payload: T }).payload);
+  });
+
+  void internals.invoke('plugin:event|listen', { event, target: { kind: 'Any' }, handler });
+}
+
+/**
  * Whether the page is running inside the Tauri shell.
  *
  * @returns {boolean} True when Tauri injected itself into this page.
@@ -70,22 +100,39 @@ export function inTauri(): boolean {
   return window.__TAURI_INTERNALS__ !== undefined;
 }
 
-/** What a call that has not been ported yet says, so it is never mistaken for a real answer. */
-const NOT_YET = (handler: string): Error =>
-  new Error(`the ${handler} handler has not moved to the Tauri shell yet`);
+/** How often a window asks what the session it is handing out is doing. */
+const SHARING_POLL_MS = 200;
 
-/** Nothing is known about the account, which is what a window sees before one is configured. */
-const NO_ACCOUNT: AccountState = {
-  server: '',
-  email: null,
-  publicKey: '',
-  devices: [],
-  relayAllowed: false,
-  error: null,
+/**
+ * What a host snapshot looks like before its counters are put back together.
+ *
+ * The shell sends them as text on purpose. `api.d.ts` declares them `bigint` because the
+ * Node-API surface handed them over as one, and a JSON number becomes a double the moment
+ * `JSON.parse` reads it — a count past nine quadrillion would arrive rounded with nothing on
+ * either side saying so.
+ */
+type RawSnapshot = Omit<HostSnapshot, 'frames' | 'packets' | 'bytes' | 'bitrateBps'> & {
+  readonly frames: string;
+  readonly packets: string;
+  readonly bytes: string;
+  readonly bitrateBps: string;
 };
 
-/** Nothing is happening, and nothing has happened yet. */
-const NO_STREAM: StreamState = { phase: 'idle', host: null, terms: null, stats: null, log: [] };
+/**
+ * Rebuilds the counters the shell sent as text.
+ *
+ * @param {RawSnapshot} raw - What the command returned.
+ * @returns {HostSnapshot} The same thing, with its counters the type the window expects.
+ */
+function revive(raw: RawSnapshot): HostSnapshot {
+  return {
+    ...raw,
+    frames: BigInt(raw.frames),
+    packets: BigInt(raw.packets),
+    bytes: BigInt(raw.bytes),
+    bitrateBps: BigInt(raw.bitrateBps),
+  };
+}
 
 /**
  * Installs the bridge, unless a shell has already provided one.
@@ -98,7 +145,6 @@ export function installBridge(): void {
   }
 
   const api: PrismApi = {
-    // ── Ported: these are calls into prism-core with nothing in between ──────────────────
     identity: async (): Promise<Identity> => {
       const [version, wireFormat, publicKey, hosts] = await Promise.all([
         call<string>('version'),
@@ -112,64 +158,115 @@ export function installBridge(): void {
 
     getSettings: (): Promise<Settings> => call<Settings>('get_settings'),
 
-    // Sent whole rather than as the field that changed, because the window already holds a
-    // copy and sending a part would leave two places deciding what the rest still is.
+    // Sent whole rather than as the field that changed, because the window already holds a copy
+    // and sending a part would leave two places deciding what the rest still is.
     setSettings: async (next: Partial<Settings>): Promise<Settings> =>
       call<Settings>('set_settings', {
         next: { ...(await call<Settings>('get_settings')), ...next },
       }),
 
-    // ── Pending: still handled by the Electron main process ──────────────────────────────
-    permissions: (): Promise<HostPermissions> => Promise.reject(NOT_YET('permissions:get')),
+    permissions: (): Promise<HostPermissions> => call<HostPermissions>('permissions'),
 
-    requestPermission: (): Promise<HostPermissions> =>
-      Promise.reject(NOT_YET('permissions:request')),
+    requestPermission: (id: string): Promise<HostPermissions> =>
+      call<HostPermissions>('request_permission', { id }),
 
-    startSharing: (): Promise<HostSnapshot | null> => Promise.reject(NOT_YET('share:start')),
+    startSharing: async (): Promise<HostSnapshot> => revive(await call<RawSnapshot>('start_sharing')),
 
-    stopSharing: (): Promise<null> => Promise.reject(NOT_YET('share:stop')),
+    stopSharing: (): Promise<null> => call<null>('stop_sharing'),
 
-    sharing: (): Promise<HostSnapshot | null> => Promise.resolve(null),
+    sharing: async (): Promise<HostSnapshot | null> => {
+      const raw = await call<RawSnapshot | null>('sharing_state');
 
-    onSharing: (): void => {},
+      return raw ? revive(raw) : null;
+    },
 
+    // Asked for rather than announced. A session that is not running has nothing to say, and one
+    // that is says the same handful of counters — so a window that wants them asks at a rate it
+    // chooses, which is what keeps this under the ten-a-second ceiling by construction.
+    onSharing: (listener: (snapshot: HostSnapshot | null) => void): void => {
+      setInterval(() => {
+        void api.sharing().then(listener);
+      }, SHARING_POLL_MS);
+    },
+
+    connect: (host: string, address: string): Promise<StreamState> =>
+      call<StreamState>('stream_connect', { host, address }),
+
+    disconnect: (): Promise<StreamState> => call<StreamState>('stream_disconnect'),
+
+    streamState: (): Promise<StreamState> => call<StreamState>('stream_state'),
+
+    // Announced rather than asked for. What the stream is doing changes when the client says so,
+    // and a window polling for a phase change would either miss one or ask far more often than
+    // anything changes.
+    onStream: (listener: (state: StreamState) => void): void => {
+      listen<StreamState>('stream:state', listener);
+    },
+
+    sessions: (): Promise<Session[]> => call<Session[]>('get_sessions'),
+
+    onSessions: (listener: (sessions: readonly Session[]) => void): void => {
+      listen<Session[]>('sessions:changed', listener);
+    },
+
+    accountState: (): Promise<AccountState> => call<AccountState>('account_state'),
+
+    onAccount: (listener: (state: AccountState) => void): void => {
+      listen<AccountState>('account:state', listener);
+    },
+
+    accountChallenge: (email: string): Promise<boolean> =>
+      call<boolean>('account_challenge', { email }),
+
+    // The picture is drawn here rather than in the shell. Under Electron the main process drew it
+    // because a renderer with no network origin could not, and a data URI was the only way to get
+    // it across; this one is handed the link and draws it where it is shown.
+    accountRegister: async (
+      email: string,
+      password: string,
+      code: string,
+    ): Promise<AccountEnrolmentView> => {
+      const enrolment = await call<{ totpUri: string; totpSecret: string }>('account_register', {
+        email,
+        password,
+        code,
+      });
+
+      return {
+        qr: await toDataURL(enrolment.totpUri, { margin: 1, width: 220 }),
+        secret: enrolment.totpSecret,
+      };
+    },
+
+    accountSignIn: (
+      email: string,
+      password: string,
+      code: string,
+      label: string,
+    ): Promise<AccountState> =>
+      call<AccountState>('account_sign_in', { email, password, code, label }),
+
+    accountSignOut: (): Promise<AccountState> => call<AccountState>('account_sign_out'),
+
+    accountRename: (label: string): Promise<AccountState> =>
+      call<AccountState>('account_rename', { label }),
+
+    accountForgetDevice: (publicKey: string): Promise<AccountState> =>
+      call<AccountState>('account_forget_device', { publicKey }),
+
+    // ── Still the Electron shell's, and nothing here yet ─────────────────────────────────────
+    // Each is a window the Tauri shell does not open yet rather than a call that is missing:
+    // setup finishing, the settings window, and a window sizing itself to what is in it.
     finishSetup: (): void => {},
 
     openSettings: (): void => {},
 
     fit: (): void => {},
 
-    connect: (): Promise<StreamState> => Promise.reject(NOT_YET('stream:connect')),
-
-    disconnect: (): Promise<StreamState> => Promise.reject(NOT_YET('stream:disconnect')),
-
-    streamState: (): Promise<StreamState> => Promise.resolve(NO_STREAM),
-
-    onStream: (): void => {},
-
-    sessions: (): Promise<readonly Session[]> => Promise.resolve([]),
-
-    onSessions: (): void => {},
-
+    // Measured by asking every server a name resolves to, which the shell can do but does not
+    // expose yet. An empty list is what a window draws when no server answered, which is the
+    // truthful thing to show until this is wired.
     rendezvousServers: (): Promise<RendezvousServer[]> => Promise.resolve([]),
-
-    accountState: (): Promise<AccountState> => Promise.resolve(NO_ACCOUNT),
-
-    onAccount: (): void => {},
-
-    accountChallenge: (): Promise<boolean> => Promise.reject(NOT_YET('account:challenge')),
-
-    accountRegister: (): Promise<AccountEnrolmentView> =>
-      Promise.reject(NOT_YET('account:register')),
-
-    accountSignIn: (): Promise<AccountState> => Promise.reject(NOT_YET('account:signIn')),
-
-    accountSignOut: (): Promise<AccountState> => Promise.reject(NOT_YET('account:signOut')),
-
-    accountRename: (): Promise<AccountState> => Promise.reject(NOT_YET('account:rename')),
-
-    accountForgetDevice: (): Promise<AccountState> =>
-      Promise.reject(NOT_YET('account:forgetDevice')),
   };
 
   // `readonly` on the declaration is what stops a window reassigning the surface it talks to.

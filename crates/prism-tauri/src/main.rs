@@ -25,7 +25,7 @@ use std::sync::Mutex;
 
 use prism_core::identity;
 use settings::Settings;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// The settings as they stand, read once at launch and written when somebody changes something.
 struct Held(Mutex<Settings>);
@@ -131,17 +131,51 @@ fn set_settings(next: Settings, held: tauri::State<'_, Held>) -> Result<Settings
 
 /// The page a launch opens.
 ///
-/// Being signed in is the answer to what setup asks, so it is the whole of the question here.
+/// Being signed in is the answer to what setup asks, so it is the whole of the question here. A
+/// separate record that setup had been finished could disagree with it, and did: signing out
+/// left it behind, so the application kept opening on a home window built out of an account it
+/// was no longer on. The other thing setup asks about is permissions, and those are the system's
+/// answer to give, read afresh every time rather than remembered.
+///
 /// The harness may override it, which is how a picture gets taken of a window this machine's own
 /// state would not otherwise show.
 fn opening_page() -> String {
-    harness::forced_page().unwrap_or_else(|| "home.html".to_owned())
+    harness::forced_page().unwrap_or_else(|| {
+        if account::signed_in_before() {
+            "home.html".to_owned()
+        } else {
+            "setup.html".to_owned()
+        }
+    })
 }
 
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
             app.manage(Held(Mutex::new(settings::load())));
+            app.manage(account::Held::new());
+            app.manage(sharing::Held::new());
+            // Before the stream, whose recorder looks this up when a session ends.
+            app.manage(sessions::Held::new());
+
+            // What the stream reports as it runs, and what it leaves behind when it stops. Both
+            // are called from the threads reading the client's output rather than from this
+            // one, which is why neither may block: an event is queued and a session is a file
+            // append, and nothing here waits for a window to be listening.
+            let reporting = app.handle().clone();
+            let recording = app.handle().clone();
+
+            app.manage(stream::Held::new(
+                Box::new(move |snapshot| {
+                    let _ = reporting.emit("stream:state", snapshot);
+                }),
+                Box::new(move |session| {
+                    let held = recording.state::<sessions::Held>();
+                    let history = sessions::record(&held, session);
+
+                    let _ = recording.emit("sessions:changed", history);
+                }),
+            ));
 
             let window =
                 WebviewWindowBuilder::new(app, "home", WebviewUrl::App(opening_page().into()))
@@ -158,6 +192,33 @@ fn main() {
                     .background_color(tauri::window::Color(8, 8, 11, 255))
                     .build()?;
 
+            // Whenever the window comes forward. That is the moment somebody is about to look at
+            // the list of their machines, and the moment they are most likely to have just signed
+            // in on another one. The list is not this machine's to decide, so it goes stale as
+            // soon as anything happens anywhere else.
+            let asking = app.handle().clone();
+
+            window.on_window_event(move |event| {
+                if !matches!(event, tauri::WindowEvent::Focused(true)) {
+                    return;
+                }
+
+                let asking = asking.clone();
+
+                // On its own thread: this runs on the one drawing the window, and asking a
+                // server across the internet from here would freeze the window it is redrawing.
+                std::thread::spawn(move || {
+                    let account = asking.state::<account::Held>();
+                    let chosen = asking.state::<Held>();
+
+                    if account::refresh(&account, &chosen).unwrap_or(false)
+                        && let Ok(state) = account::account_state(account, chosen)
+                    {
+                        let _ = asking.emit("account:state", state);
+                    }
+                });
+            });
+
             harness::run(&window);
 
             Ok(())
@@ -169,6 +230,22 @@ fn main() {
             paired_peers,
             get_settings,
             set_settings,
+            permissions::permissions,
+            permissions::request_permission,
+            sharing::start_sharing,
+            sharing::stop_sharing,
+            sharing::sharing_state,
+            stream::stream_connect,
+            stream::stream_disconnect,
+            stream::stream_state,
+            sessions::get_sessions,
+            account::account_state,
+            account::account_challenge,
+            account::account_register,
+            account::account_sign_in,
+            account::account_sign_out,
+            account::account_rename,
+            account::account_forget_device,
             harness::drive_result
         ])
         .run(tauri::generate_context!())

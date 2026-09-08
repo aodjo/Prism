@@ -89,6 +89,11 @@ pnpm lint:cross   # linux, windows 타깃 clippy (링커 없이 clippy만 수행
 크로스 컴파일러가 없는 맥에서는 빌드 자체가 실패한다. 리눅스·윈도우 실제 컴파일은 CI가 각 OS에서
 네이티브로 수행한다.
 
+`prism-tauri`도 제외한다. 이 셸의 리눅스 백엔드는 WebKitGTK를 pkg-config로 찾는데, 리눅스
+sysroot이 없는 맥에서는 그 조회 자체가 실패한다. 셸 코드에도 `cfg(target_os)`는 스크린샷 경로
+하나뿐이라 이 검사가 얻을 것이 거의 없다. **따라서 셸의 플랫폼별 코드는 로컬에서 검사되지 않으며,
+CI의 각 OS 네이티브 잡이 유일한 검사다.**
+
 윈도우 타깃에서는 `prism-cli`도 제외한다. 클라이언트 창·오디오가 SDL을 소스에서 빌드하는데,
 MSVC용 C 툴체인이 없는 맥에서는 cmake 단계에서 실패한다. **따라서 윈도우 클라이언트 코드
 (`render/d3d11.rs`, `render/hud.rs`, `display/d3d11.rs`)는 로컬 `lint:cross`가 검사하지 못한다.**
