@@ -392,7 +392,7 @@ function Home(): JSX.Element {
           <div className="flex-1" />
           <div
             hidden={alone}
-            className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-xl border border-line-1 bg-wash-3 py-2.5 pr-3 pl-3.5"
+            className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] border border-line-1 bg-wash-3 py-2.5 pr-3 pl-3.5"
           >
             <span className="flex-none text-ui text-dim">⌕</span>
             <input
