@@ -32,18 +32,18 @@ use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::secure::{SecureReceiver, SecureSender};
 use prism_core::net::transport::UdpTransport;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
 use crate::audio::AudioSink;
 
 /// Stands in for the playback sink on platforms with no client window yet.
 ///
 /// The wire side of audio is built and tested everywhere; only the playing of it needs a
 /// window, because that is what owns the audio device.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
 #[derive(Debug, Clone)]
 pub struct AudioSink;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
 impl AudioSink {
     /// Discards a frame, on a platform that cannot play it.
     pub fn push(&self, _sequence: u32, _payload: &[u8], _arrived_us: u64) {}

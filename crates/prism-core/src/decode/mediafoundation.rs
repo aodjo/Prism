@@ -40,8 +40,8 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaBuffer, IMFSample, IMFTransform,
     MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_LOW_LATENCY, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
-    MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MF_LOW_LATENCY, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC,
+    MF_VERSION, MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
     MFMediaType_Video, MFSTARTUP_NOSOCKET, MFStartup, MFT_CATEGORY_VIDEO_DECODER,
     MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
     MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
@@ -749,6 +749,12 @@ fn find_transform(codec: Codec) -> Result<IMFTransform, DecodeError> {
                 && let Some(activate) = entry.as_ref()
                 // SAFETY: the activation object is alive until the array is freed.
                 && let Ok(transform) = unsafe { activate.ActivateObject::<IMFTransform>() }
+                // Asking for hardware brings asynchronous transforms with it, and those are
+                // driven by an event queue rather than by calls. Handing one a sample the way
+                // this file does gets `E_INVALIDARG` and then `MF_E_NOTACCEPTING` for every
+                // frame after it — no pictures, and nothing saying why. So the ones that
+                // cannot be driven this way are stepped over rather than picked and failed.
+                && !is_asynchronous(&transform)
             {
                 chosen = Some(transform);
             }
@@ -768,6 +774,21 @@ fn find_transform(codec: Codec) -> Result<IMFTransform, DecodeError> {
         reason: "this machine has no decoder for that codec",
         status: E_FAIL.0,
     })
+}
+
+/// Returns whether a transform is driven by events rather than by calls.
+///
+/// A transform that says nothing either way is synchronous, which is what the attribute's
+/// absence means and what the loop above is written for.
+fn is_asynchronous(transform: &IMFTransform) -> bool {
+    // SAFETY: the transform is alive, and the attribute store it hands back belongs to it.
+    unsafe {
+        transform
+            .GetAttributes()
+            .ok()
+            .and_then(|attributes| attributes.GetUINT32(&MF_TRANSFORM_ASYNC).ok())
+            .is_some_and(|async_| async_ != 0)
+    }
 }
 
 /// Tells the transform what it is being fed.

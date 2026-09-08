@@ -5,11 +5,11 @@
 //! than a compositor. CI drives it for protocol regression runs.
 
 /// Playing the stream's sound, which only a client with a window does.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
 mod audio;
 mod client;
-/// Showing the stream, which needs both a decoder and a renderer for the platform.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// Showing the stream, which needs a decoder, a renderer, and a window to put it in.
+#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
 mod display;
 #[cfg(target_os = "macos")]
 mod encode;
@@ -836,9 +836,16 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             let offset =
                 std::sync::Arc::new(std::sync::atomic::AtomicI64::new(client::OFFSET_UNKNOWN));
 
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            #[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
             {
-                let _ = (window_width, window_height, pacing_us, no_input, display);
+                let _ = (window_width, window_height, pacing_us, no_input);
+
+                // Built without a window, so there is nowhere to show a stream even where the
+                // decoder exists. Said plainly rather than ignored: a flag that is accepted and
+                // does nothing is worse than one that is refused.
+                if display {
+                    return Err("this build has no window; rebuild with the window feature".into());
+                }
                 if config.decode {
                     return Err("decoding is not implemented on this platform yet".into());
                 }
@@ -852,7 +859,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 )?)
             }
 
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
             {
                 if display {
                     display::run(
