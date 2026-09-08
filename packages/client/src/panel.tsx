@@ -380,24 +380,6 @@ function Panel(): JSX.Element {
           </Band>
         )}
 
-        <Band title="Network">
-          <Row label="Account server">
-            <input
-              type="text"
-              spellCheck={false}
-              placeholder="https://rv.example.com"
-              className={WIDE}
-              value={settings?.accountServer ?? ''}
-              onChange={(event) => {
-                setSettings((was) => (was ? { ...was, accountServer: event.target.value } : was));
-              }}
-              onBlur={(event) => {
-                save({ accountServer: event.target.value.trim() });
-              }}
-            />
-          </Row>
-        </Band>
-
         {/* What this machine does when it is the one watching. Separate from what it does when
             it is the one being watched, because they are answers to different questions and a
             person is usually here about one of them. */}
