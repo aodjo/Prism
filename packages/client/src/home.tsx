@@ -567,14 +567,14 @@ function Home(): JSX.Element {
             slightly wrong is a panel that throws away what was being typed into it. */}
         {terms && (
           <div
-            className="absolute inset-0 z-[3] flex items-start justify-center overflow-y-auto bg-[rgba(6,6,10,0.62)] px-6 py-16 backdrop-blur-[3px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            className="fixed inset-0 z-[3] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]"
             onMouseDown={(event) => {
               if (event.target === event.currentTarget) {
                 setTerms(false);
               }
             }}
           >
-            <div className="w-full max-w-[460px] flex-none overflow-hidden rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
+            <div className="max-h-full w-full max-w-[460px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               <div className="mb-2 flex items-center justify-between">
                 <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
                   Sharing this machine
@@ -784,10 +784,15 @@ function Home(): JSX.Element {
 
       {/* Over the window rather than beside it. Settings are a detour from what somebody came
           to do, and a detour that dims what it interrupts is one they can see their way back
-          from — a second window is a second thing to find, raise and close. */}
+          from — a second window is a second thing to find, raise and close.
+
+          Held against the window rather than against the page: the page scrolls, and a sheet
+          positioned inside it opens wherever the scroll happens to be rather than in front of
+          the person. Bounded too, so that a sheet taller than the window scrolls within itself
+          instead of running off the bottom edge with no way to reach the rest. */}
       {tuning && (
         <div
-          className="absolute inset-0 z-[2] flex items-start justify-center overflow-y-auto bg-[rgba(6,6,10,0.62)] px-6 py-14 backdrop-blur-[3px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="fixed inset-0 z-[2] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]"
           onMouseDown={(event) => {
             // Only the backdrop itself. A drag that started inside the sheet and ended out
             // here is somebody selecting text, not somebody dismissing it.
@@ -796,7 +801,7 @@ function Home(): JSX.Element {
             }
           }}
         >
-          <div className="w-full max-w-[520px] flex-none overflow-hidden rounded-card border border-line-4 bg-[rgba(20,20,26,0.96)] shadow-[0_24px_60px_rgba(0,0,0,0.45)]">
+          <div className="max-h-full w-full max-w-[520px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.96)] shadow-[0_24px_60px_rgba(0,0,0,0.45)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <div className="flex items-center justify-between px-5 pt-4 pb-1">
               <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
                 Settings
