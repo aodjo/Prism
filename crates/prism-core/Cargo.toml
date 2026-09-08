@@ -73,6 +73,7 @@ windows = { version = "0.62", features = [
     "Win32_System_WinRT_Graphics_Capture",
     # WASAPI, for capturing whatever the machine is playing.
     "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
     "Win32_Media_KernelStreaming",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
