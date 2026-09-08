@@ -26,8 +26,12 @@ packages/client/renderer/setup.js
 packages/client/renderer/setup.js.map
 packages/client/renderer/home.js
 packages/client/renderer/home.js.map
+packages/client/renderer/bridge.js
+packages/client/renderer/bridge.js.map
 packages/client/renderer/prism.css
 
 # Scratch snapshots and logs from browser automation, never part of the tree.
 .playwright-mcp/
+
+# Written by tauri-build from tauri.conf.json and the capabilities beside it.
 crates/prism-tauri/gen/
