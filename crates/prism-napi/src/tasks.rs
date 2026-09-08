@@ -49,17 +49,20 @@ pub fn host_config(
     Ok(config)
 }
 
-/// Loads this machine's identity and every client it has paired with.
+/// Loads this machine's identity and every machine on the account that may watch it.
 ///
-/// A machine that has paired with nobody cannot host. That is refused here rather than
-/// producing a session that waits forever for a client it would not admit anyway.
+/// A machine whose account names no other machine cannot be watched by anything, so sharing is
+/// refused here rather than opening a session that would wait forever for a client it would
+/// not admit anyway.
 pub fn host_keys() -> napi::Result<prism_core::control::host::HostKeys> {
     let (identity, peers) = load()?;
     let allowed = identity::known_peers(&peers).map_err(reason)?;
 
     if allowed.is_empty() {
         return Err(napi::Error::from_reason(
-            "no client has been paired with this machine yet",
+            "There is no other machine on your account yet, so nobody could watch this one. \
+             Install Prism on the machine you want to watch from and sign in to the same \
+             account.",
         ));
     }
 

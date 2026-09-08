@@ -457,12 +457,12 @@ function Setup(): JSX.Element {
       setSignedIn(account.email);
       setArrivedSignedIn(account.email !== null);
 
-      // Both sources, minus this machine. A machine arrives here either by having been paired
-      // with or by being on the account, and setup should offer whichever is already true.
+      // The account's machines, and only those. A machine is reachable from here because it
+      // is on the same account, which is the only way one becomes reachable at all.
       setKnown(
-        [
-          ...new Set([...account.devices.map((device) => device.publicKey), ...identity.hosts]),
-        ].filter((key) => key !== identity.publicKey),
+        account.devices
+          .map((device) => device.publicKey)
+          .filter((key) => key !== identity.publicKey),
       );
     })();
   }, []);

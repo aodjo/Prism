@@ -190,13 +190,13 @@ function Home(): JSX.Element {
       setStream(state);
       setHistory(past);
 
-      // Both sources, minus this machine: one arrives by having been trusted through the
-      // account and the other by having been reached before, and which of the two brought a
-      // machine here is not something anybody wants to read two lists to find out.
+      // The account's machines, and only those. What this machine happens to trust locally is
+      // not the same question: that file is a cache of the account's answer, and anything in
+      // it that the account does not name is something nobody may reach from here.
       setMachines(
-        [
-          ...new Set([...signedIn.devices.map((device) => device.publicKey), ...identity.hosts]),
-        ].filter((key) => key !== identity.publicKey),
+        signedIn.devices
+          .map((device) => device.publicKey)
+          .filter((key) => key !== identity.publicKey),
       );
     })();
   }, []);

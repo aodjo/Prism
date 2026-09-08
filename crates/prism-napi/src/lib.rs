@@ -184,18 +184,22 @@ pub fn account_auth(password: String, salt: String) -> AsyncTask<tasks::DeriveAu
     AsyncTask::new(tasks::DeriveAuth { password, salt })
 }
 
-/// Trusts every machine an account says is its own.
+/// Makes the account's machines the only ones this one will open a session with.
 ///
-/// This is what replaces reading a six digit code off one screen and typing it into another:
-/// two machines signed in to the same account are told about each other, and a peer already
-/// known is not added twice.
+/// This is what replaced reading a six digit code off one screen and typing it into another:
+/// two machines signed in to the same account are told about each other.
 ///
-/// This machine's own key is skipped rather than refused, because the account lists it too and
-/// a host that had paired with itself would offer itself as somewhere to connect.
+/// The list is replaced rather than added to. Only machines on the account may reach this one,
+/// so the account's answer is the whole answer — a key that stayed behind after it left the
+/// account, or one recorded by the pairing this replaced, would otherwise still be admitted
+/// with nothing on any screen to say so.
+///
+/// This machine's own key is left out rather than refused, because the account lists it too
+/// and a machine that trusted itself would offer itself as somewhere to connect.
 ///
 /// # Errors
 ///
-/// Fails if a key is not a public key, or if the list of paired peers cannot be written.
+/// Fails if a key is not a public key, or if the list cannot be written.
 #[napi]
 pub fn account_trust_devices(public_keys: Vec<String>) -> napi::Result<u32> {
     let path = identity::default_peers_path().map_err(to_napi)?;
@@ -203,19 +207,19 @@ pub fn account_trust_devices(public_keys: Vec<String>) -> napi::Result<u32> {
     let me = identity::load_or_create(&identity_path).map_err(to_napi)?;
     let mine = *me.public();
 
-    let mut added = 0u32;
+    let mut theirs: Vec<[u8; 32]> = Vec::with_capacity(public_keys.len());
+
     for text in &public_keys {
         let key = identity::parse_peer_key(text).map_err(napi::Error::from_reason)?;
 
-        if key == mine {
-            continue;
+        if key != mine && !theirs.contains(&key) {
+            theirs.push(key);
         }
-
-        identity::remember_peer(&path, &key).map_err(to_napi)?;
-        added += 1;
     }
 
-    Ok(added)
+    identity::set_peers(&path, &theirs).map_err(to_napi)?;
+
+    Ok(u32::try_from(theirs.len()).unwrap_or(u32::MAX))
 }
 
 /// Turns any error into one JavaScript can throw.

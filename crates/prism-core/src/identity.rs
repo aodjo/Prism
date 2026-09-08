@@ -172,6 +172,35 @@ pub fn remember_peer(path: &Path, key: &[u8; KEY_LEN]) -> io::Result<()> {
     Ok(())
 }
 
+/// Replaces the whole list of peers this machine trusts.
+///
+/// Replaces rather than adds to. The list is not a history of everyone this machine has ever
+/// met; it is the answer to "whose machines are these", and that answer belongs to the
+/// account. A key left behind after it has gone from the account is a key that can still open
+/// a session here, and deciding that is the whole of what this file does.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the file cannot be written.
+pub fn set_peers(path: &Path, keys: &[[u8; KEY_LEN]]) -> io::Result<()> {
+    let mut text = String::new();
+
+    for key in keys {
+        text.push_str(&to_hex(key));
+        text.push('\n');
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Written beside and moved into place, so a reader never sees a half-written list: a host
+    // that read a truncated one would refuse a machine that is allowed.
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, text.as_bytes())?;
+    fs::rename(&temporary, path)
+}
+
 /// Reads every peer key that has been paired with, oldest first.
 ///
 /// A missing file is an empty list rather than an error: a machine that has never paired has
