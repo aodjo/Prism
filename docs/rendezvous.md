@@ -135,11 +135,62 @@ A home connection also needs its public address to be stable, or peers configure
 lose the server when it changes. A dynamic DNS name avoids that; peers accept a name as readily
 as an address.
 
-There is one thing a home deployment cannot do that a VPS can: if the *host* being streamed
-from is on the same connection as the rendezvous server, some routers will not hairpin a peer
-back to their own public address. That is a limitation of the router rather than of the
-protocol, and it only affects a client on that same network — which does not need the server
-anyway, since it can address the host directly.
+### Why a home deployment eventually stops being enough
+
+A peer on the same network as the rendezvous server cannot be introduced through it, in either
+role, unless the router hairpins — that is, routes a packet aimed at its own public address
+back inside. Many do not.
+
+The failure is not obvious from the outside, so it is worth being precise about. A peer that
+reaches the server over the LAN never sends anything through the router, so no inbound mapping
+is created and the address the server observes is a private one. It then tells the far peer to
+punch at something like `192.168.219.110`, which goes nowhere. Measured on a router that does
+not hairpin:
+
+```
+host:   registered, reachable at 110.8.104.218:47230     ← the far peer, correct
+client: this machine appears at 192.168.219.110:52750    ← the local peer, useless
+client: no direct path opened; asking the rendezvous server to relay
+```
+
+Nothing can fix that from the server's side: the mapping the far peer would need does not
+exist, because the local peer never opened one. Enabling hairpin on the router works where the
+router offers it; moving the server off that network works everywhere.
+
+So a home box is a fine place to *start* — the traffic is negligible and nothing is trusted to
+it — but the machines sharing its network are exactly the ones it cannot introduce, and those
+are usually the operator's own.
+
+## More than one region
+
+A relayed session pays the server's distance on every round trip, so one server is one place
+that sessions can be fast from. Adding a region is a machine, a port, and an address record:
+
+```
+rv.example.com.  A  203.0.113.10   # Seoul
+rv.example.com.  A  198.51.100.20  # Frankfurt
+```
+
+Every peer is configured with the **name**, not an address, so a region added here is one that
+existing installations start using without being updated.
+
+What the two sides do with that list is asymmetric, and deliberately so. Servers keep their
+registry in memory and never talk to each other, so a host registered in Seoul is a host
+Frankfurt has never heard of — which means both sides have to end up on the same one.
+
+- A **host registers with every server**, because it cannot know which region the client will
+  turn out to be nearest to. This costs one datagram per server per fifteen seconds: about
+  eighty bits a second each, against a session measured in megabits.
+- A **client asks all of them at once and uses whichever answers first.** There is no probe
+  and no extra round trip — the request that finds the host is the same request that measures
+  which server is nearest.
+
+The server that answered is then the one the pair relays through if punching fails, which is
+the right one by construction: it has just proved both that it knows the host and that it is
+the closest of them to the client.
+
+A server that is down or unreachable costs the clients near it and nobody else. A host that no
+server has heard of is reported as not running only when *every* server says so.
 
 ## Checking it works
 

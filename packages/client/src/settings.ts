@@ -13,7 +13,11 @@ import type { Settings } from './api.js';
  */
 export const DEFAULTS: Settings = {
   setupDone: false,
-  rendezvous: '',
+  // Filled in, because a machine with no rendezvous is reachable only from a network that can
+  // already address it — the same LAN, a VPN, a forwarded port — and that is not what anybody
+  // installing this wants. A name rather than an address: every record it resolves to is a
+  // region, and adding one is a machine and a zone file rather than a release.
+  rendezvous: 'rv.presm.kr:47300',
   accountServer: '',
   control: true,
   smooth: false,

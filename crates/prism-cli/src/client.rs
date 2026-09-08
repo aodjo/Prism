@@ -211,8 +211,12 @@ pub struct ClientConfig {
     ///
     /// `None` means ask the rendezvous server, which is what a host behind NAT requires.
     pub host: Option<SocketAddr>,
-    /// Rendezvous server to find the host through.
-    pub rendezvous: Option<SocketAddr>,
+    /// Rendezvous to find the host through, as a name and port.
+    ///
+    /// A name rather than an address: every record it resolves to is a region, all of them are
+    /// asked at once, and whichever answers first is both the nearest and the one the pair
+    /// will relay through if punching fails.
+    pub rendezvous: Option<String>,
     /// What this machine can decode and present.
     ///
     /// Sent in the message that opens the session, so the host has chosen a codec by the time
@@ -313,15 +317,26 @@ fn open(
         return Ok((established, host));
     }
 
-    let Some(server) = config.rendezvous else {
+    let Some(name) = config.rendezvous.as_deref() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "give either --host or --rendezvous so the host can be found",
         ));
     };
 
+    // Every address the name resolves to is a region to ask. Resolved now rather than when the
+    // settings were written, so a region added since is one this session already knows about.
+    let servers = rendezvous::Servers::resolve(name)?;
+
     let me = *config.identity.public();
-    let found = rendezvous::lookup(transport, server, config.peer_key, me)?;
+    let found = rendezvous::lookup(transport, &servers, config.peer_key, me)?;
+    if servers.len() > 1 {
+        println!(
+            "client: asked {} rendezvous servers, {} answered first",
+            servers.len(),
+            found.server
+        );
+    }
     println!(
         "client: the host is at {}, and this machine appears at {}",
         found.address, found.observed
@@ -361,7 +376,10 @@ fn open(
     // reached rather than chosen.
     println!("client: no direct path opened; asking the rendezvous server to relay");
 
-    let relayed = rendezvous::relay(transport, server, config.peer_key, me)?;
+    // Through the one that answered the lookup. A relay pairs two peers presenting the same
+    // token, so it has to be a server they are both registered with — and that one has just
+    // proved both that it knows the host and that it is the nearest of them to here.
+    let relayed = rendezvous::relay(transport, found.server, config.peer_key, me)?;
     let established = dial(
         transport,
         relayed.address,

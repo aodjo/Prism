@@ -33,8 +33,10 @@ pub fn host_config(
     if let Some(bind) = options.bind.as_deref() {
         config.bind = bind.parse().map_err(reason)?;
     }
+    // Not parsed here. It is a name, and whether it resolves is a question for the machine
+    // opening the session rather than for the window that asked it to.
     if let Some(server) = options.rendezvous.as_deref() {
-        config.rendezvous = Some(server.parse().map_err(reason)?);
+        config.rendezvous = Some(server.to_owned());
     }
     if let Some(fps) = options.fps {
         config.fps = fps.clamp(1, 480);

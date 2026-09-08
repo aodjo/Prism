@@ -1,5 +1,23 @@
 //! Finding a peer through the rendezvous server, and punching a hole to it.
 //!
+//! # Why there is more than one server
+//!
+//! A relayed session costs the server's distance on every round trip, so a pair in Seoul
+//! should not be introduced — and certainly not relayed — through a machine in Frankfurt. The
+//! answer is a server in each region a user might be in, and a way of choosing between them.
+//!
+//! The awkward part is that the two sides have to choose the *same* one: a registry lives in
+//! one server's memory and servers do not talk to each other, so a host registered in Seoul is
+//! a host that Frankfurt has never heard of. What resolves it is an asymmetry in what the two
+//! sides can afford. A host registers with **every** server, which costs it one datagram per
+//! server per keepalive interval and nothing else; a client then asks **all** of them at once
+//! and uses whichever answers first, which is a measurement of the round trip rather than a
+//! guess about geography.
+//!
+//! So there is no probe phase and no extra round trip. The request that finds the host is the
+//! same request that measures which server is nearest, and the server that answered is the one
+//! the pair will relay through if punching fails.
+//!
 //! # One socket, from beginning to end
 //!
 //! Everything here happens on the socket the session will use. That is not an optimisation,
@@ -22,7 +40,7 @@
 //! only job is to make its own router willing to receive.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -58,18 +76,110 @@ const PUNCHES: u32 = 5;
 /// How long between them.
 const PUNCH_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Registers this machine under its public key and returns where the server sees it.
+/// The rendezvous servers this machine may use, resolved from one name.
+///
+/// One hostname with several address records is what makes a region something the operator
+/// adds by starting a machine and editing a zone file, rather than something every installed
+/// client has to be updated to know about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Servers {
+    addresses: Vec<SocketAddr>,
+}
+
+impl Servers {
+    /// Resolves `name`, which is a host and port such as `rv.example.com:47300`.
+    ///
+    /// Every address the name resolves to is a candidate, so a name with one record behaves
+    /// exactly as a single server always did.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::InvalidInput`] if the name cannot be resolved or resolves to
+    /// nothing.
+    pub fn resolve(name: &str) -> io::Result<Self> {
+        let addresses: Vec<SocketAddr> = name.to_socket_addrs()?.collect();
+
+        if addresses.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the rendezvous name resolved to no addresses",
+            ));
+        }
+
+        Ok(Self { addresses })
+    }
+
+    /// Returns the candidates.
+    #[must_use]
+    pub fn addresses(&self) -> &[SocketAddr] {
+        &self.addresses
+    }
+
+    /// Returns whether an address is one of the candidates.
+    ///
+    /// How a datagram from a server is told from session traffic: a sealed packet looks like
+    /// nothing in particular by construction, so the source address is the only thing that
+    /// can decide.
+    #[must_use]
+    pub fn holds(&self, address: SocketAddr) -> bool {
+        self.addresses.contains(&address)
+    }
+
+    /// Returns how many candidates there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.addresses.len()
+    }
+
+    /// Returns whether there are no candidates, which [`Self::resolve`] never produces.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.addresses.is_empty()
+    }
+}
+
+impl From<SocketAddr> for Servers {
+    /// Wraps a single address, for a caller that already has one and is not resolving a name.
+    fn from(address: SocketAddr) -> Self {
+        Self {
+            addresses: vec![address],
+        }
+    }
+}
+
+/// A registration that succeeded, and where.
+#[derive(Debug, Clone)]
+pub struct Registration {
+    /// Where the servers saw this machine.
+    ///
+    /// Taken from the first that answered. They should all agree — it is this socket's mapping
+    /// and there is one of it — and a router that gives each destination a different mapping
+    /// is one that cannot be punched to anyway.
+    pub observed: SocketAddr,
+    /// The servers that took the registration, which is where clients will find this machine.
+    pub servers: Servers,
+}
+
+/// Registers this machine under its public key with every server that will have it.
+///
+/// All of them, rather than the nearest, because a client can only be introduced by a server
+/// this machine is registered with — and which server the client will turn out to be nearest
+/// to is not something the host can know. The cost is one datagram per server per keepalive
+/// interval, which is nothing beside a session.
+///
+/// Servers that do not answer are left out rather than fatal. One region being unreachable
+/// should cost the clients near that region, not every client everywhere.
 ///
 /// # Errors
 ///
-/// Returns [`io::ErrorKind::TimedOut`] if the server does not answer, and
-/// [`io::ErrorKind::PermissionDenied`] if it issues a challenge this machine cannot answer,
+/// Returns [`io::ErrorKind::TimedOut`] if no server answers, and
+/// [`io::ErrorKind::PermissionDenied`] if one issues a challenge this machine cannot answer,
 /// which means it was aimed at a different key.
 pub fn register(
     transport: &UdpTransport,
-    server: SocketAddr,
+    servers: &Servers,
     identity: &Identity,
-) -> io::Result<SocketAddr> {
+) -> io::Result<Registration> {
     let mut out = [0u8; MAX_MESSAGE_LEN];
     let mut buf = [0u8; MAX_MESSAGE_LEN];
 
@@ -80,12 +190,22 @@ pub fn register(
         host: *identity.public(),
     };
 
+    let mut registered: Vec<SocketAddr> = Vec::new();
+    let mut observed: Option<SocketAddr> = None;
+
     while Instant::now() < give_up {
-        send(transport, &mut out, &claim, server)?;
+        // Asked of every server that has not answered yet, in one pass rather than one after
+        // another. Waiting out a dead region before trying a live one would make the slowest
+        // server decide how long starting a share takes.
+        for &server in &servers.addresses {
+            if !registered.contains(&server) {
+                send(transport, &mut out, &claim, server)?;
+            }
+        }
 
         let retry_at = Instant::now() + RETRY_INTERVAL;
         while Instant::now() < retry_at {
-            let Some(message) = recv_from_server(transport, &mut buf, server)? else {
+            let Some((message, from)) = recv_from_servers(transport, &mut buf, servers)? else {
                 break;
             };
 
@@ -105,19 +225,36 @@ pub fn register(
                             host: *identity.public(),
                             secret,
                         },
-                        server,
+                        from,
                     )?;
                 }
-                Message::Registered { observed } => return Ok(observed),
+                Message::Registered { observed: at } => {
+                    if !registered.contains(&from) {
+                        registered.push(from);
+                    }
+                    observed.get_or_insert(at);
+                }
                 _ => continue,
             }
         }
+
+        if registered.len() == servers.len() {
+            break;
+        }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "the rendezvous server did not answer",
-    ))
+    match observed {
+        Some(observed) => Ok(Registration {
+            observed,
+            servers: Servers {
+                addresses: registered,
+            },
+        }),
+        None => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the rendezvous server did not answer",
+        )),
+    }
 }
 
 /// A registration being held open, which stops when this is dropped.
@@ -152,18 +289,23 @@ impl Drop for Keepalive {
 /// socket's. Failures are silent: a keepalive that does not arrive costs nothing until
 /// several in a row do, and by then the host has stopped being listed anyway.
 ///
+/// One datagram to each server per interval. At a hundred and twenty-eight bytes every fifteen
+/// seconds that is under a hundred bits a second per server, which is why a host can afford to
+/// be registered everywhere rather than choosing.
+///
 /// # Errors
 ///
 /// Returns the underlying [`io::Error`] if the socket cannot be duplicated or the thread
 /// cannot be spawned.
 pub fn spawn_keepalive(
     transport: &UdpTransport,
-    server: SocketAddr,
+    servers: &Servers,
     host: [u8; KEY_LEN],
 ) -> io::Result<Keepalive> {
     let transport = transport.try_clone()?;
     let stop = Arc::new(AtomicBool::new(false));
     let mine = Arc::clone(&stop);
+    let servers = servers.clone();
 
     let thread = std::thread::Builder::new()
         .name("prism-keepalive".into())
@@ -177,7 +319,9 @@ pub fn spawn_keepalive(
             // fifteen seconds is a share that takes fifteen seconds to restart.
             while !mine.load(Ordering::Relaxed) {
                 if Instant::now() >= due {
-                    let _ = send(&transport, &mut out, &message, server);
+                    for &server in servers.addresses() {
+                        let _ = send(&transport, &mut out, &message, server);
+                    }
                     due = Instant::now() + KEEPALIVE_INTERVAL;
                 }
 
@@ -201,6 +345,12 @@ pub struct Located {
     pub address: SocketAddr,
     /// Where the server saw this machine.
     pub observed: SocketAddr,
+    /// Which server answered, and so which one to relay through if punching fails.
+    ///
+    /// The pair has to relay through one they are both registered with, and this is the one
+    /// that just proved it knows the host — and proved, by answering first, that it is the
+    /// nearest of them to this machine.
+    pub server: SocketAddr,
 }
 
 /// Asks the server where a host is and opens this side's router towards it.
@@ -212,7 +362,7 @@ pub struct Located {
 /// server does not answer at all.
 pub fn lookup(
     transport: &UdpTransport,
-    server: SocketAddr,
+    servers: &Servers,
     host: [u8; KEY_LEN],
     client: [u8; KEY_LEN],
 ) -> io::Result<Located> {
@@ -223,26 +373,49 @@ pub fn lookup(
     let give_up = Instant::now() + SERVER_TIMEOUT;
 
     let request = Message::Connect { host, client };
+    let mut unknown: Vec<SocketAddr> = Vec::new();
 
     while Instant::now() < give_up {
-        send(transport, &mut out, &request, server)?;
+        // Asked of every server at once, and the first answer wins. That is the whole of the
+        // choice: no probe, no extra round trip, and what decides is the measured time to
+        // answer rather than a guess about where the machines are.
+        for &server in servers.addresses() {
+            if !unknown.contains(&server) {
+                send(transport, &mut out, &request, server)?;
+            }
+        }
 
         let retry_at = Instant::now() + RETRY_INTERVAL;
         while Instant::now() < retry_at {
-            let Some(message) = recv_from_server(transport, &mut buf, server)? else {
+            let Some((message, from)) = recv_from_servers(transport, &mut buf, servers)? else {
                 break;
             };
 
             match message {
-                Message::Found { address, observed } => return Ok(Located { address, observed }),
+                Message::Found { address, observed } => {
+                    return Ok(Located {
+                        address,
+                        observed,
+                        server: from,
+                    });
+                }
+                // One server not knowing the host is not the host being absent: it may simply
+                // be a region the host has not registered with. Only when every server says so
+                // does it mean what it sounds like.
                 Message::UnknownHost => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "the host is not registered, so it is probably not running",
-                    ));
+                    if !unknown.contains(&from) {
+                        unknown.push(from);
+                    }
                 }
                 _ => continue,
             }
+        }
+
+        if unknown.len() == servers.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the host is not registered, so it is probably not running",
+            ));
         }
     }
 
@@ -266,10 +439,10 @@ pub fn lookup(
 /// [`io::ErrorKind::Interrupted`] if `cancelled` is set.
 pub fn await_caller(
     transport: &UdpTransport,
-    server: SocketAddr,
+    servers: &Servers,
     patience: Duration,
     cancelled: &AtomicBool,
-) -> io::Result<([u8; KEY_LEN], SocketAddr)> {
+) -> io::Result<Caller> {
     let mut buf = [0u8; MAX_MESSAGE_LEN];
 
     transport.set_read_timeout(Some(RETRY_INTERVAL))?;
@@ -283,13 +456,19 @@ pub fn await_caller(
             ));
         }
 
-        let Some(message) = recv_from_server(transport, &mut buf, server)? else {
+        // From any of them. Which server introduces the pair is the client's choice, made by
+        // whichever answered it first, and the host finds out by being told.
+        let Some((message, from)) = recv_from_servers(transport, &mut buf, servers)? else {
             continue;
         };
 
         if let Message::Incoming { client, address } = message {
             punch(transport, address)?;
-            return Ok((client, address));
+            return Ok(Caller {
+                key: client,
+                address,
+                server: from,
+            });
         }
     }
 
@@ -297,6 +476,20 @@ pub fn await_caller(
         io::ErrorKind::TimedOut,
         "no client asked to connect",
     ))
+}
+
+/// Who is calling, where from, and which server said so.
+#[derive(Debug, Clone, Copy)]
+pub struct Caller {
+    /// The caller's key, as the server believes it.
+    ///
+    /// Advisory: it says who the server thinks is calling, and the handshake that follows is
+    /// what actually decides.
+    pub key: [u8; KEY_LEN],
+    /// Where to expect the caller.
+    pub address: SocketAddr,
+    /// Which server introduced them, and so which one to relay through if punching fails.
+    pub server: SocketAddr,
 }
 
 /// Sends a handful of empty datagrams so this side's router will accept `peer`.
@@ -317,28 +510,35 @@ pub fn punch(transport: &UdpTransport, peer: SocketAddr) -> io::Result<()> {
     Ok(())
 }
 
-/// Receives one message, ignoring anything that did not come from the server.
+/// Receives one message, ignoring anything that did not come from one of the servers.
+///
+/// Returns which server sent it, because with more than one candidate the answer is not only
+/// what was said but who said it: the server that answers a lookup is the one the pair will
+/// relay through, and the one that introduces a caller is the one the host must relay through
+/// to meet them.
 ///
 /// `Ok(None)` means the read timed out, which the callers use to decide when to ask again.
 /// Datagrams from anywhere else are session traffic or noise and are dropped here; telling
 /// them apart by source is the only way, since a sealed packet looks like nothing in
 /// particular by design.
-fn recv_from_server(
+fn recv_from_servers(
     transport: &UdpTransport,
     buf: &mut [u8],
-    server: SocketAddr,
-) -> io::Result<Option<Message>> {
+    servers: &Servers,
+) -> io::Result<Option<(Message, SocketAddr)>> {
     let (len, from) = match transport.recv_from_into(buf) {
         Ok((bytes, from)) => (bytes.len(), from),
         Err(err) if is_timeout(&err) => return Ok(None),
         Err(err) => return Err(err),
     };
 
-    if from != server {
+    if !servers.holds(from) {
         return Ok(None);
     }
 
-    Ok(Message::decode(&buf[..len]).ok())
+    Ok(Message::decode(&buf[..len])
+        .ok()
+        .map(|message| (message, from)))
 }
 
 /// Encodes and sends one message.
@@ -456,4 +656,44 @@ pub fn relay(
         io::ErrorKind::TimedOut,
         "the relay never opened, so the other side did not arrive",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_resolves_to_itself() {
+        let servers = Servers::resolve("127.0.0.1:47300").expect("a literal address resolves");
+
+        assert_eq!(servers.len(), 1);
+        assert!(servers.holds("127.0.0.1:47300".parse().expect("valid address")));
+    }
+
+    #[test]
+    fn a_name_without_a_port_is_refused() {
+        // Rather than guessed at. A rendezvous on the wrong port is a rendezvous that times
+        // out, which reads as a server that is down.
+        assert!(Servers::resolve("rv.example.com").is_err());
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_nothing_is_an_error_rather_than_an_empty_list() {
+        // An empty list would make every later step succeed at doing nothing: no server to
+        // register with, no server to ask, and no error to explain either.
+        let outcome = Servers::resolve("no-such-host.invalid:47300");
+
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn only_the_servers_are_recognised() {
+        let servers = Servers::from("10.0.0.1:47300".parse::<SocketAddr>().expect("valid"));
+
+        assert!(servers.holds("10.0.0.1:47300".parse().expect("valid")));
+        // Session traffic arrives on the same socket and must not be read as signalling.
+        assert!(!servers.holds("10.0.0.2:47300".parse().expect("valid")));
+        // The relay runs one port along, and its datagrams are not messages either.
+        assert!(!servers.holds("10.0.0.1:47301".parse().expect("valid")));
+    }
 }

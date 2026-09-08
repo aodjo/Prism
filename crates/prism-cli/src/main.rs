@@ -99,8 +99,11 @@ enum Command {
         ///
         /// Without one the host is reachable only from a network the client can already
         /// address: the same LAN, a VPN, or a forwarded port.
+        ///
+        /// A name and port. Every address it resolves to is registered with, so a client
+        /// anywhere can be introduced by whichever region is nearest to it.
         #[arg(long)]
-        rendezvous: Option<SocketAddr>,
+        rendezvous: Option<String>,
 
         /// Frames per second.
         #[arg(long, default_value_t = 60)]
@@ -198,9 +201,12 @@ enum Command {
         #[arg(long)]
         host: Option<SocketAddr>,
 
-        /// Rendezvous server to find the host through, when it is not.
+        /// Rendezvous to find the host through, when it is not.
+        ///
+        /// A name and port. Every address it resolves to is asked at once, and whichever
+        /// answers first is used — which is the nearest of them, measured rather than guessed.
         #[arg(long)]
-        rendezvous: Option<SocketAddr>,
+        rendezvous: Option<String>,
 
         /// Go through the relay without trying a direct path first.
         ///
