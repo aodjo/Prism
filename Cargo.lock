@@ -2959,6 +2959,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "prism-account-wasm"
+version = "0.0.0"
+dependencies = [
+ "prism-secret",
+]
+
+[[package]]
 name = "prism-cli"
 version = "0.0.0"
 dependencies = [
@@ -2975,7 +2982,6 @@ dependencies = [
 name = "prism-core"
 version = "0.0.0"
 dependencies = [
- "argon2",
  "block2",
  "chacha20poly1305",
  "dispatch2",
@@ -2995,6 +3001,7 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-screen-capture-kit",
  "objc2-video-toolbox",
+ "prism-secret",
  "reed-solomon-erasure",
  "rusty-opus",
  "serde_json",
@@ -3022,6 +3029,17 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "prism-secret"
+version = "0.0.0"
+dependencies = [
+ "argon2",
+ "hkdf",
+ "sha2",
+ "subtle",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

@@ -1,0 +1,29 @@
+[package]
+name = "prism-secret"
+description = "Turning an account password into the two secrets it expands to"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Nothing here touches the operating system, the network or randomness, which is what lets the
+# same code run in the application, on the account server, and inside a browser through
+# `prism-account-wasm`. A second implementation of this would be a second answer to "what is
+# this password's authentication secret", and the disagreement would appear as an account that
+# cannot sign in anywhere it was not created.
+[dependencies]
+# `default-features = false` drops `password-hash` and `rand`, which this never calls and which
+# would drag randomness into a crate that must build for a browser.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+hkdf = "0.12"
+sha2 = "0.10"
+subtle = "2"
+thiserror.workspace = true
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
