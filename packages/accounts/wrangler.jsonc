@@ -10,10 +10,19 @@
   "workers_dev": false,
   "preview_urls": false,
 
-  // The name the machines already know. Signalling keeps its own name, which resolves to every
-  // region — this one must resolve to one place, because accounts are state and a request that
-  // landed on a different copy would be told the account does not exist.
-  "routes": [{ "pattern": "accounts.presm.kr", "custom_domain": true }],
+  // Two names, one Worker.
+  //
+  // `accounts.presm.kr` is what the machines already know. Signalling keeps its own name, which
+  // resolves to every region — this one must resolve to one place, because accounts are state
+  // and a request that landed on a different copy would be told the account does not exist.
+  //
+  // `admin.presm.kr` is what a person opens. It is the same Worker rather than a deployment of
+  // its own so that the dashboard and the API it calls share an origin: a separate host would
+  // need CORS, and the page's content policy would have to name somewhere it may talk to.
+  "routes": [
+    { "pattern": "accounts.presm.kr", "custom_domain": true },
+    { "pattern": "admin.presm.kr", "custom_domain": true }
+  ],
 
   "d1_databases": [
     {
@@ -29,8 +38,14 @@
     "PRISM_ADVERTISE": "rv.presm.kr:47300"
   }
 
-  // PRISM_RESEND_KEY, PRISM_MAIL_FROM and PRISM_ADMIN_TOKEN are secrets rather than vars, set
-  // with `wrangler secret put`. Without the first, an address is only ever a name here: anybody
-  // can register any address without proving it is theirs. Fine for your own machines; not for
-  // a server strangers can reach.
+  // PRISM_RESEND_KEY and PRISM_MAIL_FROM are secrets rather than vars, set with
+  // `wrangler secret put`. Without the first, an address is only ever a name here: anybody can
+  // register any address without proving it is theirs. Fine for your own machines; not for a
+  // server strangers can reach.
+  //
+  // There is no admin token. Looking after this server is a column on an account, granted with
+  // `pnpm --filter @prism/accounts operator <address>` from the machine that owns the database.
+  //
+  // The signalling regions are rows in `regions`, not a variable here, because the traffic
+  // allowance on each is a number the operator changes from the dashboard.
 }

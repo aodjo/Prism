@@ -27,6 +27,17 @@ CREATE TABLE IF NOT EXISTS accounts (
   verified     INTEGER NOT NULL DEFAULT 0,
   -- Whether the relay may be used, which costs bandwidth somebody pays for.
   relay_allowed INTEGER NOT NULL DEFAULT 1,
+  -- Whether this account may look after the server: read every account, change what the relay
+  -- allows, delete an account, sign everybody out.
+  --
+  -- A column rather than a shared token, because a token is one secret that opens everything
+  -- for everybody who has ever been told it, has no name on it afterwards, and cannot be taken
+  -- away from one person without being taken away from all of them. An account already has a
+  -- password, a second factor and a name; this says which accounts also carry the server.
+  --
+  -- Nobody holds it by default. The first one is granted from the machine that owns the
+  -- database, with `pnpm --filter @prism/accounts operator <address>`.
+  operator      INTEGER NOT NULL DEFAULT 0,
   created_unix INTEGER NOT NULL
 );
 
@@ -57,6 +68,43 @@ CREATE TABLE IF NOT EXISTS challenges (
   code         TEXT NOT NULL,
   expires_unix INTEGER NOT NULL
 );
+
+-- The signalling servers this dashboard asks after.
+--
+-- A table rather than a setting in the deployment, because one column on it is a number the
+-- operator changes: how much traffic that machine's plan allows in a month. A value somebody
+-- edits belongs where it can be edited, not in a variable that needs a redeploy to move.
+CREATE TABLE IF NOT EXISTS regions (
+  -- What an operator calls it, which is a city rather than a hostname.
+  name       TEXT PRIMARY KEY NOT NULL,
+  -- Where to ask it how it is, as an origin.
+  url        TEXT NOT NULL,
+  -- Gigabytes the plan allows each month, or NULL when the plan does not meter traffic.
+  --
+  -- Nullable rather than zero-means-unlimited: the two are opposite conditions and a column
+  -- that reads one as the other is a column that eventually silences the wrong alarm.
+  limit_gb   INTEGER,
+  added_unix INTEGER NOT NULL
+);
+
+-- What operators did here, so that an account disappearing has a name and a time against it.
+--
+-- Written by the server, never by a request, and never deleted from — an audit log an operator
+-- can edit is a log that says whatever the last person to hold the account wanted it to say.
+CREATE TABLE IF NOT EXISTS audit (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- The account that did it, or the empty string when the server did it on nobody's behalf.
+  actor      TEXT NOT NULL,
+  -- What happened, as a stable token the page turns into a sentence.
+  action     TEXT NOT NULL,
+  -- What it happened to: an address, a region's name, or empty.
+  subject    TEXT NOT NULL,
+  -- Anything worth keeping beyond the two above, as JSON.
+  detail     TEXT NOT NULL DEFAULT '',
+  at_unix    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS audit_recent ON audit (at_unix DESC);
 
 -- One row, holding what the server needs to be the same server across restarts.
 --
