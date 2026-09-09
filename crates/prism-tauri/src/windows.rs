@@ -42,19 +42,34 @@ pub fn stage(app: &AppHandle, label: &str, page: &str) -> tauri::Result<WebviewW
         return Ok(open);
     }
 
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App(page.into()))
+    let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App(page.into()))
         .title("Prism")
         .inner_size(STAGE.0, STAGE.1)
         .min_inner_size(STAGE_FLOOR.0, STAGE_FLOOR.1)
         .center()
-        // The design puts its own content where a title bar would be, and carries the traffic
-        // lights over the top left of it.
+        .background_color(BASE);
+
+    overlaid(window).build()
+}
+
+/// Puts the window's content where its title bar would be, where that is a thing windows do.
+///
+/// The design draws its own header and carries the traffic lights over the top left of it, and
+/// it names the window in the markup — so a second name printed over that by the system is the
+/// header with a title bar on top of it.
+///
+/// Both of these are macOS's, and the builder does not have them anywhere else. Elsewhere the
+/// window keeps the frame its system draws, which is what somebody there expects a window to
+/// look like.
+fn overlaid<R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: WebviewWindowBuilder<'_, R, M>,
+) -> WebviewWindowBuilder<'_, R, M> {
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
-        // The window is named in the markup, and a second name printed over it by the system is
-        // the design's own header with a title bar drawn on top of it.
-        .hidden_title(true)
-        .background_color(BASE)
-        .build()
+        .hidden_title(true);
+
+    builder
 }
 
 /// Shows the home window and closes setup, which is what finishing setup means.
@@ -103,16 +118,16 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
         return open.set_focus().map_err(|error| error.to_string());
     }
 
-    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("index.html".into()))
+    let panel = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("index.html".into()))
         .title("Prism")
         .inner_size(PANEL_WIDTH, PANEL_FLOOR)
         // It is as tall as what is in it and no wider than one column, so there is nothing for
         // dragging an edge or filling the screen to achieve.
         .resizable(false)
         .maximizable(false)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .background_color(BASE)
+        .background_color(BASE);
+
+    overlaid(panel)
         .build()
         .map(|_| ())
         .map_err(|error| error.to_string())
