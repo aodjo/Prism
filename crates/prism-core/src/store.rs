@@ -52,8 +52,13 @@ pub fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&temporary, path)?;
 
     // And the directory, because the rename is a change to the directory rather than to either
-    // file. Not every filesystem needs it and none is harmed by it, so it is done everywhere
-    // rather than guessed at.
+    // file. Not every filesystem needs it and none is harmed by it, so it is done rather than
+    // guessed at — on the systems where it can be done at all.
+    //
+    // Windows is not one of them: a directory there cannot be opened as a file, and asking
+    // refuses with "Access is denied". It does not need to be. `MoveFileEx`, which is what a
+    // rename becomes, orders the metadata write itself.
+    #[cfg(unix)]
     if let Some(parent) = parent {
         File::open(parent)?.sync_all()?;
     }
