@@ -35,35 +35,39 @@ $EDITOR deploy/rendezvous/.env
 docker compose -f deploy/rendezvous/compose.yaml up -d --build
 ```
 
-That brings up two containers: the server itself, and Caddy in front of the account API to
-obtain and renew its certificate. The server image is built from source and comes out at
-**2.4 MB** — one statically linked binary in an otherwise empty image, with no shell, no
-package manager and no libraries.
+One container, built from source, coming out at **2.4 MB** — one statically linked binary in an
+otherwise empty image, with no shell, no package manager and no libraries. It writes nothing, so
+there is no volume, and it speaks no HTTP, so there is nothing to put a certificate in front of.
 
-Three ports have to be open: **47300/udp** for signalling, **47301/udp** for the relay, and
-**80** and **443/tcp** for the account API and the challenge that certifies it.
+Two ports have to be open: **47300/udp** for signalling and **47301/udp** for the relay.
 
-#### The account name is not the rendezvous name
+#### Accounts are not here
 
-`PRISM_ACCOUNT_HOST` has to resolve to the one machine keeping the accounts, and it must not be
-the rendezvous name.
+A region keeps none. They live in `packages/accounts`, a Cloudflare Worker over D1 at a name of
+its own, and this server has no `--accounts` flag in its compose file.
 
-The rendezvous name is deliberately several address records, one per region, because signalling
-servers are stateless introducers and any of them will do — that is the whole of the section on
-regions below. Accounts are the opposite. They are a file on one disk, and no server tells
-another about them. A name that round-robined between regions would sign somebody in against
-whichever server answered and then tell them, on the next call, that their account does not
-exist.
+That split is deliberate and the two halves want opposite things. Signalling is on the session
+path — when hole punching fails, the relay carries the video and adds its own distance to every
+round trip — and it is soft state that any server can serve, so it is replicated per region and
+a client uses whichever answers first. Accounts are on nobody's path: no session, direct or
+relayed, ever calls the account server. What they need is not to be near anybody, it is to
+survive, and a JSON file on one cheap disk was the only copy of every account's sealed key and
+second factor.
+
+So the names differ, and must:
 
 ```
 rv.presm.kr.        A  203.0.113.10   # a region
 rv.presm.kr.        A  198.51.100.20  # another region
-accounts.presm.kr.  A  198.51.100.20  # the one that keeps accounts
+accounts.presm.kr.  → the Worker      # one place, because accounts are state
 ```
 
-Build it on the machine that will run it, which is what the command above does. Building it
-elsewhere for another architecture works but goes through emulation and takes many times
-longer — the TLS client the account API needs compiles C, and emulated C is slow.
+A name that round-robined between regions would sign somebody in against whichever server
+answered and then tell them, on the next call, that their account does not exist.
+
+Build the image on the machine that will run it, which is what the command above does. Building
+it elsewhere for another architecture goes through emulation — though with enough cores that can
+still beat a single-core server, so it is worth measuring rather than assuming.
 
 To watch it:
 
@@ -123,23 +127,16 @@ runs it as a systemd user service on the same UDP port; stop and disable that fi
 To put a known-good build back without pushing a commit whose only purpose is to trigger a
 deploy, run the workflow by hand and choose the environment.
 
-### Backing up the accounts
+### Nothing here needs backing up
 
-Everything else here is disposable. The signalling registry is in memory and repopulates itself
-within fifteen seconds of a restart; the image is rebuilt from a commit. The accounts volume is
-the one thing that is not: it holds each account's sealed private key, its TOTP secret and the
-machines it knows, and none of it can be reconstructed. Losing it means every account's key is
-gone, every pairing is gone, and every second factor has to be enrolled again.
+A region is entirely disposable, which is the point of it holding no accounts. The signalling
+registry lives in memory and its hosts repopulate it within fifteen seconds of a restart; the
+image is rebuilt from a commit. Destroying one of these machines costs the sessions in flight on
+it and nothing else.
 
-```sh
-docker run --rm -v prism-rendezvous_accounts:/d:ro alpine tar czf - -C /d . \
-  | age -r <recipient> > accounts-$(date +%F).tgz.age
-```
-
-Encrypted, and not optional: `accounts.json` holds every account's TOTP secret in the clear, so
-an unencrypted backup is a second copy of everybody's second factor. Put it on a different
-machine — a copy on the disk you are protecting against is not a backup — and restore it once
-before there is anything real in it, because a backup nobody has restored is a guess.
+The one thing that could not be reconstructed — each account's sealed private key, its TOTP
+secret and the machines it knows — is no longer on a disk anybody here owns. It is in D1, where
+keeping copies of it is somebody else's job.
 
 ### As a plain binary, with no root at all
 
@@ -316,31 +313,29 @@ a challenge in flight costs the same and expires in ten seconds. Registrations e
 seconds after the last keepalive, and hosts send one every fifteen. None of it is written down —
 a server that is restarted is repopulated by its hosts within fifteen seconds.
 
-The account half writes two files, both beside the path given to `--accounts`:
-
-| File | What is in it |
-|---|---|
-| `accounts.json` | One record per account: the salt, the verifier, the TOTP secret, the sealed private key, and the machines. |
-| `sessions.json` | One record per signed-in session: **SHA-256 of** the token, the account it belongs to, and when it expires. |
-
-The hash is the point of the second file. A session token is a bearer credential — whoever
-reads one is that account until it expires — so what is stored is enough to recognise a token
-that comes back and no use at all to somebody who reads the file. There is no slower hash here
-on purpose: a token is 32 bytes of randomness, so there is no smaller space to search than the
-whole one.
-
-Sessions are written down so that restarting the server does not sign everybody out. Before
-that they lived in memory, which made every deployment a forced sign-in on every machine, and
-turned "stay signed in" into a promise that held until the next update.
-
-A hardened unit has to be told about that directory, because the two files are the only things
-this server writes:
+That is the whole of it. A region run this way writes nothing at all, so a hardened unit needs
+no writable path:
 
 ```ini
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/prism
 ```
+
+The account half is still in this binary and still works — `--accounts` turns it on, and it
+keeps `accounts.json` and `sessions.json` beside the path it is given. It is not what runs any
+more. `packages/accounts` serves the same API from a Worker over D1, because the store was the
+one piece of state here with no second copy, and a JSON file rewritten in full on one disk of
+one cheap server is a poor place for every account's sealed key and second factor.
+
+What is stored is worth knowing either way. A session is kept as the **SHA-256 of** its token
+rather than the token: a session token is a bearer credential, so whoever reads one is that
+account until it expires, and what is written down is enough to recognise a token that comes
+back and no use at all to somebody who reads it. There is no slower hash on purpose — a token is
+32 bytes of randomness, so there is no smaller space to search than the whole one.
+
+Sessions are written down so that restarting does not sign everybody out. Before that they lived
+in memory, which made every deployment a forced sign-in on every machine, and turned "stay
+signed in" into a promise that held until the next update.
 
 ## What it refuses
 
