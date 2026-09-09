@@ -1,6 +1,17 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "prism-accounts",
+
+  // Which Cloudflare account this belongs to. An identifier rather than a credential — it names
+  // the account, it does not open it.
+  //
+  // Written down because wrangler refuses to guess: a login that can reach more than one account
+  // and no answer here is a deploy that stops and asks, which is a deploy that cannot run
+  // unattended. Guessing on the operator's behalf is worse — the wrong choice puts a second copy
+  // of this Worker under an account nobody is watching, serving nobody, while the real one goes
+  // on running the version before.
+  "account_id": "371cd63a2c00cb8c3d2990060c1fb0b8",
+
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "observability": { "enabled": true },
