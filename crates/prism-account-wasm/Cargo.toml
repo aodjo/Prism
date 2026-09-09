@@ -1,0 +1,24 @@
+[package]
+name = "prism-account-wasm"
+description = "The account password derivation, compiled for the operator dashboard's browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A plain `cdylib` with a C interface rather than a wasm-bindgen module: the whole surface is
+# three functions over bytes, and bindgen would add a JavaScript glue file, a build tool and a
+# generator step to produce what nine lines of `WebAssembly.instantiate` already do.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+prism-secret.workspace = true
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
