@@ -118,6 +118,47 @@ function stage(where) {
 }
 
 /**
+ * The application's own icon, in the format the platform wants.
+ *
+ * All three are generated from `mark.svg` — the same drawing the window puts in its header — and
+ * live beside the Tauri shell because that is where its build expects to find them. They are
+ * shared rather than copied so the two shells cannot end up wearing different faces.
+ *
+ * @param {string} platform - `darwin`, `win32` or `linux`.
+ * @returns {string} The path to the icon.
+ */
+function iconFor(platform) {
+  const icons = join(root, 'crates', 'prism-tauri', 'icons');
+  const extension = { darwin: 'icns', win32: 'ico' }[platform] ?? 'png';
+
+  return join(icons, `icon.${extension}`);
+}
+
+/**
+ * Puts the icon on the finished macOS bundle.
+ *
+ * The packager will not do it. Whatever it is given, it rewrites the extension to `.icon` —
+ * Apple's newer format, which nothing here produces — finds no such file, warns, and leaves
+ * Electron's own icon in place. It shipped that way until somebody looked at the dock.
+ *
+ * @param {string} app - The `.app` bundle.
+ * @param {string} icon - The `.icns` to put in it.
+ * @returns {void}
+ */
+function dressMac(app, icon) {
+  const resources = join(app, 'Contents', 'Resources');
+
+  cpSync(icon, join(resources, 'icon.icns'));
+  rmSync(join(resources, 'electron.icns'), { force: true });
+
+  execFileSync(
+    'plutil',
+    ['-replace', 'CFBundleIconFile', '-string', 'icon.icns', join(app, 'Contents', 'Info.plist')],
+    { stdio: 'inherit' },
+  );
+}
+
+/**
  * Packages the staged directory for one platform.
  *
  * @async
@@ -134,6 +175,7 @@ async function build(from, platform, arch) {
     platform,
     arch,
     appBundleId: BUNDLE_ID,
+    icon: iconFor(platform),
     electronVersion: require('electron/package.json').version,
     overwrite: true,
     asar: false,
@@ -149,6 +191,10 @@ try {
   stage(where);
 
   for (const written of await build(where, platform, arch)) {
+    if (platform === 'darwin') {
+      dressMac(join(written, `${PRODUCT}.app`), iconFor(platform));
+    }
+
     process.stdout.write(`packaged ${platform}-${arch}: ${written}\n`);
   }
 } finally {
