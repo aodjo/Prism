@@ -128,7 +128,7 @@ function drawSignIn() {
         const code = digits.map((box) => box.value).join('');
 
         if (!email || !password.value || code.length < 6) {
-          say('주소, 비밀번호, 6자리 코드를 모두 입력하세요.');
+          say('주소, 비밀번호, 인증 앱의 6자리 코드를 모두 입력하세요.');
 
           return;
         }
@@ -187,7 +187,9 @@ function drawSignIn() {
       password,
     ]),
     el('div.field', { style: 'padding-bottom:24px' }, [
-      el('div.field-cap', {}, [el('span', { text: '6자리 코드' })]),
+      // Named after where it comes from, not what it looks like. Asked twice what this was,
+      // which is twice more than a label that worked would have been.
+      el('div.field-cap', {}, [el('span', { text: '인증 앱 6자리 코드' })]),
       el('div.digits', {}, digits),
     ]),
     trouble,
