@@ -180,14 +180,6 @@ export interface Session {
 }
 
 /**
- * What the stream process is doing.
- *
- * The stream runs in a process of its own rather than in this one. On macOS a window has to
- * be driven from the main thread and Electron already owns that thread, so a stream window
- * inside this process could not exist — and putting the frame path in a separate process is
- * the better arrangement anyway.
- */
-/**
  * What the stream agreed to carry, said once when the session opens.
  *
  * Fixed for the life of a session: both sides negotiated it and neither can change it without
@@ -221,6 +213,14 @@ export interface StreamStats {
   readonly frames: number;
 }
 
+/**
+ * What the stream process is doing.
+ *
+ * The stream runs in a process of its own rather than in this one. On macOS a window has to be
+ * driven from the main thread and Electron already owns that thread, so a stream window inside
+ * this process could not exist — and putting the frame path in a separate process is the better
+ * arrangement anyway.
+ */
 export interface StreamState {
   /** `idle`, `connecting`, `streaming`, `stopped` or `failed`. */
   readonly phase: string;

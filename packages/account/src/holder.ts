@@ -222,14 +222,6 @@ export class Holder {
   }
 
   /**
-   * Removes a machine from the account.
-   *
-   * @async
-   * @param {string} publicKey - The machine's public key, as hex.
-   * @returns {Promise<AccountView>} What is known afterwards.
-   * @throws {Error} If no server is configured, or the server refused.
-   */
-  /**
    * Renames this machine on the account.
    *
    * The same call that registered it: the server keeps one entry per key, so registering a key
@@ -254,6 +246,14 @@ export class Holder {
     return this.snapshot();
   }
 
+  /**
+   * Removes a machine from the account.
+   *
+   * @async
+   * @param {string} publicKey - The machine's public key, as hex.
+   * @returns {Promise<AccountView>} What is known afterwards.
+   * @throws {Error} If no server is configured, or the server refused.
+   */
   async forget(publicKey: string): Promise<AccountView> {
     const client = this.reach();
 
@@ -269,26 +269,6 @@ export class Holder {
   }
 
   /**
-   * Signs in with the token an earlier run kept, if there is one and it is still good.
-   *
-   * A server that cannot be reached is not the same as a token that has expired: the first is
-   * temporary and the token stays, the second is permanent and it goes. Treating them alike
-   * would sign somebody out of their own account because their network was down for a minute.
-   *
-   * @async
-   * @returns {Promise<void>}
-   */
-  /**
-   * Asks the account again who its machines are, and records the answer.
-   *
-   * The list is not a thing this machine decides, so it goes stale the moment somebody signs
-   * in somewhere else. Cheap enough to do whenever a window comes forward, which is the moment
-   * somebody is about to look at the list and expect it to be right.
-   *
-   * @async
-   * @returns {Promise<boolean>} Whether the machines are different from what was known before.
-   */
-  /**
    * Whether this machine has a session it can resume.
    *
    * Read from the file rather than from what has been resumed, because a launch asks this
@@ -301,6 +281,16 @@ export class Holder {
     return storedSession() !== null;
   }
 
+  /**
+   * Asks the account again who its machines are, and records the answer.
+   *
+   * The list is not a thing this machine decides, so it goes stale the moment somebody signs in
+   * somewhere else. Cheap enough to do whenever a window comes forward, which is the moment
+   * somebody is about to look at the list and expect it to be right.
+   *
+   * @async
+   * @returns {Promise<boolean>} Whether the machines are different from what was known before.
+   */
   async refresh(): Promise<boolean> {
     const before = this.devices.map((device) => device.publicKey).join(',');
 
@@ -309,6 +299,16 @@ export class Holder {
     return this.devices.map((device) => device.publicKey).join(',') !== before;
   }
 
+  /**
+   * Signs in with the token an earlier run kept, if there is one and it is still good.
+   *
+   * A server that cannot be reached is not the same as a token that has expired: the first is
+   * temporary and the token stays, the second is permanent and it goes. Treating them alike
+   * would sign somebody out of their own account because their network was down for a minute.
+   *
+   * @async
+   * @returns {Promise<void>}
+   */
   private async resume(): Promise<void> {
     const stored = storedSession();
 
