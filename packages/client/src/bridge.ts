@@ -268,6 +268,36 @@ export function installBridge(): void {
   // `readonly` on the declaration is what stops a window reassigning the surface it talks to.
   // This is the one place that installs it, and the shell that does so is not the window.
   (window as { prism: PrismApi }).prism = api;
+
+  installReload();
+}
+
+/**
+ * Makes the platform's reload shortcut reload the window.
+ *
+ * A webview with no browser chrome has no reload, so the key that reloads every other window on
+ * the machine does nothing here — and a window that looks stuck offers nobody a way to find out
+ * whether it is. Bound because it is free to have and awkward to be without.
+ *
+ * @returns {void}
+ */
+function installReload(): void {
+  window.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key.toLowerCase() !== 'r' || event.altKey) {
+      return;
+    }
+
+    // Command on a Mac, Control everywhere else, matching what the rest of the system does
+    // rather than what this window would prefer.
+    const held = navigator.userAgent.includes('Mac') ? event.metaKey : event.ctrlKey;
+
+    if (!held) {
+      return;
+    }
+
+    event.preventDefault();
+    location.reload();
+  });
 }
 
 // Installed as a side effect, and loaded by the page as a classic script rather than a module,

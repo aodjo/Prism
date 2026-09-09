@@ -350,7 +350,68 @@ impl core::fmt::Debug for HostService {
 }
 
 /// Runs one session to completion on its own thread.
+/// How often the pause between attempts looks up to see whether it has been stopped.
+///
+/// The pause is slept in slices rather than in one go so that stopping is felt at once.
+/// Somebody who presses Stop during it is waiting on this thread to notice, and a button that
+/// has visibly been pressed and done nothing for three seconds is a button they press again.
+const RETRY_SLICE: Duration = Duration::from_millis(100);
+
+/// How many of those make up the wait before offering the machine again after a failure.
+///
+/// Three seconds. Short, because the usual cause is a server that was restarting or a router
+/// that had not finished coming up, and a person who pressed Share is standing there. Long
+/// enough that a permanent fault — no network at all — does not become a spin.
+const RETRY_SLICES: u32 = 30;
+
+/// Offers this machine until somebody says to stop.
+///
+/// Sharing is a state, not an attempt. Pressing Share means the machine is available from then
+/// on: a client that never came, a rendezvous that was down, a session that ended — none of
+/// them are reasons to stop offering it, and all of them used to be. What ends sharing is being
+/// asked to.
+///
+/// Each turn of the loop binds and registers afresh rather than holding one socket across all
+/// of them. A registration is soft state a server forgets in seconds, so re-registering costs
+/// one round trip and buys a session that recovers from a server restart without anybody
+/// noticing.
 fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        offer(&config, &keys, shared, stop);
+
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Only after something went wrong. A session that ended normally goes straight back to
+        // waiting, because the machine was available a moment ago and still is.
+        //
+        // Slept in slices so that stopping is felt at once. Somebody who presses Stop during
+        // the pause is waiting on this thread to notice, and three seconds of a button that
+        // has visibly been pressed is three seconds of wondering whether it took.
+        if shared.phase() == Phase::Failed {
+            for _ in 0..RETRY_SLICES {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                std::thread::sleep(RETRY_SLICE);
+            }
+        }
+    }
+
+    shared.set_phase(Phase::Stopped);
+}
+
+/// One turn: bind, register, wait for a client, and serve whoever arrives.
+///
+/// Returns when that client's session ends or when something stops it. Sets [`Phase::Failed`]
+/// and the message with it, which the loop above reads to decide whether to pause before
+/// offering the machine again — the window shows it either way, so a person sees what happened
+/// without the machine having given up.
+fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<AtomicBool>) {
+    let config = config.clone();
+    let keys = keys.clone();
     shared.set_phase(Phase::Opening);
 
     let opened = {
@@ -384,6 +445,12 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<Atom
             shared.set_phase(Phase::Stopped);
             return;
         }
+        // Nobody came within the patience this turn allowed. Not worth showing as a fault and
+        // not worth pausing over: the loop above simply offers the machine again.
+        Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+            shared.set_phase(Phase::Waiting);
+            return;
+        }
         Err(err) => {
             shared.fail(err);
             return;
@@ -407,12 +474,12 @@ fn run(config: HostConfig, keys: HostKeys, shared: &Arc<Shared>, stop: &Arc<Atom
         let _ = thread.join();
     }
 
+    // Whatever happened, this turn is over and the loop above decides what comes next. A
+    // session that ended is not sharing that ended: the machine goes back to waiting, which is
+    // what somebody who pressed Share once asked for.
     if let Err(err) = outcome {
         shared.fail(err);
-        return;
     }
-
-    shared.set_phase(Phase::Stopped);
 }
 
 /// Turns a bound address into one somebody could actually type.
