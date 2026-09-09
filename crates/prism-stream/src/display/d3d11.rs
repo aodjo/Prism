@@ -7,6 +7,7 @@
 
 use std::error::Error;
 
+use prism_core::control::client::Gpu;
 use prism_core::render::RenderError;
 use prism_core::render::d3d11::D3d11Renderer;
 use prism_core::render::hud::{CursorOverlay, TextOverlay};
@@ -15,7 +16,6 @@ use sdl3_sys::properties::SDL_GetPointerProperty;
 use sdl3_sys::video::{SDL_GetWindowProperties, SDL_PROP_WINDOW_WIN32_HWND_POINTER};
 use windows::Win32::Foundation::HWND;
 
-use crate::client::Gpu;
 use crate::display::{HUD_FONT_SIZE, HUD_HEIGHT, HUD_WIDTH};
 
 /// A decoded picture on this platform.
