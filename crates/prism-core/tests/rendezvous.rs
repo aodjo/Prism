@@ -111,7 +111,10 @@ fn an_ipv6_address_survives_intact() {
 fn an_unknown_type_byte_is_refused() {
     // The version after this one will send messages this one has never heard of, and acting
     // on a message only half understood is how a parser becomes a vulnerability.
-    for tag in [0x00u8, 0x0c, 0x7f, 0xff] {
+    //
+    // The low one has to stay ahead of the last tag `net::rendezvous` defines, or this stops
+    // testing what it says it tests and starts testing whatever was added last.
+    for tag in [0x00u8, 0x0e, 0x7f, 0xff] {
         assert_eq!(
             Message::decode(&[tag]),
             Err(RendezvousError::UnknownType { tag })

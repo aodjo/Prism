@@ -21,6 +21,7 @@ import type {
   StreamState,
 } from './api.js';
 import { ago, latency, span, when } from './format.js';
+import { Preferences, SharingTerms } from './preferences.js';
 import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -28,6 +29,18 @@ declare global {
     readonly prism: PrismApi;
   }
 }
+
+/**
+ * What a machine sends before anybody has changed the settings.
+ *
+ * Stated here as well as in the main process because this window draws the figures before the
+ * settings have arrived, and a card that says nothing for a moment and then something is worse
+ * than one that says the truth immediately.
+ */
+const DEFAULT_FPS = 60;
+
+/** And at what rate. */
+const DEFAULT_BITRATE_BPS = 24_000_000;
 
 const prism = window.prism;
 
@@ -119,9 +132,8 @@ function Chip({
 function Home(): JSX.Element {
   const [machines, setMachines] = useState<readonly string[]>([]);
   const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
-  const [account, setAccount] = useState<{ email: string | null; relay: boolean }>({
+  const [account, setAccount] = useState<{ email: string | null }>({
     email: null,
-    relay: false,
   });
   const [settings, setSettings] = useState<Settings | null>(null);
   const [stream, setStream] = useState<StreamState>(NOTHING);
@@ -132,6 +144,10 @@ function Home(): JSX.Element {
   const [which, setWhich] = useState<Which>('all');
   const [everything, setEverything] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
+  /** Whether the settings are open over the window. */
+  const [tuning, setTuning] = useState(false);
+  /** Whether the terms this machine is shared on are open beside the switch. */
+  const [terms, setTerms] = useState(false);
   const search = useRef<HTMLInputElement | null>(null);
 
   const machineName = useCallback(
@@ -185,7 +201,7 @@ function Home(): JSX.Element {
 
       setSettings(stored);
       setDevices(signedIn.devices);
-      setAccount({ email: signedIn.email, relay: signedIn.relayAllowed });
+      setAccount({ email: signedIn.email });
       setMine(own);
       setStream(state);
       setHistory(past);
@@ -210,7 +226,7 @@ function Home(): JSX.Element {
     // somewhere else turns up here without anybody restarting anything.
     prism.onAccount((state) => {
       setDevices(state.devices);
-      setAccount({ email: state.email, relay: state.relayAllowed });
+      setAccount({ email: state.email });
       setMachines(
         state.devices
           .map((device) => device.publicKey)
@@ -314,6 +330,34 @@ function Home(): JSX.Element {
 
   const listed = everything ? history : history.slice(0, RECENT);
 
+  useEffect(() => {
+    if (!tuning && !terms) {
+      return;
+    }
+
+    const close = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setTuning(false);
+        setTerms(false);
+      }
+    };
+
+    window.addEventListener('keydown', close);
+
+    return () => {
+      window.removeEventListener('keydown', close);
+    };
+  }, [tuning, terms]);
+
+  /**
+   * Whether this is the only machine there is.
+   *
+   * Which is where everybody starts and where most people sit for a while, so it is a state to
+   * design rather than the full window with its contents missing. Searching one machine,
+   * filtering it, and counting it are all questions that answer themselves.
+   */
+  const alone = machines.length === 0;
+
   /** Where this machine can be reached, once it is listening somewhere. */
   const reachable =
     mine?.local === null || mine?.local === undefined
@@ -321,6 +365,22 @@ function Home(): JSX.Element {
       : mine.observed && mine.observed !== mine.local
         ? `${mine.local}  ·  seen at ${mine.observed}`
         : mine.local;
+
+  /**
+   * What this machine would send, as one line.
+   *
+   * The display it is on rather than one it was told about, because the thing being shared is
+   * the screen this window is on. Multiplied by the backing scale, since a Mac reports the
+   * size it draws at and the encoder is handed the pixels behind it.
+   */
+  const specs = useMemo(() => {
+    const across = Math.round(window.screen.width * window.devicePixelRatio);
+    const down = Math.round(window.screen.height * window.devicePixelRatio);
+    const rate = settings?.fps ?? DEFAULT_FPS;
+    const megabits = Math.round((settings?.bitrateBps ?? DEFAULT_BITRATE_BPS) / 1e6);
+
+    return `${across} × ${down}  ·  ${rate} fps  ·  ${megabits} Mbps`;
+  }, [settings?.fps, settings?.bitrateBps]);
 
   return (
     <div className="relative h-full w-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -330,7 +390,10 @@ function Home(): JSX.Element {
         <header className="drag flex h-10 flex-none items-center gap-4">
           <Wordmark size="sm" />
           <div className="flex-1" />
-          <div className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-xl border border-line-1 bg-wash-3 py-2.5 pr-3 pl-3.5">
+          <div
+            hidden={alone}
+            className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] border border-line-1 bg-wash-3 py-2.5 pr-3 pl-3.5"
+          >
             <span className="flex-none text-ui text-dim">⌕</span>
             <input
               ref={search}
@@ -352,7 +415,9 @@ function Home(): JSX.Element {
             className="no-drag flex-none rounded-pill"
             title={account.email ?? 'Not signed in'}
             aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
-            onClick={prism.openSettings}
+            onClick={() => {
+              setTuning(true);
+            }}
           >
             <img src="assets/account.svg" alt="" className="block h-7 w-14" />
           </button>
@@ -362,11 +427,17 @@ function Home(): JSX.Element {
           <h1 className="m-0 text-[26px] leading-none font-semibold tracking-[-0.5px] text-ink">
             Devices
           </h1>
-          <span className="rounded-pill bg-[rgba(255,255,255,0.09)] px-[9px] py-1 text-fine font-medium text-muted-2">
+          <span
+            hidden={alone}
+            className="rounded-pill bg-[rgba(255,255,255,0.09)] px-[9px] py-1 text-fine font-medium text-muted-2"
+          >
             {machines.length + 1}
           </span>
           <div className="flex-1" />
-          <div className="no-drag flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]">
+          <div
+            hidden={alone}
+            className="no-drag flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]"
+          >
             {WHICH.map((one) => (
               <button
                 key={one.id}
@@ -387,6 +458,7 @@ function Home(): JSX.Element {
           </div>
           <button
             type="button"
+            hidden={alone}
             onClick={prism.openSettings}
             className="no-drag inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
           >
@@ -411,47 +483,34 @@ function Home(): JSX.Element {
             <div className="flex min-w-0 flex-1 flex-col gap-2.5">
               <span className="truncate text-[30px] leading-none font-semibold tracking-[-0.7px] text-ink">
                 This machine
+                {/* The name its owner gave it, after the one everybody's machine has. Somebody
+                    with two of these is looking at two cards that say the same thing, and the
+                    thing that tells them apart is the part they chose. */}
+                {settings?.nickname ? (
+                  <span className="font-normal text-muted-2"> ({settings.nickname})</span>
+                ) : null}
               </span>
-              {/* The dot belongs beside the sentence it qualifies rather than beside the name.
-                  Against a thirty-pixel title it reads as a bullet; against this line it reads
-                  as the same status light every machine below carries. */}
-              <span className="flex items-center gap-2.5">
-                <img
-                  src={`assets/status-${shared ? 'live' : 'off'}.svg`}
-                  alt=""
-                  className="block size-[7px] flex-none overflow-visible"
-                />
-                {/* What it is doing, not where it is. Nobody types an address any more — the
-                    account is what finds a machine — so putting one here is asking somebody to
-                    read a number they will never use. It stays on the hover for the one case
-                    that still needs it: a deployment with no rendezvous server, where the
-                    other end has to be told by hand. */}
-                <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
-                  {mine?.phase === 'failed'
-                    ? 'Sharing failed'
-                    : shared
-                      ? mine?.local === null
-                        ? 'Opening'
-                        : 'Shared'
-                      : 'Not shared'}
-                </span>
+              {/* What it is doing, not where it is. Nobody types an address any more — the
+                  account is what finds a machine — so putting one here is asking somebody to
+                  read a number they will never use. It stays on the hover for the one case
+                  that still needs it: a deployment with no rendezvous server, where the other
+                  end has to be told by hand. */}
+              <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
+                {mine?.phase === 'failed'
+                  ? 'Sharing failed'
+                  : shared
+                    ? mine?.local === null
+                      ? 'Opening'
+                      : 'Shared'
+                    : 'Not shared'}
               </span>
               <span
                 className={`truncate text-[12.5px] ${mine?.error ? 'text-danger-ink' : 'text-dim'}`}
               >
-                {mine?.error ??
-                  (watched
-                    ? `${machineName(mine?.peer ?? '')} is watching`
-                    : shared
-                      ? // Sharing with nothing to share it with is a real state and not a
-                        // failure: the switch is this machine's own, and somebody may well
-                        // turn it on before installing Prism on the machine they will watch
-                        // from. Saying which of the two waits is going on saves them looking
-                        // for a fault that is not there.
-                        machines.length === 0
-                        ? 'Waiting — no other machine on your account yet'
-                        : 'Waiting for a machine to connect'
-                      : 'Nobody can watch this machine')}
+                {/* What this machine would send, rather than a sentence about waiting. The
+                    line above already says whether it is shared, so saying it again in prose
+                    spent the one line that could have carried something. */}
+                {mine?.error ?? (watched ? `${machineName(mine?.peer ?? '')} is watching` : specs)}
               </span>
             </div>
 
@@ -461,6 +520,33 @@ function Home(): JSX.Element {
                   {(Number(mine?.bitrateBps ?? 0n) / 1e6).toFixed(0)} Mbps
                 </Chip>
               )}
+
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  aria-label="Sharing terms"
+                  aria-expanded={terms}
+                  title="Frame rate, bitrate and where it listens"
+                  className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 text-ink transition-colors ${
+                    terms ? 'bg-[rgba(255,255,255,0.12)]' : ''
+                  }`}
+                  onClick={() => {
+                    setTerms(!terms);
+                  }}
+                >
+                  {/* The same drawing as the one in the header, taken out of it rather than
+                      redrawn, so the two gears cannot drift apart.
+
+                      Stencilled rather than drawn: an SVG behind `src` is its own document, and
+                      the `currentColor` in it resolves against that document's black rather
+                      than against this button. Masking paints the shape with the button's own
+                      colour, which is the thing that was meant all along. */}
+                  <span
+                    aria-hidden
+                    className="block size-[17px] bg-current [mask-image:url(assets/gear.svg)] [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain]"
+                  />
+                </button>
+
               {shared ? (
                 <button type="button" className="btn-danger px-6 py-3.5 text-[15px]" onClick={flip}>
                   Stop sharing
@@ -471,9 +557,58 @@ function Home(): JSX.Element {
                   <span className="btn-key">⌘↵</span>
                 </button>
               )}
+              </div>
             </div>
           </div>
         </div>
+
+        {/* A modal rather than a popover hanging off the card. What is being set here is
+            typed — a name, a rate, an address — and a panel that closes when a click lands
+            slightly wrong is a panel that throws away what was being typed into it. */}
+        {terms && (
+          <div
+            className="fixed inset-0 z-[3] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                setTerms(false);
+              }
+            }}
+          >
+            <div className="max-h-full w-full max-w-[460px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <div className="mb-2 flex items-center justify-between">
+                <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+                  Sharing this machine
+                </h2>
+                <button
+                  type="button"
+                  aria-label="Close sharing terms"
+                  className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
+                  onClick={() => {
+                    setTerms(false);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+              <SharingTerms />
+
+              {/* It says Done rather than Save because nothing here is waiting to be saved: a
+                  figure applies as it is typed. What the button is for is ending the detour,
+                  and having somewhere deliberate to click that is not the corner. */}
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  className="btn-primary-sm"
+                  onClick={() => {
+                    setTerms(false);
+                  }}
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <Trouble
           message={
@@ -485,6 +620,29 @@ function Home(): JSX.Element {
           className="mt-3 flex-none"
         />
 
+        {alone ? (
+          /* The one thing left to do, said once. Every other machine on the account turns up
+             here by itself, so what is missing is not a button but a second installation —
+             and a window that offered a button instead would be offering the wrong thing. */
+          <div className="mt-12 flex-none">
+            <h2 className="m-0 text-[19px] leading-none font-semibold tracking-[-0.3px] text-ink-2">
+              Nothing to watch yet
+            </h2>
+            <p className="mt-3 mb-0 max-w-[46ch] text-note leading-relaxed text-muted-2">
+              Install Prism on the machine you want to watch and sign in
+              {account.email ? (
+                <>
+                  {' as '}
+                  <span className="text-ink-3">{account.email}</span>
+                </>
+              ) : (
+                ' to the same account'
+              )}
+              . It turns up here on its own.
+            </p>
+          </div>
+        ) : (
+          <>
         <h2 className="mt-10 flex-none text-ui font-medium tracking-[0.2px] text-muted-2">
           Other devices
         </h2>
@@ -634,8 +792,63 @@ function Home(): JSX.Element {
               </button>
             ))
           )}
-        </div>
+        </div>          </>
+        )}
+
       </div>
+
+      {/* Over the window rather than beside it. Settings are a detour from what somebody came
+          to do, and a detour that dims what it interrupts is one they can see their way back
+          from — a second window is a second thing to find, raise and close.
+
+          Held against the window rather than against the page: the page scrolls, and a sheet
+          positioned inside it opens wherever the scroll happens to be rather than in front of
+          the person. Bounded too, so that a sheet taller than the window scrolls within itself
+          instead of running off the bottom edge with no way to reach the rest. */}
+      {tuning && (
+        <div
+          className="fixed inset-0 z-[2] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]"
+          onMouseDown={(event) => {
+            // Only the backdrop itself. A drag that started inside the sheet and ended out
+            // here is somebody selecting text, not somebody dismissing it.
+            if (event.target === event.currentTarget) {
+              setTuning(false);
+            }
+          }}
+        >
+          <div className="max-h-full w-full max-w-[520px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.96)] shadow-[0_24px_60px_rgba(0,0,0,0.45)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div className="flex items-center justify-between px-5 pt-4 pb-1">
+              <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+                Settings
+              </h2>
+              <button
+                type="button"
+                aria-label="Close settings"
+                className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
+                onClick={() => {
+                  setTuning(false);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <Preferences />
+
+            <div className="flex justify-end border-t border-line-1 px-5 py-4">
+              <button
+                type="button"
+                className="btn-primary-sm"
+                onClick={() => {
+                  setTuning(false);
+                }}
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

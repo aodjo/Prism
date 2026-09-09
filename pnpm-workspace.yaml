@@ -5,3 +5,6 @@ allowBuilds:
   esbuild: true
   electron: true
   '@parcel/watcher': true
+  # The runtime `wrangler` runs a Worker in locally. Its install step fetches a binary, which is
+  # the only reason it asks.
+  workerd: true

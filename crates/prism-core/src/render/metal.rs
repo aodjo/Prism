@@ -115,7 +115,7 @@ pub struct Quad<'a> {
     pub texture: &'a ProtocolObject<dyn MTLTexture>,
     /// Left, top, width and height in normalised device coordinates, where y grows upwards.
     ///
-    /// [`place`] builds this from a position and a pixel size.
+    /// [`crate::render::place`] builds this from a position and a pixel size.
     pub rect: [f32; 4],
 }
 
@@ -460,29 +460,4 @@ fn build_overlay_pipeline(
         .map_err(|err| RenderError::Shader {
             message: err.localizedDescription().to_string(),
         })
-}
-
-/// Places a bitmap of `width` by `height` pixels with its top left corner at a point.
-///
-/// The point is a fraction of the target, the size is in pixels, and the result is in
-/// normalised device coordinates. Sizing in pixels rather than fractions is what keeps
-/// text legible and a cursor cursor-sized whatever the window is scaled to, instead of
-/// stretching them with it.
-#[must_use]
-pub fn place(
-    at: (f32, f32),
-    width: usize,
-    height: usize,
-    target_width: usize,
-    target_height: usize,
-) -> [f32; 4] {
-    let target_width = target_width.max(1) as f32;
-    let target_height = target_height.max(1) as f32;
-
-    [
-        at.0.mul_add(2.0, -1.0),
-        at.1.mul_add(-2.0, 1.0),
-        (width as f32 / target_width) * 2.0,
-        (height as f32 / target_height) * 2.0,
-    ]
 }

@@ -3,6 +3,8 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import type { Settings } from './api.js';
+import { PRISM_ACCOUNT_SERVER, PRISM_RENDEZVOUS } from './rendezvous.js';
+
 
 /**
  * The settings a machine uses before anybody has changed anything.
@@ -12,11 +14,11 @@ import type { Settings } from './api.js';
  * can turn it on and immediately see the trade.
  */
 export const DEFAULTS: Settings = {
-  setupDone: false,
-  rendezvous: '',
-  accountServer: '',
+  rendezvous: PRISM_RENDEZVOUS,
+  accountServer: PRISM_ACCOUNT_SERVER,
   control: true,
   smooth: false,
+  nickname: '',
   addresses: {},
   pinned: [],
   // The port is fixed rather than left to the operating system. With a rendezvous server it
@@ -26,7 +28,7 @@ export const DEFAULTS: Settings = {
   bind: '0.0.0.0:47200',
   fps: 60,
   bitrateBps: 24_000_000,
-  shareOnLaunch: false,
+  sharing: false,
 };
 
 /**
@@ -54,7 +56,22 @@ export function loadSettings(): Settings {
       return { ...DEFAULTS };
     }
 
-    return { ...DEFAULTS, ...(stored as Partial<Settings>) };
+    const known = stored as Partial<Settings>;
+    const kept = { ...DEFAULTS };
+
+    // Only what this version has a name for. A setting that has been taken out of the product
+    // is otherwise carried forward in the file for good, read by nothing and written by every
+    // save — and the next person to look at the file cannot tell which of its keys still mean
+    // anything.
+    for (const key of Object.keys(kept) as (keyof Settings)[]) {
+      const value = known[key];
+
+      if (value !== undefined) {
+        (kept as Record<string, unknown>)[key] = value;
+      }
+    }
+
+    return kept;
   } catch {
     return { ...DEFAULTS };
   }

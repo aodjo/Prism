@@ -66,7 +66,14 @@ packages/protocol/   와이어 포맷 — Rust와 TS가 공유하는 단일 진�
 packages/host/       Electron 트레이 UI
 packages/client/     Electron UI 셸 (스트림 창은 Rust/SDL3)
 crates/prism-rendezvous/  자체 호스팅 서버: 페어링·시그널링·주소 발견·릴레이 폴백
+crates/prism-tauri/  셸: 창·설정·계정·공유·스트림 제어 (Electron을 대체하는 중)
+packages/accounts/    계정 서버 — Cloudflare Worker + D1
 ```
+
+시그널링과 계정은 이름이 다르고 그래야 한다. `rv.presm.kr`은 리전마다 A 레코드가 하나씩이다 —
+시그널링 서버는 무상태 소개자라 아무 서버나 답해도 되고, 그래서 리전 추가가 레코드 하나로 끝난다.
+`accounts.presm.kr`은 한 곳만 가리킨다. 계정은 상태이고, 라운드로빈이면 한 서버에서 로그인하고
+다음 호출에서 "그런 계정 없음"이 된다.
 
 ## 와이어 포맷
 
@@ -88,6 +95,17 @@ pnpm lint:cross   # linux, windows 타깃 clippy (링커 없이 clippy만 수행
 이 검사가 잡으려는 문제가 애초에 존재할 수 없고, TLS 스택(ring)이 타깃용 C 툴체인을 요구해서
 크로스 컴파일러가 없는 맥에서는 빌드 자체가 실패한다. 리눅스·윈도우 실제 컴파일은 CI가 각 OS에서
 네이티브로 수행한다.
+
+`prism-tauri`도 제외한다. 이 셸의 리눅스 백엔드는 WebKitGTK를 pkg-config로 찾는데, 리눅스
+sysroot이 없는 맥에서는 그 조회 자체가 실패한다. 셸 코드에도 `cfg(target_os)`는 스크린샷 경로
+하나뿐이라 이 검사가 얻을 것이 거의 없다. **따라서 셸의 플랫폼별 코드는 로컬에서 검사되지 않으며,
+CI의 각 OS 네이티브 잡이 유일한 검사다.**
+
+윈도우 타깃에서는 `prism-cli`도 제외한다. 클라이언트 창·오디오가 SDL을 소스에서 빌드하는데,
+MSVC용 C 툴체인이 없는 맥에서는 cmake 단계에서 실패한다. **따라서 윈도우 클라이언트 코드
+(`render/d3d11.rs`, `render/hud.rs`, `display/d3d11.rs`)는 로컬 `lint:cross`가 검사하지 못한다.**
+CI의 `windows-latest` 잡이 `cargo clippy --workspace --all-targets`로 네이티브 검사하며,
+그 코드를 건드렸다면 푸시 전에 실제 윈도우 머신에서 빌드해 보는 편이 빠르다.
 
 최초 1회 `rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-msvc` 필요.
 

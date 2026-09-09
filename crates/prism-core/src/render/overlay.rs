@@ -26,8 +26,8 @@ use objc2_metal::{
     MTLTextureDescriptor, MTLTextureUsage,
 };
 
-use crate::render::RenderError;
-use crate::render::metal::{Quad, place};
+use crate::render::metal::Quad;
+use crate::render::{RenderError, place};
 
 /// Bitmap flags for premultiplied RGBA, which is what the blend expects.
 ///

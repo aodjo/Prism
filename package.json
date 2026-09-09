@@ -10,10 +10,12 @@
     "build": "pnpm run build:native && pnpm -r --filter '!@prism/native' build",
     "build:native": "pnpm --filter @prism/native build",
     "build:native:debug": "pnpm --filter @prism/native build:debug",
-    "client": "pnpm --filter @prism/client start",
-    "client:setup": "pnpm --filter @prism/client start:setup",
+    "client": "pnpm run client:deps && pnpm --filter @prism/client start",
+    "client:deps": "pnpm --filter '@prism/client^...' --filter '!@prism/native' build",
+    "client:setup": "pnpm run client:deps && pnpm --filter @prism/client start:setup",
     "lint": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
-    "lint:cross": "cargo clippy --workspace --exclude prism-rendezvous --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --exclude prism-rendezvous --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
+    "package": "node scripts/package-app.mjs",
+    "lint:cross": "cargo clippy --workspace --exclude prism-rendezvous --exclude prism-tauri --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --exclude prism-rendezvous --exclude prism-tauri --exclude prism-cli --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
     "smoke:electron": "electron scripts/electron-smoke.cjs",
     "smoke:node": "node scripts/node-smoke.cjs",
     "test": "pnpm -r test && pnpm run typecheck && cargo test --workspace",
@@ -22,6 +24,7 @@
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
+    "@electron/packager": "^20.3.0",
     "@napi-rs/cli": "^3.5.0",
     "electron": "^44.2.0",
     "typescript": "^5.9.3",

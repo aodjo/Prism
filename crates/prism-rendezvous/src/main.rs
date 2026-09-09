@@ -31,7 +31,9 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use prism_core::net::packet::MAX_PACKET_SIZE;
-use prism_core::net::rendezvous::{MAX_MESSAGE_LEN, Message, RELAY_TOKEN_LEN, challenge};
+use prism_core::net::rendezvous::{
+    MAX_MESSAGE_LEN, Message, REGION_LEN, RELAY_TOKEN_LEN, challenge,
+};
 
 use prism_rendezvous::mail::Mailer;
 use prism_rendezvous::registry::{Proved, Registry};
@@ -94,6 +96,15 @@ struct Cli {
     /// single network they can.
     #[arg(long)]
     advertise: Option<String>,
+
+    /// What to call this server in a list of them, such as `Japan (Osaka)`.
+    ///
+    /// Shown beside the round trip a machine measures for itself, so a person choosing between
+    /// regions sees a place rather than an address. Cosmetic and unverified — the number beside
+    /// it is measured by whoever is reading it, so a server that named itself wrongly has
+    /// mislabelled a row and changed nothing else. Longer names are cut to fit one datagram.
+    #[arg(long)]
+    region: Option<String>,
 
     /// The mail provider's key, which is what lets this server prove an address is somebody's.
     ///
@@ -190,6 +201,8 @@ fn serve(cli: &Cli) -> io::Result<()> {
         Some(port)
     };
 
+    let region = pack_region(cli.region.as_deref().unwrap_or_default());
+
     let mut registry = Registry::new();
     let mut buf = [0u8; MAX_MESSAGE_LEN];
     let mut reply = [0u8; MAX_MESSAGE_LEN];
@@ -246,6 +259,7 @@ fn serve(cli: &Cli) -> io::Result<()> {
             &mut registry,
             &relays,
             relay_port,
+            &region,
             &mut reply,
             message,
             from,
@@ -261,12 +275,28 @@ fn handle(
     registry: &mut Registry,
     relays: &Mutex<Relays>,
     relay_port: Option<u16>,
+    region: &[u8; REGION_LEN],
     reply: &mut [u8],
     message: Message,
     from: SocketAddr,
     now: Instant,
 ) {
     match message {
+        // Answered before anything else and without any state, because this is what a person
+        // choosing between servers is waiting on, and because a server that has to look
+        // something up first would be reporting its own bookkeeping as distance.
+        Message::Where { nonce } => {
+            send(
+                socket,
+                reply,
+                &Message::Here {
+                    nonce,
+                    region: *region,
+                },
+                from,
+            );
+        }
+
         Message::Register { host } => {
             let Ok((message, secret)) = challenge(&host) else {
                 return;
@@ -367,6 +397,7 @@ fn handle(
         // Messages the server sends rather than receives. Arriving here means a peer is
         // confused or someone is probing; either way there is nothing to answer.
         Message::Challenge { .. }
+        | Message::Here { .. }
         | Message::Registered { .. }
         | Message::Incoming { .. }
         | Message::Found { .. }
@@ -481,7 +512,25 @@ fn name_of(message: &Message) -> &'static str {
         Message::Keepalive { .. } => "keepalive",
         Message::Relay { .. } => "relay",
         Message::Relaying { .. } => "relaying",
+        Message::Where { .. } => "where",
+        Message::Here { .. } => "here",
     }
+}
+
+/// Packs a server's name for itself into the fixed field the answer carries.
+///
+/// Cut on a character boundary rather than a byte one, so a name that does not fit comes back
+/// short instead of ending in half a character. Zero padded, which is what marks the end.
+fn pack_region(name: &str) -> [u8; REGION_LEN] {
+    let mut packed = [0u8; REGION_LEN];
+    let mut end = name.len().min(REGION_LEN);
+
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    packed[..end].copy_from_slice(&name.as_bytes()[..end]);
+    packed
 }
 
 /// Returns whether an error is the read timeout rather than a real failure.
@@ -627,16 +676,23 @@ fn spawn_accounts(
             };
 
             runtime.block_on(async move {
+                // A server told to keep accounts and unable to serve them is misconfigured, and
+                // the whole process goes rather than this thread alone. Returning here left the
+                // receive loop running, so the process stayed up, anything watching it called it
+                // healthy, and every request to the account API was refused for as long as
+                // nobody looked at the logs. Exiting is what makes a restart, or a person, see
+                // it.
                 let listener = match tokio::net::TcpListener::bind(bind).await {
                     Ok(listener) => listener,
                     Err(err) => {
                         eprintln!("prism-rendezvous: the account API could not bind {bind}: {err}");
-                        return;
+                        std::process::exit(1);
                     }
                 };
 
                 if let Err(err) = axum::serve(listener, routes(service)).await {
                     eprintln!("prism-rendezvous: the account API stopped: {err}");
+                    std::process::exit(1);
                 }
             });
         })?;

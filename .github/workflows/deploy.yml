@@ -1,0 +1,158 @@
+# Building the rendezvous once and putting it where it runs.
+#
+# Which branch goes where is configuration rather than code. A push to `develop` deploys to the
+# `staging` environment and a push to `main` to `production`, and what those two names point at
+# is set in the repository's environment settings — so moving a server, or pointing both at one
+# box while there is only one, is a change nobody has to make here.
+#
+# Nothing deploys on a push that has not passed CI: the point of a pipeline is that what reaches
+# a server is what the tests ran against. Running it by hand is the exception, and deliberately
+# so — it is how a known-good build goes back after something has gone wrong, which is not a
+# moment to be waiting for a test suite. Restrict which branches may be dispatched to production
+# with a deployment branch policy on the environment rather than here.
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main, develop]
+  # For putting a known-good build back after something has gone wrong, without pushing a commit
+  # whose only purpose is to trigger a deploy.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Which environment to deploy to
+        required: true
+        type: choice
+        options: [staging, production]
+
+concurrency:
+  # One deploy per environment at a time. Two overlapping ones would race over the same compose
+  # project and leave whichever finished second in charge, which is not necessarily the newer.
+  group: deploy-${{ github.event.inputs.environment || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build the image
+    # Three conditions, and all three are load-bearing.
+    #
+    # A CI run that failed is not a build worth shipping, and `workflow_run` fires either way.
+    #
+    # The other two are what stops a stranger deploying to this project's servers. A
+    # `workflow_run` job runs in THIS repository with THIS repository's secrets, whatever
+    # triggered it — and a pull request from a fork triggers CI. The branch filter on the trigger
+    # does not help: it matches the head branch of the run that fired, and every fork has a
+    # branch called `main`. So without these, anybody could open a pull request carrying their
+    # own Dockerfile, have it built under this project's name, and have it installed on the
+    # machine that keeps everybody's accounts.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.pinned.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commit CI actually ran against, not whatever the branch has moved on to since.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Name the image after the commit it was built from
+        id: name
+        run: |
+          registry=ghcr.io/${{ github.repository_owner }}/prism-rendezvous
+          echo "image=${registry,,}:${{ github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Both architectures, because the servers this runs on are not all the same one and an
+      # image that only ran on the machine that built it is not a deployable artifact.
+      - uses: docker/build-push-action@v7
+        id: push
+        with:
+          context: .
+          file: deploy/rendezvous/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.name.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # By digest rather than by tag, so what the server pulls is the thing this job built. A
+      # tag is a name somebody can move; a digest is the image or it is nothing.
+      - name: Pin what was built
+        id: pinned
+        run: echo "image=${{ steps.name.outputs.image }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: deploy to ${{ github.event.inputs.environment || (github.event.workflow_run.head_branch == 'main' && 'production' || 'staging') }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment || (github.event.workflow_run.head_branch == 'main' && 'production' || 'staging') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Reach the server
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned rather than accepted on sight. A deploy that trusts whatever answers is a
+          # deploy that can be pointed somewhere else by anything that can answer first.
+          printf '%s\n' "${{ secrets.DEPLOY_HOST_KEY }}" > ~/.ssh/known_hosts
+
+      # The compose file travels with the deploy; the `.env` beside it does not and never should.
+      # It says which region this is and which ports it answers on, and that belongs to the
+      # server rather than to the repository that builds it.
+      - name: Send what describes the deployment
+        run: |
+          scp -P "${{ secrets.DEPLOY_PORT || 22 }}" \
+            deploy/rendezvous/compose.yaml \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/"
+
+      - name: Pull the image and bring it up
+        run: |
+          ssh -p "${{ secrets.DEPLOY_PORT || 22 }}" \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cd '${{ secrets.DEPLOY_PATH }}' \
+               && echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin \
+               && PRISM_IMAGE='${{ needs.build.outputs.image }}' \
+                  docker compose --env-file .env up -d --no-build --pull always \
+               && docker image prune -f"
+
+      # Asking whether the container is running is not the same as asking whether it works. A
+      # region that came up but bound neither port is a container in perfect health serving
+      # nobody, so this asks the kernel which ports are open rather than asking Docker how the
+      # process is feeling. The relay takes the port above the one it was given, and a region
+      # missing that is one that cannot carry a session for peers who could not meet directly.
+      #
+      # Which container and which port come from the server's own `.env`, so that a staging
+      # region beside a live one is checked as itself rather than as its neighbour.
+      - name: Check it actually serves
+        run: |
+          ssh -p "${{ secrets.DEPLOY_PORT || 22 }}" \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cd '${{ secrets.DEPLOY_PATH }}' \
+               && set -a && . ./.env && set +a \
+               && sleep 10 \
+               && docker inspect -f '{{.State.Running}}' \"\${PRISM_NAME:-prism-rendezvous}\" | grep -qx true \
+               && ss -lnu | grep -q \":\${PRISM_PORT:-47300} \" \
+               && ss -lnu | grep -q \":\$(( \${PRISM_PORT:-47300} + 1 )) \" \
+               && docker logs --tail 20 \"\${PRISM_NAME:-prism-rendezvous}\""

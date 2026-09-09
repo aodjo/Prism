@@ -41,8 +41,13 @@ pub struct HostConfig {
     /// Address to listen on. Port zero lets the operating system choose, which is right when
     /// a rendezvous server is being used and wrong when a port has been forwarded by hand.
     pub bind: SocketAddr,
-    /// Rendezvous server to register with, or `None` to be reachable only directly.
-    pub rendezvous: Option<SocketAddr>,
+    /// Rendezvous to register with, as a name and port, or `None` to be reachable only
+    /// directly.
+    ///
+    /// A name rather than an address, because a name with several records is how a region is
+    /// added: the operator starts a machine and edits a zone file, and every installed client
+    /// finds it without being updated. An address still works — it resolves to itself.
+    pub rendezvous: Option<String>,
     /// How long to wait for a client before giving up.
     pub patience: Duration,
     /// Frames per second to capture at.
@@ -521,7 +526,14 @@ pub fn connect(
     let transport = UdpTransport::bind(config.bind)?;
     let local = reachable_address(transport.local_addr()?);
 
-    let Some(server) = config.rendezvous else {
+    // Resolved here rather than when the settings were written, so a region added or moved
+    // since the machine started sharing is one this session already knows about.
+    let servers = match config.rendezvous.as_deref() {
+        Some(name) => Some(crate::control::rendezvous::Servers::resolve(name)?),
+        None => None,
+    };
+
+    let Some(servers) = servers else {
         // Reachable only where a client can already address this machine: the same network, a
         // virtual one, or a forwarded port. Nothing to punch and nothing to fall back to.
         waiting(Reachable {
@@ -548,22 +560,33 @@ pub fn connect(
         });
     };
 
-    let observed = crate::control::rendezvous::register(&transport, server, &keys.identity)?;
+    // Registered with every region, not the nearest one. A client can only be introduced by a
+    // server this machine is registered with, and which region the client will be nearest to
+    // is not something a host can know.
+    let registration = crate::control::rendezvous::register(&transport, &servers, &keys.identity)?;
 
     // Held for the life of the session, and no longer. Both the registration and the router's
     // mapping lapse in well under a minute of silence, so a host that went quiet would be
     // unreachable for the next client with nothing appearing to have failed — and the thread
     // holding them open holds this socket too, so it has to end when the session does.
-    let keepalive =
-        crate::control::rendezvous::spawn_keepalive(&transport, server, *keys.identity.public())?;
+    let keepalive = crate::control::rendezvous::spawn_keepalive(
+        &transport,
+        &registration.servers,
+        *keys.identity.public(),
+    )?;
 
     waiting(Reachable {
         local,
-        observed: Some(observed),
+        observed: Some(registration.observed),
     });
 
-    let (caller, _) =
-        crate::control::rendezvous::await_caller(&transport, server, config.patience, cancelled)?;
+    let calling = crate::control::rendezvous::await_caller(
+        &transport,
+        &registration.servers,
+        config.patience,
+        cancelled,
+    )?;
+    let caller = calling.key;
     stopped(cancelled)?;
 
     let direct = SliceSender::serve_on(
@@ -585,9 +608,13 @@ pub fn connect(
             // Both routers give every destination a different mapping, so there is no address
             // at which the two can reach each other. The server carries it instead — at the
             // cost of its bandwidth and its distance added to every round trip.
+            //
+            // The one that introduced them, because a relay pairs two peers presenting the
+            // same token and only the server holding that pair can do it. Which one that is
+            // was the client's choice, made by whichever answered it first.
             let relayed = crate::control::rendezvous::relay(
                 &transport,
-                server,
+                calling.server,
                 *keys.identity.public(),
                 caller,
             )?;
@@ -612,7 +639,7 @@ pub fn connect(
 
     Ok(Opened {
         sender: ready(sender, config)?,
-        observed: Some(observed),
+        observed: Some(registration.observed),
         relayed,
         keepalive: Some(keepalive),
     })

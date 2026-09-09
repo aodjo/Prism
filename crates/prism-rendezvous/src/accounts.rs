@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use prism_core::account::secret::{SALT_LEN, SECRET_LEN, auth_matches};
 use prism_core::account::totp;
@@ -421,9 +421,12 @@ impl Accounts {
                 totp_secret: hex(&totp_secret),
                 sealed_key: hex(&registration.sealed_key),
                 devices: Vec::new(),
-                // Off until somebody decides otherwise. The relay costs bandwidth, and a
-                // server that gave it away by default would be one nobody could afford to run.
-                relay_allowed: false,
+                // On, because it is reached rather than chosen: a pair that can punch a hole
+                // to each other never touches it, and a pair that cannot has no other way to
+                // meet at all. Leaving it off by default meant the ones who needed it were the
+                // ones it was refused to. An operator paying for the bandwidth can still say
+                // no — see `set_relay_allowed`.
+                relay_allowed: true,
                 verified: true,
             },
         );
@@ -649,24 +652,15 @@ impl Accounts {
             reason: err.to_string(),
         })?;
 
-        let temporary = self.path.with_extension("tmp");
-        write_then_rename(&temporary, &self.path, &json).map_err(|err| AccountError::Store {
+        // Durably, and this file more than any other. It is the only copy of every account's
+        // sealed key and second factor, and [`Accounts::open`] refuses to start on a store it
+        // cannot parse — so a half-written one is not a lost account but a server that will not
+        // come back up.
+        prism_core::store::replace(&self.path, &json).map_err(|err| AccountError::Store {
             doing: "written",
             reason: err.to_string(),
         })
     }
-}
-
-/// Writes a file and moves it into place, so a reader never sees a half-written one.
-fn write_then_rename(temporary: &Path, final_path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = final_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(temporary, bytes)?;
-    std::fs::rename(temporary, final_path)
 }
 
 /// Whether a name is one an account may have.
@@ -1067,26 +1061,27 @@ mod tests {
     }
 
     #[test]
-    fn the_relay_is_off_until_somebody_says_otherwise() {
-        // It costs bandwidth that somebody pays for, so it is not something a new account
-        // should quietly arrive holding.
+    fn the_relay_is_there_for_a_new_account_and_can_be_taken_away() {
+        // On by default because it is reached rather than chosen: an account that needed it
+        // and did not have it is a pair of machines that simply cannot meet, with nothing on
+        // screen saying why. An operator paying for the bandwidth can still refuse it.
         let (mut accounts, path) = store("relay");
         accounts
             .register_unproved(registration("someone@example.com"))
             .expect("registers");
 
         assert!(
-            !accounts
+            accounts
                 .get("someone@example.com")
                 .expect("exists")
                 .relay_allowed
         );
 
         accounts
-            .set_relay_allowed("someone@example.com", true)
-            .expect("allows");
+            .set_relay_allowed("someone@example.com", false)
+            .expect("refuses");
         assert!(
-            accounts
+            !accounts
                 .get("someone@example.com")
                 .expect("exists")
                 .relay_allowed

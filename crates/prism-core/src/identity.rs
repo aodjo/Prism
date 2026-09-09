@@ -190,15 +190,9 @@ pub fn set_peers(path: &Path, keys: &[[u8; KEY_LEN]]) -> io::Result<()> {
         text.push('\n');
     }
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     // Written beside and moved into place, so a reader never sees a half-written list: a host
     // that read a truncated one would refuse a machine that is allowed.
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, text.as_bytes())?;
-    fs::rename(&temporary, path)
+    crate::store::replace(path, text.as_bytes())
 }
 
 /// Reads every peer key that has been paired with, oldest first.

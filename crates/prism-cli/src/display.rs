@@ -8,6 +8,13 @@
 //! Pictures reach this thread through a two-deep channel and are dropped rather than
 //! queued when it is full. A picture that waits its turn is already too late to be worth
 //! showing.
+//!
+//! # What differs between the two clients
+//!
+//! Only the surface. SDL opens the window on both, the event loop and the pacing are the same
+//! code, and what changes underneath is how a decoded picture reaches the screen: a
+//! `CAMetalLayer` and a Metal command buffer on macOS, a flip-model swap chain and a Direct3D
+//! draw on Windows. That is what [`surface`] is — the same three operations, twice.
 
 use std::error::Error;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -16,21 +23,22 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use objc2_metal::MTLPixelFormat;
-use objc2_quartz_core::CAMetalLayer;
 use prism_core::cursor::CursorTracker;
 use prism_core::net::packet::{InputEvent, MouseButton};
-use prism_core::render::cursor::CursorOverlay;
-use prism_core::render::metal::MetalRenderer;
-use prism_core::render::overlay::TextOverlay;
 use prism_core::render::pacing::PresentPacer;
 use prism_core::stats::LatencyRecorder;
 use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::mouse::MouseButton as SdlMouseButton;
-use sdl3_sys::metal::{SDL_Metal_CreateView, SDL_Metal_DestroyView, SDL_Metal_GetLayer};
 
 use crate::client::{self, ClientConfig};
+
+#[cfg(target_os = "macos")]
+#[path = "display/metal.rs"]
+mod surface;
+#[cfg(target_os = "windows")]
+#[path = "display/d3d11.rs"]
+mod surface;
 
 /// How many pictures may wait to be shown before the newest is dropped.
 const PICTURE_QUEUE_DEPTH: usize = 2;
@@ -40,6 +48,15 @@ const PICTURE_QUEUE_DEPTH: usize = 2;
 /// Ten times a second. Faster would be unreadable and would put CPU text rasterisation on
 /// a path that exists to avoid exactly that kind of work.
 const HUD_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How wide the statistics panel is, in pixels.
+const HUD_WIDTH: usize = 340;
+
+/// How tall the statistics panel is, in pixels.
+const HUD_HEIGHT: usize = 118;
+
+/// How large the statistics panel's text is, in pixels.
+const HUD_FONT_SIZE: f64 = 13.0;
 
 /// Returns whether an event should end the session.
 ///
@@ -215,6 +232,18 @@ fn report_pacing(pacer: &mut PresentPacer) {
     );
 }
 
+/// Returns the new size in pixels when an event says the window changed.
+fn resized(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Window {
+            win_event: sdl3::event::WindowEvent::PixelSizeChanged(..)
+                | sdl3::event::WindowEvent::Resized(..),
+            ..
+        }
+    )
+}
+
 /// Opens a window and shows the stream until it ends or the window is closed.
 ///
 /// # Errors
@@ -238,23 +267,18 @@ pub fn run(
     let window = video
         .window("Prism", width, height)
         .position_centered()
+        .resizable()
         .build()?;
 
-    // SAFETY: the window outlives the view, which is destroyed before this returns.
-    let view = unsafe { SDL_Metal_CreateView(window.raw()) };
-    if view.is_null() {
-        return Err("could not create a Metal view for the window".into());
-    }
+    let (mut drawable_width, mut drawable_height) = window.size_in_pixels();
 
-    // SAFETY: SDL returns the view's CAMetalLayer, which lives as long as the view.
-    let layer = unsafe { &*(SDL_Metal_GetLayer(view).cast::<CAMetalLayer>()) };
-
-    let mut renderer = MetalRenderer::new(MTLPixelFormat::BGRA8Unorm)?;
-    let (drawable_width, drawable_height) = window.size_in_pixels();
-    renderer.configure_layer(layer, drawable_width as usize, drawable_height as usize);
+    // Declared after the window so it is dropped before it: the surface holds objects the
+    // window owns, and releasing them afterwards would be releasing them into nothing.
+    let mut surface = surface::Surface::new(&window, drawable_width, drawable_height)?;
 
     println!(
-        "display: window {width}x{height}, drawable {drawable_width}x{drawable_height}, escape to quit"
+        "display: window {width}x{height}, drawable {drawable_width}x{drawable_height}, {}",
+        surface.describe()
     );
 
     // A machine with no sound device still shows picture. Audio is worth having and not worth
@@ -280,6 +304,8 @@ pub fn run(
         let offset = Arc::clone(&offset);
         let input = Arc::clone(&input_slot);
         let cursor = Arc::clone(&cursor_sink);
+        #[cfg(target_os = "windows")]
+        let gpu = surface.gpu();
         thread::spawn(move || {
             client::run(
                 config,
@@ -289,6 +315,8 @@ pub fn run(
                     input: Some(input),
                     cursor: Some(cursor),
                     audio: audio_sink,
+                    #[cfg(target_os = "windows")]
+                    gpu,
                 },
             )
         })
@@ -296,8 +324,6 @@ pub fn run(
 
     let mut events = sdl.event_pump()?;
     let mut pacer = PresentPacer::new(pacing_us);
-    let mut overlay = TextOverlay::new(renderer.device(), 340, 118, 13.0)?;
-    let cursor_bitmap = CursorOverlay::new(renderer.device())?;
     let mut cursor = CursorTracker::new();
     let mut last_reading = None;
     let mut latency = LatencyRecorder::new(512);
@@ -316,6 +342,15 @@ pub fn run(
         for event in events.poll_iter() {
             if is_quit(&event) {
                 break 'main;
+            }
+            if resized(&event) {
+                let (width, height) = window.size_in_pixels();
+                if let Err(err) = surface.resize(width, height) {
+                    eprintln!("display: {err}");
+                    break 'main;
+                }
+                drawable_width = width;
+                drawable_height = height;
             }
             if capture_input {
                 if let Some(sender) = input_slot.get() {
@@ -353,7 +388,7 @@ pub fn run(
         match pictures_rx.recv_timeout(Duration::from_millis(16)) {
             Ok(picture) => {
                 let clock_offset = offset.load(Ordering::Relaxed);
-                if let Some(age) = client::age_of(picture.pts_us, clock_offset) {
+                if let Some(age) = client::age_of(surface::pts_of(&picture), clock_offset) {
                     latency.record(age);
                     let hold = pacer.hold_for(age);
                     if !hold.is_zero() {
@@ -363,7 +398,7 @@ pub fn run(
 
                 if last_hud.elapsed() >= HUD_INTERVAL {
                     let rate = hud_frames as f64 / last_hud.elapsed().as_secs_f64();
-                    overlay.update(&hud_lines(
+                    surface.update_hud(&hud_lines(
                         &mut latency,
                         &mut pacer,
                         rate,
@@ -375,22 +410,8 @@ pub fn run(
                     hud_frames = 0;
                 }
 
-                // A fixed array rather than a vector: this runs once per displayed frame,
-                // and the frame path does not allocate.
-                //
-                // The cursor comes after the statistics so it draws on top of them. It is
-                // the thing being pointed with, and it should never vanish behind a panel.
                 let target = (drawable_width as usize, drawable_height as usize);
-                let mut quads = [overlay.quad(target.0, target.1); 2];
-                let count = match cursor.normalised() {
-                    Some(at) => {
-                        quads[1] = cursor_bitmap.quad(at, target.0, target.1);
-                        2
-                    }
-                    None => 1,
-                };
-
-                if renderer.present(picture.pixel_buffer(), layer, &quads[..count])? {
+                if surface.present(&picture, cursor.normalised(), target)? {
                     shown += 1;
                     hud_frames += 1;
                 } else {
@@ -402,10 +423,7 @@ pub fn run(
         }
     }
 
-    // SAFETY: the layer is not used after this point, and the window still outlives it.
-    unsafe { SDL_Metal_DestroyView(view) };
-
-    println!("display: {shown} pictures shown, {missed} had no drawable available");
+    println!("display: {shown} pictures shown, {missed} were dropped to stay in time");
     if capture_input {
         println!("input  : {sent_input} events sent");
     }

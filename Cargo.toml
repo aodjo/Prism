@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/prism-core", "crates/prism-napi", "crates/prism-cli", "crates/prism-rendezvous"]
+members = ["crates/prism-core", "crates/prism-napi", "crates/prism-cli", "crates/prism-rendezvous", "crates/prism-tauri"]
 
 [workspace.package]
 version = "0.0.0"

@@ -9,6 +9,13 @@
   font-style: normal;
   font-weight: 100 900;
   font-display: block;
-  src: url('../renderer/fonts/geist-latin.woff2') format('woff2');
+  /* Relative to the stylesheet this is copied into, which is `renderer/prism.css`, so the file
+     sits beside it either way. Written as `../renderer/fonts/…` before, which round-tripped out
+     of that directory and back in again — true under `file://`, where the stylesheet has a
+     parent to climb to, and false under a shell that serves `renderer/` as the document root:
+     there the leading `..` is clamped away and the request becomes `/renderer/fonts/…`, which
+     is nothing. The typeface then fails to load and the window silently draws in the fallback,
+     which on macOS looks close enough that a screenshot does not show it. */
+  src: url('fonts/geist-latin.woff2') format('woff2');
 }
 

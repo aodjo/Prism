@@ -21,3 +21,4 @@ pub mod input;
 pub mod net;
 pub mod render;
 pub mod stats;
+pub mod store;

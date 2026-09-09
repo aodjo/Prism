@@ -30,12 +30,44 @@ Two ways, and the second is not a lesser one.
 From a clone of this repository, on the machine that will run it:
 
 ```sh
+cp deploy/rendezvous/.env.example deploy/rendezvous/.env
+$EDITOR deploy/rendezvous/.env
 docker compose -f deploy/rendezvous/compose.yaml up -d --build
 ```
 
-The image is built from source and comes out at about **1.5 MB**: one statically linked binary
-in an otherwise empty image, with no shell, no package manager, and no libraries. Every
-dependency in the binary is pure Rust, which is what makes that possible.
+One container, built from source, coming out at **2.4 MB** — one statically linked binary in an
+otherwise empty image, with no shell, no package manager and no libraries. It writes nothing, so
+there is no volume, and it speaks no HTTP, so there is nothing to put a certificate in front of.
+
+Two ports have to be open: **47300/udp** for signalling and **47301/udp** for the relay.
+
+#### Accounts are not here
+
+A region keeps none. They live in `packages/accounts`, a Cloudflare Worker over D1 at a name of
+its own, and this server has no `--accounts` flag in its compose file.
+
+That split is deliberate and the two halves want opposite things. Signalling is on the session
+path — when hole punching fails, the relay carries the video and adds its own distance to every
+round trip — and it is soft state that any server can serve, so it is replicated per region and
+a client uses whichever answers first. Accounts are on nobody's path: no session, direct or
+relayed, ever calls the account server. What they need is not to be near anybody, it is to
+survive, and a JSON file on one cheap disk was the only copy of every account's sealed key and
+second factor.
+
+So the names differ, and must:
+
+```
+rv.presm.kr.        A  203.0.113.10   # a region
+rv.presm.kr.        A  198.51.100.20  # another region
+accounts.presm.kr.  → the Worker      # one place, because accounts are state
+```
+
+A name that round-robined between regions would sign somebody in against whichever server
+answered and then tell them, on the next call, that their account does not exist.
+
+Build the image on the machine that will run it, which is what the command above does. Building
+it elsewhere for another architecture goes through emulation — though with enough cores that can
+still beat a single-core server, so it is worth measuring rather than assuming.
 
 To watch it:
 
@@ -47,22 +79,88 @@ It prints a line when it starts and a summary once a minute. `--verbose` in the 
 `command` makes it print a line per message, which is what to reach for when a peer is not
 connecting.
 
+### On a push, by itself
+
+`.github/workflows/deploy.yml` builds the image once and puts it where it runs. A push to
+`develop` deploys to the `staging` environment and a push to `main` to `production`, and only
+after CI has passed on that commit — a pipeline whose point is that what reaches a server is
+what the tests ran against.
+
+Which machine each name means is set in the repository's environment settings rather than here,
+so pointing both at one box while there is only one box is a change to configuration and not to
+code. Each environment needs:
+
+| Secret | What it is |
+|---|---|
+| `DEPLOY_HOST` | The machine's address. |
+| `DEPLOY_USER` | The account to connect as. It has to be able to run `docker`. |
+| `DEPLOY_PATH` | The directory on it holding `.env`, and where the compose file is put. |
+| `DEPLOY_SSH_KEY` | A private key whose public half is in that account's `authorized_keys`. |
+| `DEPLOY_HOST_KEY` | The server's own key, from `ssh-keyscan <host>`. Pinned rather than accepted on sight: a deploy that trusts whatever answers can be pointed at something else by anything that answers first. |
+| `DEPLOY_PORT` | Optional. Defaults to 22. |
+
+The `.env` is **not** deployed and must be put on each server once, by hand. It holds the mail
+key, and a server's secrets belong to the server rather than to a repository that builds it.
+
+Create both environments **before** the first run and put the secrets on the environments rather
+than on the repository, so a staging credential cannot reach the production box. Naming an
+environment that does not exist creates it on first use with no protection at all. Give
+`production` a required reviewer and a deployment branch policy limiting it to `main`.
+
+Four things about this that are easy to be caught by:
+
+- `workflow_run` only fires for a workflow file that is on the **default branch**. Until this
+  file is on `main`, a push to `develop` builds nothing.
+- A `workflow_run` job runs with **this** repository's secrets whatever triggered it, and a pull
+  request from a fork triggers CI. The branch filter does not help — it matches the head branch
+  of the run that fired, and every fork has a `main`. The build job therefore checks that the run
+  came from a push in this repository, and those two conditions are the only thing standing
+  between a stranger's Dockerfile and the machine that keeps everybody's accounts.
+- The image is deployed **by digest**, not by tag. A tag is a name somebody can move.
+- The image is built for both architectures, because the machines it runs on are not all the
+  same one and an image that only runs where it was built is not a deployable artifact.
+
+A push deploy will not start on a machine that is already running the server another way. Osaka
+runs it as a systemd user service on the same UDP port; stop and disable that first
+(`systemctl --user disable --now prism-rendezvous`) or the container will fail to bind.
+
+To put a known-good build back without pushing a commit whose only purpose is to trigger a
+deploy, run the workflow by hand and choose the environment.
+
+### Nothing here needs backing up
+
+A region is entirely disposable, which is the point of it holding no accounts. The signalling
+registry lives in memory and its hosts repopulate it within fifteen seconds of a restart; the
+image is rebuilt from a commit. Destroying one of these machines costs the sessions in flight on
+it and nothing else.
+
+The one thing that could not be reconstructed — each account's sealed private key, its TOTP
+secret and the machines it knows — is no longer on a disk anybody here owns. It is in D1, where
+keeping copies of it is somebody else's job.
+
 ### As a plain binary, with no root at all
 
-The server binds one unprivileged port, reads nothing and writes nothing, so it needs no
-privilege at any point. Every dependency is pure Rust, which means it links statically against
-musl and can be cross-compiled from any machine with a Rust toolchain — no C compiler, on
-either end:
+The server binds one unprivileged port and needs no privilege at any point.
 
-```sh
-rustup target add x86_64-unknown-linux-musl
-RUSTFLAGS="-C linker=rust-lld -C target-feature=+crt-static" \
-  cargo build --release -p prism-rendezvous --target x86_64-unknown-linux-musl
-scp target/x86_64-unknown-linux-musl/release/prism-rendezvous server:~/bin/
+Build it **on the machine that will run it**. It used to cross-compile from anywhere with a
+Rust toolchain and no C compiler at either end, and that stopped being true when the account
+API brought in a TLS client: `reqwest` pulls in `rustls`, which pulls in `ring`, which is C and
+assembly. Cross-compiling from a Mac now ends here:
+
+```
+error: failed to run custom build command for `ring v0.17.14`
+  failed to find tool "x86_64-linux-musl-gcc"
 ```
 
-That is a **1.2 MB** file with nothing beside it. As a user service, so it survives a reboot
-and restarts if it dies:
+Installing a musl cross toolchain fixes it, and so does not needing one:
+
+```sh
+# on the server, which already has the right C toolchain for itself
+cargo build --release -p prism-rendezvous
+install -D target/release/prism-rendezvous ~/bin/prism-rendezvous
+```
+
+As a user service, so it survives a reboot and restarts if it dies:
 
 ```ini
 # ~/.config/systemd/user/prism-rendezvous.service
@@ -135,11 +233,62 @@ A home connection also needs its public address to be stable, or peers configure
 lose the server when it changes. A dynamic DNS name avoids that; peers accept a name as readily
 as an address.
 
-There is one thing a home deployment cannot do that a VPS can: if the *host* being streamed
-from is on the same connection as the rendezvous server, some routers will not hairpin a peer
-back to their own public address. That is a limitation of the router rather than of the
-protocol, and it only affects a client on that same network — which does not need the server
-anyway, since it can address the host directly.
+### Why a home deployment eventually stops being enough
+
+A peer on the same network as the rendezvous server cannot be introduced through it, in either
+role, unless the router hairpins — that is, routes a packet aimed at its own public address
+back inside. Many do not.
+
+The failure is not obvious from the outside, so it is worth being precise about. A peer that
+reaches the server over the LAN never sends anything through the router, so no inbound mapping
+is created and the address the server observes is a private one. It then tells the far peer to
+punch at something like `192.168.219.110`, which goes nowhere. Measured on a router that does
+not hairpin:
+
+```
+host:   registered, reachable at 110.8.104.218:47230     ← the far peer, correct
+client: this machine appears at 192.168.219.110:52750    ← the local peer, useless
+client: no direct path opened; asking the rendezvous server to relay
+```
+
+Nothing can fix that from the server's side: the mapping the far peer would need does not
+exist, because the local peer never opened one. Enabling hairpin on the router works where the
+router offers it; moving the server off that network works everywhere.
+
+So a home box is a fine place to *start* — the traffic is negligible and nothing is trusted to
+it — but the machines sharing its network are exactly the ones it cannot introduce, and those
+are usually the operator's own.
+
+## More than one region
+
+A relayed session pays the server's distance on every round trip, so one server is one place
+that sessions can be fast from. Adding a region is a machine, a port, and an address record:
+
+```
+rv.example.com.  A  203.0.113.10   # Seoul
+rv.example.com.  A  198.51.100.20  # Frankfurt
+```
+
+Every peer is configured with the **name**, not an address, so a region added here is one that
+existing installations start using without being updated.
+
+What the two sides do with that list is asymmetric, and deliberately so. Servers keep their
+registry in memory and never talk to each other, so a host registered in Seoul is a host
+Frankfurt has never heard of — which means both sides have to end up on the same one.
+
+- A **host registers with every server**, because it cannot know which region the client will
+  turn out to be nearest to. This costs one datagram per server per fifteen seconds: about
+  eighty bits a second each, against a session measured in megabits.
+- A **client asks all of them at once and uses whichever answers first.** There is no probe
+  and no extra round trip — the request that finds the host is the same request that measures
+  which server is nearest.
+
+The server that answered is then the one the pair relays through if punching fails, which is
+the right one by construction: it has just proved both that it knows the host and that it is
+the closest of them to the client.
+
+A server that is down or unreachable costs the clients near it and nobody else. A host that no
+server has heard of is reported as not running only when *every* server says so.
 
 ## Checking it works
 
@@ -164,31 +313,29 @@ a challenge in flight costs the same and expires in ten seconds. Registrations e
 seconds after the last keepalive, and hosts send one every fifteen. None of it is written down —
 a server that is restarted is repopulated by its hosts within fifteen seconds.
 
-The account half writes two files, both beside the path given to `--accounts`:
-
-| File | What is in it |
-|---|---|
-| `accounts.json` | One record per account: the salt, the verifier, the TOTP secret, the sealed private key, and the machines. |
-| `sessions.json` | One record per signed-in session: **SHA-256 of** the token, the account it belongs to, and when it expires. |
-
-The hash is the point of the second file. A session token is a bearer credential — whoever
-reads one is that account until it expires — so what is stored is enough to recognise a token
-that comes back and no use at all to somebody who reads the file. There is no slower hash here
-on purpose: a token is 32 bytes of randomness, so there is no smaller space to search than the
-whole one.
-
-Sessions are written down so that restarting the server does not sign everybody out. Before
-that they lived in memory, which made every deployment a forced sign-in on every machine, and
-turned "stay signed in" into a promise that held until the next update.
-
-A hardened unit has to be told about that directory, because the two files are the only things
-this server writes:
+That is the whole of it. A region run this way writes nothing at all, so a hardened unit needs
+no writable path:
 
 ```ini
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/prism
 ```
+
+The account half is still in this binary and still works — `--accounts` turns it on, and it
+keeps `accounts.json` and `sessions.json` beside the path it is given. It is not what runs any
+more. `packages/accounts` serves the same API from a Worker over D1, because the store was the
+one piece of state here with no second copy, and a JSON file rewritten in full on one disk of
+one cheap server is a poor place for every account's sealed key and second factor.
+
+What is stored is worth knowing either way. A session is kept as the **SHA-256 of** its token
+rather than the token: a session token is a bearer credential, so whoever reads one is that
+account until it expires, and what is written down is enough to recognise a token that comes
+back and no use at all to somebody who reads it. There is no slower hash on purpose — a token is
+32 bytes of randomness, so there is no smaller space to search than the whole one.
+
+Sessions are written down so that restarting does not sign everybody out. Before that they lived
+in memory, which made every deployment a forced sign-in on every machine, and turned "stay
+signed in" into a promise that held until the next update.
 
 ## What it refuses
 

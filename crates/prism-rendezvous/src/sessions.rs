@@ -163,15 +163,7 @@ impl Sessions {
             sessions: self.by_hash.clone(),
         })?;
 
-        if let Some(parent) = self.path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let temporary = self.path.with_extension("tmp");
-        std::fs::write(&temporary, json)?;
-        std::fs::rename(&temporary, &self.path)
+        prism_core::store::replace(&self.path, &json)
     }
 }
 

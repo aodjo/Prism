@@ -11,9 +11,27 @@ repository.workspace = true
 prism-core.workspace = true
 clap = { version = "4", features = ["derive"] }
 
+[features]
+default = ["window"]
+
+# The window, the relative mouse capture and the audio output.
+#
+# On by default, because a client without them is not a client. Turned off to build the parts
+# that need no window — which is what `decode` is, and what a machine being used to check a
+# decoder against a recording wants. SDL is built from source and linked statically so that a
+# machine *running* the client needs nothing installed, and that costs the machine *building*
+# it a C toolchain and CMake. Somewhere with a decoder and neither of those is exactly where
+# this flag earns itself: measured on Windows for ARM, where the compiler is an install away
+# and CMake another.
+window = ["dep:sdl3", "dep:sdl3-sys"]
+
+# The window, the relative mouse capture and the audio output, on every platform that has a
+# client.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+sdl3 = { version = "0.18", features = ["build-from-source-static"], optional = true }
+sdl3-sys = { version = "0.6", optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-sdl3 = { version = "0.18", features = ["build-from-source-static"] }
-sdl3-sys = "0.6"
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }
 objc2-metal = { version = "0.3", features = ["MTLPixelFormat"] }
 

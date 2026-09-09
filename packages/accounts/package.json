@@ -1,0 +1,17 @@
+{
+  "name": "@prism/accounts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "schema": "wrangler d1 execute prism-accounts --remote --file schema.sql",
+    "tail": "wrangler tail",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.0.0"
+  }
+}

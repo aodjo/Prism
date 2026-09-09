@@ -61,6 +61,47 @@ pub fn identity_public_key() -> napi::Result<String> {
     Ok(identity::to_hex(identity.public()))
 }
 
+/// One rendezvous server, as it answered a probe.
+#[napi(object)]
+pub struct RendezvousServer {
+    /// Where it is, as `address:port`.
+    pub address: String,
+    /// What its operator named it, such as `Japan (Osaka)`, or empty if it did not say.
+    pub region: String,
+    /// How long the round trip took, in milliseconds.
+    pub round_trip_ms: f64,
+}
+
+/// Asks every server a rendezvous name resolves to where it is, and how far.
+///
+/// One name resolves to one server per region, so this is the list of them. The round trip is
+/// measured here rather than taken from the server, which is what makes it worth showing: a
+/// server cannot make itself look near, and the nearest is the one a session will actually be
+/// introduced through.
+///
+/// Servers that do not answer are left out. Nearest first.
+///
+/// # Errors
+///
+/// Fails if the name resolves to nothing, or if no socket can be opened to ask from. A server
+/// that stays silent is an absence rather than a fault.
+#[napi]
+pub fn rendezvous_servers(name: String) -> napi::Result<Vec<RendezvousServer>> {
+    use prism_core::control::rendezvous::{Servers, probe};
+
+    let servers = Servers::resolve(&name).map_err(to_napi)?;
+
+    Ok(probe(&servers)
+        .map_err(to_napi)?
+        .into_iter()
+        .map(|sighting| RendezvousServer {
+            address: sighting.address.to_string(),
+            region: sighting.region,
+            round_trip_ms: f64::from(sighting.rtt_us) / 1000.0,
+        })
+        .collect())
+}
+
 /// Returns the public keys of every machine this one has paired with.
 ///
 /// # Errors

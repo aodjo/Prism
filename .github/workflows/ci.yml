@@ -15,11 +15,19 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      # This job compiles the Linux host, which encodes through VAAPI.
-      - name: Install VAAPI development files
-        run: sudo apt-get update && sudo apt-get install -y libva-dev clang pkg-config
+      # This job compiles the Linux host, which encodes through VAAPI, and the shell, whose
+      # Linux backend is WebKitGTK. Both are found through pkg-config, so a runner without the
+      # headers does not skip them — it stops.
+      #
+      # This is also the only place they are checked. `pnpm lint:cross` cannot build either on a
+      # Mac with no Linux sysroot, so the shell's Linux path has no local check at all.
+      - name: Install the libraries the Linux build needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libva-dev clang pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -43,25 +51,34 @@ jobs:
             os: macos-latest
           - name: windows-x64
             os: windows-latest
+          # A runner of the architecture rather than a cross build from the x64 one: half of
+          # the Windows code is behind `cfg(target_os)` and none of it has ever been run on
+          # arm64, so a build that could not also execute the tests would be a green tick over
+          # an untested binary.
+          - name: windows-arm64
+            os: windows-11-arm
           - name: linux-x64
             os: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The Linux host encodes through VAAPI, which needs the library and its headers to
       # build. Installed here rather than assumed, because a runner without them would skip
       # compiling the whole backend and report a green build for code nobody had checked.
-      - name: Install VAAPI development files
+      - name: Install the libraries the Linux build needs
         if: matrix.name == 'linux-x64'
-        run: sudo apt-get update && sudo apt-get install -y libva-dev clang pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libva-dev clang pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
 
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -120,17 +137,30 @@ jobs:
       - name: Build the Electron shells
         run: pnpm --filter '!@prism/native' -r build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: prism-native-${{ matrix.name }}
           path: packages/native/*.node
+          if-no-files-found: error
+
+      # The addon on its own is not something anybody can run. This is: the client, the addon
+      # and the one runtime dependency, laid out as an application for the platform the job is
+      # on. Unsigned, so macOS and Windows will both say so on first launch — signing is its
+      # own piece of work and a build nobody can download is worth less than a warning.
+      - name: Package the application
+        run: pnpm package
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prism-${{ matrix.name }}
+          path: out/*
           if-no-files-found: error
 
   rendezvous:
     name: rendezvous image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The server is deployed as a container, so the thing that has to keep working is the
       # image rather than a `cargo build` of the same crate. It is also the one build that

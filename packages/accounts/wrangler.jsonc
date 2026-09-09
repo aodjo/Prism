@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "prism-accounts",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "observability": { "enabled": true },
+
+  // One way in. A `workers.dev` address would be a second name serving the same accounts, which
+  // is a second thing to remember exists and nothing anybody needs.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  // The name the machines already know. Signalling keeps its own name, which resolves to every
+  // region — this one must resolve to one place, because accounts are state and a request that
+  // landed on a different copy would be told the account does not exist.
+  "routes": [{ "pattern": "accounts.presm.kr", "custom_domain": true }],
+
+  "d1_databases": [
+    {
+      "binding": "prism_accounts",
+      "database_name": "prism-accounts",
+      "database_id": "7e2e8dc2-cf3a-4c01-8649-81f3296f047d"
+    }
+  ],
+
+  // Where signed-in machines should look for signalling. The NAME, so a region added later is
+  // one that existing installations start using without being updated.
+  "vars": {
+    "PRISM_ADVERTISE": "rv.presm.kr:47300"
+  }
+
+  // PRISM_RESEND_KEY, PRISM_MAIL_FROM and PRISM_ADMIN_TOKEN are secrets rather than vars, set
+  // with `wrangler secret put`. Without the first, an address is only ever a name here: anybody
+  // can register any address without proving it is theirs. Fine for your own machines; not for
+  // a server strangers can reach.
+}

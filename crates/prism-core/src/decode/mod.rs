@@ -5,6 +5,8 @@
 //! decode immediately, hold nothing back, and hand the result over in a form the
 //! renderer can draw without copying it through system memory.
 
+#[cfg(target_os = "windows")]
+pub mod mediafoundation;
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
 
@@ -121,6 +123,451 @@ pub fn hevc_nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|&byte| (byte >> 1) & 0x3f)
 }
 
+/// Reads the picture size out of an H.264 sequence parameter set.
+///
+/// The set is taken with its header byte, as [`nal_units`] yields it. Returns nothing when the
+/// bitstream runs out or says something this reader does not follow — a caller that cannot
+/// learn the size has other ways to find it out, and guessing one would be worse than not
+/// answering.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::decode::h264_dimensions;
+/// # use prism_core::encode::h264::Sps;
+/// let nal = Sps { width: 1280, height: 720, fps: 60, max_ref_frames: 1 }.to_nal();
+///
+/// // Past the four byte start code, which `nal_units` would have removed.
+/// assert_eq!(h264_dimensions(&nal[4..]), Some((1280, 720)));
+/// ```
+#[must_use]
+pub fn h264_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
+    let payload = unescape(sps.get(1..)?);
+    let fields = read_sps(&payload)?;
+
+    (fields.width > 0 && fields.height > 0).then_some((fields.width, fields.height))
+}
+
+/// What a sequence parameter set says, read once and used by everything that asks.
+///
+/// The walk through a set is the same whichever field is wanted, and it is long enough — three
+/// optional blocks and a scaling list — that a second copy of it would be a second copy that
+/// drifts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpsFields {
+    /// Picture width in luma samples, after cropping.
+    pub width: u32,
+    /// Picture height in luma samples, after cropping.
+    pub height: u32,
+    /// How many pictures the stream may hold as references.
+    pub max_num_ref_frames: u32,
+    /// Where `vui_parameters_present_flag` sits, in bits from the start of the payload.
+    ///
+    /// The payload here is the set with its emulation prevention bytes taken out and its NAL
+    /// header dropped, which is what [`unescape`] produces. Everything before this offset can
+    /// be copied to a new set unchanged, which is what makes a set rewritable without
+    /// modelling every field in it.
+    pub vui_flag_at: usize,
+    /// Whether the set already carries video usability information.
+    pub has_vui: bool,
+}
+
+/// Reads a sequence parameter set's payload.
+///
+/// `payload` is the set with its NAL header dropped and its emulation prevention bytes taken
+/// out. Returns nothing if the set ends early or claims something the syntax does not allow,
+/// because reading on from a damaged set produces plausible answers that are wrong.
+pub(crate) fn read_sps(payload: &[u8]) -> Option<SpsFields> {
+    /// Profiles that carry the chroma format and bit depths the baseline leaves out.
+    const EXTENDED: [u32; 13] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
+
+    /// Luma samples across and down one macroblock.
+    const MACROBLOCK: u32 = 16;
+
+    let mut bits = BitReader::new(payload);
+
+    let profile = bits.bits(8)?;
+    bits.bits(8)?;
+    bits.bits(8)?;
+    bits.ue()?;
+
+    // 4:2:0 unless the set says otherwise, which is what the subsampling below assumes.
+    let mut chroma = 1;
+
+    if EXTENDED.contains(&profile) {
+        chroma = bits.ue()?;
+
+        if chroma == 3 {
+            bits.flag()?;
+        }
+
+        bits.ue()?;
+        bits.ue()?;
+        bits.flag()?;
+
+        if bits.flag()? {
+            // Scaling lists, which are read only to step over: eight for 4:2:0 and twelve when
+            // the transform is 8x8 on all three planes.
+            let lists = if chroma == 3 { 12 } else { 8 };
+
+            for list in 0..lists {
+                if bits.flag()? {
+                    bits.skip_scaling_list(if list < 6 { 16 } else { 64 })?;
+                }
+            }
+        }
+    }
+
+    bits.ue()?;
+
+    match bits.ue()? {
+        0 => {
+            bits.ue()?;
+        }
+        1 => {
+            bits.flag()?;
+            bits.se()?;
+            bits.se()?;
+
+            let cycle = bits.ue()?;
+            for _ in 0..cycle.min(256) {
+                bits.se()?;
+            }
+        }
+        _ => {}
+    }
+
+    let max_num_ref_frames = bits.ue()?;
+    bits.flag()?;
+
+    let across = bits.ue()?.checked_add(1)?;
+    let down = bits.ue()?.checked_add(1)?;
+
+    let frames_only = bits.flag()?;
+    if !frames_only {
+        bits.flag()?;
+    }
+
+    bits.flag()?;
+
+    let mut width = across.checked_mul(MACROBLOCK)?;
+    let mut height = down
+        .checked_mul(if frames_only { 1 } else { 2 })?
+        .checked_mul(MACROBLOCK)?;
+
+    if bits.flag()? {
+        // Cropping is counted in chroma samples, so how many luma samples each one stands for
+        // depends on the subsampling. Vertically it is doubled again for field coding.
+        let (across_unit, down_unit) = match chroma {
+            0 => (1, 2 - u32::from(frames_only)),
+            2 => (2, 2 - u32::from(frames_only)),
+            3 => (1, 2 - u32::from(frames_only)),
+            _ => (2, (2 - u32::from(frames_only)) * 2),
+        };
+
+        let left = bits.ue()?;
+        let right = bits.ue()?;
+        let top = bits.ue()?;
+        let bottom = bits.ue()?;
+
+        width = width.checked_sub(left.checked_add(right)?.checked_mul(across_unit)?)?;
+        height = height.checked_sub(top.checked_add(bottom)?.checked_mul(down_unit)?)?;
+    }
+
+    let vui_flag_at = bits.position();
+    let has_vui = bits.flag()?;
+
+    Some(SpsFields {
+        width,
+        height,
+        max_num_ref_frames,
+        vui_flag_at,
+        has_vui,
+    })
+}
+
+/// Removes the emulation prevention bytes a bitstream carries.
+///
+/// A `0x03` after two zero bytes is there so the payload cannot contain a start code, and it
+/// is not part of what the syntax describes. Reading the syntax without taking them out lands
+/// three bits off for the rest of the set.
+pub(crate) fn unescape(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len());
+    let mut zeros = 0;
+
+    for &byte in payload {
+        if zeros >= 2 && byte == 3 {
+            zeros = 0;
+            continue;
+        }
+
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+        out.push(byte);
+    }
+
+    out
+}
+
+/// Reads the bit-packed syntax a parameter set is written in.
+pub(crate) struct BitReader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> BitReader<'a> {
+    /// Starts at the first bit.
+    pub(crate) const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, at: 0 }
+    }
+
+    /// How many bits have been read.
+    ///
+    /// What makes a set rewritable: everything up to a given field can be copied verbatim
+    /// without the copier having to know what any of it means.
+    pub(crate) const fn position(&self) -> usize {
+        self.at
+    }
+
+    /// Reads one bit, or nothing when the stream has run out.
+    fn bit(&mut self) -> Option<u32> {
+        let byte = *self.bytes.get(self.at / 8)?;
+        let shift = 7 - (self.at % 8);
+        self.at += 1;
+
+        Some(u32::from((byte >> shift) & 1))
+    }
+
+    /// Reads a flag.
+    pub(crate) fn flag(&mut self) -> Option<bool> {
+        self.bit().map(|bit| bit == 1)
+    }
+
+    /// Reads a fixed-width unsigned field, most significant bit first.
+    pub(crate) fn bits(&mut self, count: u32) -> Option<u32> {
+        let mut value = 0u32;
+
+        for _ in 0..count {
+            value = (value << 1) | self.bit()?;
+        }
+
+        Some(value)
+    }
+
+    /// Reads an unsigned Exp-Golomb code, which H.264 calls `ue(v)`.
+    ///
+    /// Refuses anything wider than thirty-two bits rather than wrapping: a set that claims one
+    /// is damaged, and reading on from a damaged set produces a plausible size that is wrong.
+    pub(crate) fn ue(&mut self) -> Option<u32> {
+        let mut leading = 0u32;
+
+        while self.bit()? == 0 {
+            leading += 1;
+
+            if leading > 31 {
+                return None;
+            }
+        }
+
+        if leading == 0 {
+            return Some(0);
+        }
+
+        let rest = self.bits(leading)?;
+
+        Some((1u32 << leading) - 1 + rest)
+    }
+
+    /// Reads a signed Exp-Golomb code, which H.264 calls `se(v)`.
+    fn se(&mut self) -> Option<i32> {
+        let folded = self.ue()?;
+        let magnitude = i64::from(folded).div_euclid(2) + i64::from(folded % 2);
+
+        i32::try_from(if folded % 2 == 1 {
+            magnitude
+        } else {
+            -magnitude
+        })
+        .ok()
+    }
+
+    /// Steps over a scaling list without keeping it.
+    fn skip_scaling_list(&mut self, size: u32) -> Option<()> {
+        let mut last = 8i32;
+        let mut next = 8i32;
+
+        for _ in 0..size {
+            if next != 0 {
+                next = (last + self.se()? + 256) % 256;
+            }
+
+            last = if next == 0 { last } else { next };
+        }
+
+        Some(())
+    }
+}
+
+/// Works out which codec a recorded stream was encoded with.
+///
+/// Read from the parameter sets, which every recording starts with.
+///
+/// The type alone is not enough. The two numbering schemes overlap: an H.264 slice whose
+/// header byte is `0x41` reads as an HEVC video parameter set, so a reader that trusted the
+/// number would call an H.264 recording HEVC. What tells them apart is the rest of the header
+/// — HEVC's is two bytes and says which layer and temporal sub-layer the unit belongs to, and
+/// an H.264 byte that happened to land on a parameter set type almost never says anything
+/// sane there.
+///
+/// Worth having because the alternative is asking, and being told wrong is silent: a stream
+/// read as the codec it is not yields no frames at all, which looks exactly like a decoder
+/// that cannot read it.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::decode::detect_codec;
+/// # use prism_core::net::negotiate::Codec;
+/// // An HEVC video parameter set, then a sequence parameter set.
+/// assert_eq!(detect_codec(&[0, 0, 0, 1, 0x40, 0x01]), Some(Codec::Hevc));
+/// // An H.264 sequence parameter set.
+/// assert_eq!(detect_codec(&[0, 0, 0, 1, 0x67, 0x42]), Some(Codec::H264));
+/// assert_eq!(detect_codec(&[]), None);
+/// ```
+#[must_use]
+pub fn detect_codec(stream: &[u8]) -> Option<crate::net::negotiate::Codec> {
+    use crate::net::negotiate::Codec;
+
+    for nal in nal_units(stream).take(16) {
+        if matches!(nal_type(nal), Some(NAL_SPS | NAL_PPS)) {
+            return Some(Codec::H264);
+        }
+
+        if matches!(
+            hevc_nal_type(nal),
+            Some(HEVC_NAL_VPS | HEVC_NAL_SPS | HEVC_NAL_PPS)
+        ) && is_hevc_header(nal)
+        {
+            return Some(Codec::Hevc);
+        }
+    }
+
+    None
+}
+
+/// Whether a NAL unit's first two bytes are shaped like an HEVC header.
+///
+/// The layer must be the base one and the temporal sub-layer must be numbered from one, which
+/// is what every stream this project will meet carries. Both fields land in bits an H.264 unit
+/// uses for something else, so a byte pair that satisfies them is HEVC rather than an H.264
+/// unit that happened to collide.
+fn is_hevc_header(nal: &[u8]) -> bool {
+    let Some(&[first, second]) = nal.get(..2) else {
+        return false;
+    };
+
+    let layer = ((first & 1) << 5) | (second >> 3);
+    let temporal = second & 0x07;
+
+    first & 0x80 == 0 && layer == 0 && temporal != 0
+}
+
+/// Splits a continuous Annex B stream into the frames it was assembled from.
+///
+/// A decoder is fed one picture at a time, but a stream written to a file is one run of bytes
+/// with nothing marking where a picture ended. The boundary has to be recovered from the
+/// syntax: a slice that says it starts at the first macroblock is the first slice of a new
+/// picture, and any parameter sets sitting in front of it belong to that picture rather than
+/// to the one before.
+///
+/// Written for replaying a dump through a decoder, which is the only way to put a stream one
+/// decoder refuses in front of another. Not on the receive path — there a frame arrives as a
+/// frame and none of this guessing is needed.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::decode::access_units;
+/// # use prism_core::net::negotiate::Codec;
+/// // Two pictures, each a single slice that starts at the first macroblock.
+/// let stream = [0, 0, 0, 1, 0x65, 0x88, 0, 0, 0, 1, 0x65, 0x88];
+///
+/// assert_eq!(access_units(&stream, Codec::H264).len(), 2);
+/// ```
+#[must_use]
+pub fn access_units(stream: &[u8], codec: crate::net::negotiate::Codec) -> Vec<&[u8]> {
+    let mut units = Vec::new();
+    let mut unit_start = 0usize;
+    let mut have_picture = false;
+    let mut leading: Option<usize> = None;
+
+    let mut at = 0usize;
+
+    while let Some(code) = find_start_code(stream, at) {
+        let payload = code.end;
+        let end = find_start_code(stream, payload).map_or(stream.len(), |next| next.start);
+        at = end;
+
+        let nal = &stream[payload..end];
+
+        if starts_picture(nal, codec) {
+            if have_picture {
+                // Anything that came in front of this slice introduces it, not what went
+                // before, so the cut goes ahead of the parameter sets rather than behind them.
+                let cut = leading.unwrap_or(code.start);
+
+                if cut > unit_start {
+                    units.push(&stream[unit_start..cut]);
+                    unit_start = cut;
+                }
+            }
+
+            have_picture = true;
+            leading = None;
+        } else if is_picture_data(nal, codec) {
+            leading = None;
+        } else if leading.is_none() {
+            leading = Some(code.start);
+        }
+    }
+
+    // Only when there is a picture in it. A stream can end with parameter sets, or with a
+    // start code and nothing after it, and handing either to a decoder as though it were a
+    // frame would count a picture that does not exist.
+    if have_picture && unit_start < stream.len() {
+        units.push(&stream[unit_start..]);
+    }
+
+    units
+}
+
+/// Whether a NAL unit is the first slice of a picture.
+fn starts_picture(nal: &[u8], codec: crate::net::negotiate::Codec) -> bool {
+    if !is_picture_data(nal, codec) {
+        return false;
+    }
+
+    if codec == crate::net::negotiate::Codec::Hevc {
+        // The flag saying so is the first bit after the two byte header.
+        return nal.get(2).is_some_and(|byte| byte & 0x80 != 0);
+    }
+
+    // H.264 says it by coding the address of the slice's first macroblock, so a slice that
+    // starts a picture is one that starts at zero.
+    let mut bits = BitReader::new(nal.get(1..).unwrap_or_default());
+
+    bits.ue() == Some(0)
+}
+
+/// Whether a NAL unit carries picture data rather than describing the stream.
+fn is_picture_data(nal: &[u8], codec: crate::net::negotiate::Codec) -> bool {
+    if codec == crate::net::negotiate::Codec::Hevc {
+        // Everything below the first parameter set is a slice segment of some kind.
+        return hevc_nal_type(nal).is_some_and(|kind| kind < HEVC_NAL_VPS);
+    }
+
+    matches!(nal_type(nal), Some(1..=5))
+}
+
 /// Iterator over the NAL units of an Annex B bitstream.
 struct NalUnits<'a> {
     stream: &'a [u8],
@@ -160,4 +607,247 @@ fn find_start_code(stream: &[u8], from: usize) -> Option<core::ops::Range<usize>
     }
 
     None
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::detect_codec;
+    use crate::encode::h264::{Pps, Sps};
+    use crate::net::negotiate::Codec;
+
+    /// What this project's own encoder writes has to be read back as what it is.
+    #[test]
+    fn a_stream_this_encoder_wrote_is_recognised_as_h264() {
+        let mut stream = Sps {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            max_ref_frames: 1,
+        }
+        .to_nal();
+        stream.extend_from_slice(
+            &Pps {
+                init_qp: 26,
+                cabac: true,
+            }
+            .to_nal(),
+        );
+
+        assert_eq!(detect_codec(&stream), Some(Codec::H264));
+    }
+
+    /// The type numbers overlap, so the rest of the header has to be read as well.
+    #[test]
+    fn each_codecs_parameter_sets_are_recognised_as_its_own() {
+        // 0x40, 0x42, 0x44 are HEVC's video, sequence and picture parameter sets.
+        for header in [0x40u8, 0x42, 0x44] {
+            assert_eq!(
+                detect_codec(&[0, 0, 0, 1, header, 0x01]),
+                Some(Codec::Hevc),
+                "{header:#04x}",
+            );
+        }
+
+        // 0x67 and 0x68 are H.264's sequence and picture parameter sets.
+        for header in [0x67u8, 0x68] {
+            assert_eq!(
+                detect_codec(&[0, 0, 0, 1, header, 0x42]),
+                Some(Codec::H264),
+                "{header:#04x}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_stream_with_no_parameter_sets_says_nothing_rather_than_guessing() {
+        // An H.264 slice, which by type alone reads as an HEVC video parameter set. The rest
+        // of the header is what says it is not one, and this is the case that would otherwise
+        // send an H.264 recording to an HEVC decoder.
+        assert_eq!(detect_codec(&[0, 0, 0, 1, 0x41, 0x88]), None);
+        assert_eq!(detect_codec(&[0, 0, 0, 1, 0x45, 0x88]), None);
+        assert_eq!(detect_codec(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod access_unit_tests {
+    use super::{START_CODE, access_units};
+    use crate::encode::h264::{Pps, Sps};
+    use crate::net::negotiate::Codec;
+
+    /// A slice NAL that says which macroblock it starts at.
+    ///
+    /// `first_mb_in_slice` is an unsigned Exp-Golomb code, so zero is the single bit one and
+    /// anything else is longer. Only the first byte matters here: nothing reads past it.
+    fn slice(idr: bool, first: bool) -> Vec<u8> {
+        let header = if idr { 0x65 } else { 0x41 };
+
+        // 0b1... is ue(0); 0b010... is ue(1), which is a slice that starts further in.
+        let body = if first { 0x88 } else { 0x48 };
+
+        let mut nal = START_CODE.to_vec();
+        nal.extend_from_slice(&[header, body]);
+
+        nal
+    }
+
+    #[test]
+    fn each_first_slice_begins_a_frame() {
+        let mut stream = Vec::new();
+        for _ in 0..3 {
+            stream.extend_from_slice(&slice(false, true));
+        }
+
+        assert_eq!(access_units(&stream, Codec::H264).len(), 3);
+    }
+
+    #[test]
+    fn a_picture_split_across_slices_stays_one_frame() {
+        let mut stream = slice(true, true);
+        stream.extend_from_slice(&slice(true, false));
+        stream.extend_from_slice(&slice(true, false));
+
+        // Four slices of one picture, then four of the next.
+        stream.extend_from_slice(&slice(false, true));
+        stream.extend_from_slice(&slice(false, false));
+
+        assert_eq!(access_units(&stream, Codec::H264).len(), 2);
+    }
+
+    /// The parameter sets in front of a keyframe belong to it, not to what came before.
+    ///
+    /// Cutting behind them hands the decoder a keyframe with nothing describing it, which is
+    /// the one frame that has to be self-contained.
+    #[test]
+    fn parameter_sets_travel_with_the_frame_they_introduce() {
+        let sps = Sps {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            max_ref_frames: 1,
+        }
+        .to_nal();
+        let pps = Pps {
+            init_qp: 26,
+            cabac: true,
+        }
+        .to_nal();
+
+        let mut stream = slice(false, true);
+        let leading = stream.len();
+        stream.extend_from_slice(&sps);
+        stream.extend_from_slice(&pps);
+        stream.extend_from_slice(&slice(true, true));
+
+        let units = access_units(&stream, Codec::H264);
+
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].len(), leading);
+        assert_eq!(&units[1][..sps.len()], sps.as_slice());
+    }
+
+    #[test]
+    fn a_stream_with_nothing_in_it_yields_nothing() {
+        assert!(access_units(&[], Codec::H264).is_empty());
+        assert!(access_units(&[0, 0, 0, 1], Codec::H264).is_empty());
+    }
+
+    /// Put together, the pieces have to add back up to what went in.
+    ///
+    /// True of any stream that ends with a picture, which every dump does. A stream ending
+    /// with parameter sets loses them, and that is deliberate: they are not a frame.
+    #[test]
+    fn the_frames_join_back_into_the_stream_they_came_from() {
+        let mut stream = Vec::new();
+        for at in 0..5 {
+            stream.extend_from_slice(&slice(at == 0, true));
+            stream.extend_from_slice(&slice(at == 0, false));
+        }
+
+        let joined: Vec<u8> = access_units(&stream, Codec::H264).concat();
+
+        assert_eq!(joined, stream);
+    }
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    use super::h264_dimensions;
+    use crate::encode::h264::Sps;
+
+    /// Every size the encoder can be asked for, read back out of what it wrote.
+    ///
+    /// A round trip rather than a fixture: the writer beside it is the thing this has to agree
+    /// with, and a hand-typed parameter set would only prove that two hand-typed things match.
+    #[test]
+    fn a_written_parameter_set_reads_back_at_the_size_it_was_written_for() {
+        for (width, height) in [
+            (1280, 720),
+            (1920, 1080),
+            (2560, 1440),
+            (3840, 2160),
+            (640, 360),
+            (16, 16),
+        ] {
+            let nal = Sps {
+                width,
+                height,
+                fps: 60,
+                max_ref_frames: 1,
+            }
+            .to_nal();
+
+            assert_eq!(
+                h264_dimensions(&nal[4..]),
+                Some((width, height)),
+                "{width}x{height}",
+            );
+        }
+    }
+
+    /// 1080 is not a whole number of macroblocks, so it is coded taller and cropped back.
+    ///
+    /// The one case where reading the coded size and reading the real size differ, and the one
+    /// most likely to be got wrong.
+    #[test]
+    fn a_height_that_is_not_whole_macroblocks_is_cropped_back_down() {
+        let nal = Sps {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            max_ref_frames: 1,
+        }
+        .to_nal();
+
+        // 68 macroblocks is 1088 rows, so the set must say to take eight away.
+        assert_eq!(h264_dimensions(&nal[4..]), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn a_truncated_parameter_set_is_refused_rather_than_guessed_at() {
+        let nal = Sps {
+            width: 1280,
+            height: 720,
+            fps: 60,
+            max_ref_frames: 1,
+        }
+        .to_nal();
+
+        for cut in 5..nal.len().min(12) {
+            assert_eq!(h264_dimensions(&nal[4..cut]), None, "cut at {cut}");
+        }
+
+        assert_eq!(h264_dimensions(&[]), None);
+        assert_eq!(h264_dimensions(&[0x67]), None);
+    }
+
+    /// The escapes a bitstream carries are not part of the syntax and have to come out first.
+    #[test]
+    fn emulation_prevention_bytes_are_taken_out_before_the_syntax_is_read() {
+        assert_eq!(super::unescape(&[0, 0, 3, 1]), vec![0, 0, 1]);
+        assert_eq!(super::unescape(&[0, 0, 3, 0, 0, 3, 2]), vec![0, 0, 0, 0, 2]);
+        // Only after two zeros. A three anywhere else is data.
+        assert_eq!(super::unescape(&[0, 3, 1]), vec![0, 3, 1]);
+        assert_eq!(super::unescape(&[]), Vec::<u8>::new());
+    }
 }

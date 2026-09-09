@@ -959,7 +959,19 @@ unsafe fn push_parameter_sets(
         }
 
         // SAFETY: CoreMedia reported `size` readable bytes at `ptr`.
-        frame.push_nal(unsafe { core::slice::from_raw_parts(ptr, size) });
+        let nal = unsafe { core::slice::from_raw_parts(ptr, size) };
+
+        // VideoToolbox writes no video usability information, so its sequence parameter sets
+        // never say how far the stream reorders — and a decoder that is not told assumes the
+        // worst its level allows. Measured against Media Foundation that was five frames of
+        // delay on a stream that reorders nothing. The rewrite adds the missing sentence; a
+        // set that already carries one, or a codec whose sets are not H.264's, is left alone.
+        let rewritten = match codec {
+            Codec::Hevc => None,
+            _ => crate::encode::h264::declare_no_reordering(nal),
+        };
+
+        frame.push_nal(rewritten.as_deref().unwrap_or(nal));
     }
 }
 

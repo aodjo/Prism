@@ -691,31 +691,46 @@ function Setup(): JSX.Element {
 
               {/* Only when creating one. A password being typed to sign in is checked by the
                   server against what it already has; one being set has nothing to check it
-                  against but a second reading of the same keystrokes. */}
-              {joining && (
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-fine-2 text-dim">Password again</span>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    placeholder="••••••••"
-                    className={
-                      confirm !== '' && confirm !== password
-                        ? `${ACCOUNT_FIELD} border-[rgba(255,92,110,0.5)]`
-                        : ACCOUNT_FIELD
-                    }
-                    value={confirm}
-                    onChange={(event) => {
-                      setConfirm(event.target.value);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        createAccount();
+                  against but a second reading of the same keystrokes.
+
+                  Kept in the page and collapsed rather than taken out of it, so that changing
+                  which question is being asked is a card that grows rather than one that jumps
+                  by a field. The row is sized in `fr` because nothing here knows how tall a
+                  field is, and the negative margin swallows the parent's gap while the row is
+                  shut — otherwise a closed field still spaces the card as though it were open.
+                  Both animate; the reduced-motion rule in the design system turns them off. */}
+              <div
+                aria-hidden={!joining}
+                className={`grid transition-all duration-300 ease-out ${
+                  joining ? 'grid-rows-[1fr]' : '-mt-3 grid-rows-[0fr]'
+                }`}
+              >
+                <div className="overflow-hidden">
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-fine-2 text-dim">Password again</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="••••••••"
+                      tabIndex={joining ? undefined : -1}
+                      className={
+                        confirm !== '' && confirm !== password
+                          ? `${ACCOUNT_FIELD} border-[rgba(255,92,110,0.5)]`
+                          : ACCOUNT_FIELD
                       }
-                    }}
-                  />
-                </label>
-              )}
+                      value={confirm}
+                      onChange={(event) => {
+                        setConfirm(event.target.value);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          createAccount();
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
+              </div>
 
               <button
                 type="button"

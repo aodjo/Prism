@@ -32,18 +32,18 @@ use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
 use prism_core::net::secure::{SecureReceiver, SecureSender};
 use prism_core::net::transport::UdpTransport;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
 use crate::audio::AudioSink;
 
 /// Stands in for the playback sink on platforms with no client window yet.
 ///
-/// The wire side of audio is built and tested everywhere; only the playing of it is macOS
-/// only so far, because that is where the client window is.
-#[cfg(not(target_os = "macos"))]
+/// The wire side of audio is built and tested everywhere; only the playing of it needs a
+/// window, because that is what owns the audio device.
+#[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
 #[derive(Debug, Clone)]
 pub struct AudioSink;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
 impl AudioSink {
     /// Discards a frame, on a platform that cannot play it.
     pub fn push(&self, _sequence: u32, _payload: &[u8], _arrived_us: u64) {}
@@ -53,14 +53,30 @@ use prism_core::stats::{LatencyRecorder, LatencySummary};
 
 /// Where decoded pictures go when the client is showing them.
 ///
-/// The payload type differs by platform because only macOS has a decoder so far; the
-/// alias keeps the signatures below identical everywhere.
+/// The payload type differs by platform because a decoded picture is whatever that platform's
+/// decoder produced and stays in its own GPU's memory; the alias keeps the signatures below
+/// identical everywhere.
 #[cfg(target_os = "macos")]
 pub type PictureSink = SyncSender<prism_core::decode::videotoolbox::DecodedFrame>;
 
+/// Where decoded pictures go when the client is showing them.
+#[cfg(target_os = "windows")]
+pub type PictureSink = SyncSender<prism_core::decode::mediafoundation::DecodedFrame>;
+
 /// Where decoded pictures would go on a platform with no decoder yet.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub type PictureSink = SyncSender<()>;
+
+/// The GPU a client decodes onto, when something is drawing the pictures.
+///
+/// Windows only, because it is the one platform where the decoder is told which device to use
+/// rather than finding one for itself. Handing over the renderer's device is what keeps a
+/// decoded picture on the GPU the window is already on.
+#[cfg(target_os = "windows")]
+pub type Gpu = (
+    windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+);
 
 /// How many frames may wait for the decoder before the newest is dropped.
 ///
@@ -180,6 +196,12 @@ pub struct ClientHooks {
     /// Absent when nothing is showing the stream, because a session with no window is a
     /// measurement run and playing its audio out loud would be a surprise.
     pub audio: Option<AudioSink>,
+    /// The GPU to decode onto, when a renderer already has one.
+    ///
+    /// Absent for a run with no window, which decodes onto whichever device the decoder finds
+    /// for itself because nothing is going to draw the result.
+    #[cfg(target_os = "windows")]
+    pub gpu: Option<Gpu>,
 }
 
 /// How the receiving client should behave.
@@ -189,8 +211,12 @@ pub struct ClientConfig {
     ///
     /// `None` means ask the rendezvous server, which is what a host behind NAT requires.
     pub host: Option<SocketAddr>,
-    /// Rendezvous server to find the host through.
-    pub rendezvous: Option<SocketAddr>,
+    /// Rendezvous to find the host through, as a name and port.
+    ///
+    /// A name rather than an address: every record it resolves to is a region, all of them are
+    /// asked at once, and whichever answers first is both the nearest and the one the pair
+    /// will relay through if punching fails.
+    pub rendezvous: Option<String>,
     /// What this machine can decode and present.
     ///
     /// Sent in the message that opens the session, so the host has chosen a codec by the time
@@ -291,15 +317,26 @@ fn open(
         return Ok((established, host));
     }
 
-    let Some(server) = config.rendezvous else {
+    let Some(name) = config.rendezvous.as_deref() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "give either --host or --rendezvous so the host can be found",
         ));
     };
 
+    // Every address the name resolves to is a region to ask. Resolved now rather than when the
+    // settings were written, so a region added since is one this session already knows about.
+    let servers = rendezvous::Servers::resolve(name)?;
+
     let me = *config.identity.public();
-    let found = rendezvous::lookup(transport, server, config.peer_key, me)?;
+    let found = rendezvous::lookup(transport, &servers, config.peer_key, me)?;
+    if servers.len() > 1 {
+        println!(
+            "client: asked {} rendezvous servers, {} answered first",
+            servers.len(),
+            found.server
+        );
+    }
     println!(
         "client: the host is at {}, and this machine appears at {}",
         found.address, found.observed
@@ -339,7 +376,10 @@ fn open(
     // reached rather than chosen.
     println!("client: no direct path opened; asking the rendezvous server to relay");
 
-    let relayed = rendezvous::relay(transport, server, config.peer_key, me)?;
+    // Through the one that answered the lookup. A relay pairs two peers presenting the same
+    // token, so it has to be a server they are both registered with — and that one has just
+    // proved both that it knows the host and that it is the nearest of them to here.
+    let relayed = rendezvous::relay(transport, found.server, config.peer_key, me)?;
     let established = dial(
         transport,
         relayed.address,
@@ -361,12 +401,15 @@ fn open(
 /// Returns an [`io::Error`] if the socket cannot be bound or read, other than the
 /// timeout that ends the run normally.
 pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let gpu = hooks.gpu.clone();
     let ClientHooks {
         pictures,
         offset,
         input,
         cursor,
         audio,
+        ..
     } = hooks;
     let offset = offset.unwrap_or_else(|| Arc::new(AtomicI64::new(OFFSET_UNKNOWN)));
     let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
@@ -420,6 +463,8 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             pictures,
             Arc::clone(&offset),
             agreed.codec,
+            #[cfg(target_os = "windows")]
+            gpu,
         )
     });
 
@@ -722,10 +767,184 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     Ok(())
 }
 
+/// How long the decode thread waits for a picture before moving on.
+///
+/// Short on purpose. Blocking here stalls the whole decode thread, so every frame behind the
+/// one being waited for is measured as late and may be dropped. Roughly two frame intervals is
+/// long enough to absorb the decoder's own pipelining and short enough that a stall cannot
+/// cascade.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const POLL_TIMEOUT: Duration = Duration::from_millis(8);
+
+/// What the decode loop needs of a platform's decoder.
+///
+/// Both backends already have this shape. Naming it is what lets one loop drive either, so the
+/// counters, the timestamps and the bitstream dump behave identically on the two clients by
+/// construction rather than by two people having written the same thing twice.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+trait Decoder {
+    /// What this decoder hands back, which stays in its own platform's GPU memory.
+    type Picture;
+
+    /// Submits one Annex B frame.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend reports; [`prism_core::decode::DecodeError::NoParameterSets`] is
+    /// the ordinary case of a stream that has not described itself yet.
+    fn decode(&mut self, annexb: &[u8], pts_us: u64)
+    -> Result<(), prism_core::decode::DecodeError>;
+
+    /// Waits up to `timeout` for a picture.
+    fn poll(&mut self, timeout: Duration) -> Option<Self::Picture>;
+
+    /// Returns the presentation timestamp a picture was submitted with.
+    fn pts_of(picture: &Self::Picture) -> u64;
+
+    /// Takes the status codes the backend reported and were not fatal.
+    fn take_errors(&mut self) -> Vec<i32>;
+}
+
+#[cfg(target_os = "macos")]
+impl Decoder for prism_core::decode::videotoolbox::VideoToolboxDecoder {
+    type Picture = prism_core::decode::videotoolbox::DecodedFrame;
+
+    fn decode(
+        &mut self,
+        annexb: &[u8],
+        pts_us: u64,
+    ) -> Result<(), prism_core::decode::DecodeError> {
+        Self::decode(self, annexb, pts_us)
+    }
+
+    fn poll(&mut self, timeout: Duration) -> Option<Self::Picture> {
+        Self::poll(self, timeout)
+    }
+
+    fn pts_of(picture: &Self::Picture) -> u64 {
+        picture.pts_us
+    }
+
+    fn take_errors(&mut self) -> Vec<i32> {
+        Self::take_errors(self)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Decoder for prism_core::decode::mediafoundation::MediaFoundationDecoder {
+    type Picture = prism_core::decode::mediafoundation::DecodedFrame;
+
+    fn decode(
+        &mut self,
+        annexb: &[u8],
+        pts_us: u64,
+    ) -> Result<(), prism_core::decode::DecodeError> {
+        Self::decode(self, annexb, pts_us)
+    }
+
+    fn poll(&mut self, timeout: Duration) -> Option<Self::Picture> {
+        Self::poll(self, timeout)
+    }
+
+    fn pts_of(picture: &Self::Picture) -> u64 {
+        picture.pts_us
+    }
+
+    fn take_errors(&mut self) -> Vec<i32> {
+        Self::take_errors(self)
+    }
+}
+
+/// Decodes everything the receive thread hands over and reports what came of it.
+///
+/// The decoder is moved in and never leaves, which keeps every platform session object on the
+/// one thread that owns it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn decode_until_closed<D: Decoder>(
+    mut decoder: D,
+    frames: &Receiver<FrameBuf>,
+    recycle: &Sender<FrameBuf>,
+    pictures: Option<SyncSender<D::Picture>>,
+    offset: &Arc<AtomicI64>,
+) -> DecodeReport {
+    // A developer affordance: writes exactly what is handed to the decoder, so a stream the
+    // decoder refuses can be put in front of an independent one. A bitstream that ffmpeg reads
+    // and this decoder does not is a different bug from one neither will touch, and there is no
+    // way to tell them apart without the bytes.
+    let mut dump =
+        std::env::var_os("PRISM_DUMP_BITSTREAM").and_then(|path| std::fs::File::create(path).ok());
+
+    let mut latency = LatencyRecorder::new(4096);
+    let mut stage = LatencyRecorder::new(4096);
+    let mut lag = LatencyRecorder::new(4096);
+    let mut decoded = 0u32;
+    let mut starved = 0u32;
+
+    while let Ok(buf) = frames.recv() {
+        let started = std::time::Instant::now();
+
+        if let Some(file) = dump.as_mut() {
+            use std::io::Write;
+            let _ = file.write_all(&buf.data);
+        }
+
+        match decoder.decode(&buf.data, buf.capture_ts_us) {
+            Ok(()) | Err(prism_core::decode::DecodeError::NoParameterSets) => {}
+            Err(err) => eprintln!("client: {err}"),
+        }
+
+        // Everything the decoder has finished, not just the first of it. Waiting once and
+        // taking one picture per frame submitted means a decoder that ever falls behind stays
+        // behind for the rest of the session: it is handed one and gives back one, and the
+        // gap between the two never closes.
+        let mut wait = POLL_TIMEOUT;
+        let mut produced = false;
+
+        while let Some(picture) = decoder.poll(wait) {
+            wait = Duration::ZERO;
+            produced = true;
+
+            let pts_us = D::pts_of(&picture);
+
+            lag.record(
+                buf.capture_ts_us
+                    .saturating_sub(pts_us)
+                    .min(u64::from(u32::MAX)) as u32,
+            );
+            if let Some(age) = age_of(pts_us, offset.load(Ordering::Relaxed)) {
+                latency.record(age);
+            }
+            stage.record(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
+            decoded += 1;
+
+            if let Some(sink) = pictures.as_ref() {
+                // Dropped rather than queued: a picture that waits its turn is already too
+                // late to be worth showing.
+                let _ = sink.try_send(picture);
+            }
+        }
+
+        if !produced {
+            starved += 1;
+        }
+
+        let _ = recycle.send(buf);
+    }
+
+    DecodeReport {
+        decoded,
+        starved,
+        summary: latency.summarize(),
+        stage: stage.summarize(),
+        lag: lag.summarize(),
+        errors: decoder.take_errors(),
+    }
+}
+
 /// Starts the decode thread.
 ///
-/// The decoder is created inside the thread and never leaves it, which keeps every
-/// platform session object on the one thread that owns it.
+/// The decoder is created inside the thread rather than handed to it, so that nothing but the
+/// thread that uses it ever holds it.
 #[cfg(target_os = "macos")]
 fn spawn_decoder(
     frames: Receiver<FrameBuf>,
@@ -734,84 +953,48 @@ fn spawn_decoder(
     offset: Arc<AtomicI64>,
     codec: prism_core::net::negotiate::Codec,
 ) -> thread::JoinHandle<DecodeReport> {
-    use prism_core::decode::DecodeError;
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
 
-    /// How long the decode thread waits for a picture before moving on.
-    ///
-    /// Short on purpose. Blocking here stalls the whole decode thread, so every frame
-    /// behind the one being waited for is measured as late and may be dropped. Roughly
-    /// two frame intervals is long enough to absorb the decoder's own pipelining and
-    /// short enough that a stall cannot cascade.
-    const POLL_TIMEOUT: Duration = Duration::from_millis(8);
+    thread::spawn(move || {
+        decode_until_closed(
+            VideoToolboxDecoder::new(codec),
+            &frames,
+            &recycle,
+            pictures,
+            &offset,
+        )
+    })
+}
 
-    // A developer affordance: writes exactly what is handed to the decoder, so a stream the
-    // decoder refuses can be put in front of an independent one. A bitstream that ffmpeg reads
-    // and this decoder does not is a different bug from one neither will touch, and there is no
-    // way to tell them apart without the bytes.
-    let mut dump =
-        std::env::var_os("PRISM_DUMP_BITSTREAM").and_then(|path| std::fs::File::create(path).ok());
+/// Starts the decode thread.
+///
+/// Decodes onto the renderer's device when there is one, so a picture is already on the GPU
+/// the window is on and nothing has to be copied between two of them.
+#[cfg(target_os = "windows")]
+fn spawn_decoder(
+    frames: Receiver<FrameBuf>,
+    recycle: Sender<FrameBuf>,
+    pictures: Option<PictureSink>,
+    offset: Arc<AtomicI64>,
+    codec: prism_core::net::negotiate::Codec,
+    gpu: Option<Gpu>,
+) -> thread::JoinHandle<DecodeReport> {
+    use prism_core::decode::mediafoundation::MediaFoundationDecoder;
 
     thread::spawn(move || {
-        let mut decoder = VideoToolboxDecoder::new(codec);
-        let mut latency = LatencyRecorder::new(4096);
-        let mut stage = LatencyRecorder::new(4096);
-        let mut decoded = 0u32;
-        let mut starved = 0u32;
-        let mut lag = LatencyRecorder::new(4096);
+        let decoder = match gpu {
+            Some((device, context)) => MediaFoundationDecoder::with_device(codec, device, context),
+            None => MediaFoundationDecoder::new(codec),
+        };
 
-        while let Ok(buf) = frames.recv() {
-            let started = std::time::Instant::now();
-
-            if let Some(file) = dump.as_mut() {
-                use std::io::Write;
-                let _ = file.write_all(&buf.data);
-            }
-
-            match decoder.decode(&buf.data, buf.capture_ts_us) {
-                Ok(()) | Err(DecodeError::NoParameterSets) => {}
-                Err(err) => eprintln!("client: {err}"),
-            }
-
-            if let Some(picture) = decoder.poll(POLL_TIMEOUT) {
-                lag.record(
-                    buf.capture_ts_us
-                        .saturating_sub(picture.pts_us)
-                        .min(u64::from(u32::MAX)) as u32,
-                );
-                if let Some(age) = age_of(picture.pts_us, offset.load(Ordering::Relaxed)) {
-                    latency.record(age);
-                }
-                stage.record(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
-                decoded += 1;
-
-                if let Some(sink) = pictures.as_ref() {
-                    // Dropped rather than queued: a picture that waits its turn is
-                    // already too late to be worth showing.
-                    let _ = sink.try_send(picture);
-                }
-            } else {
-                starved += 1;
-            }
-
-            let _ = recycle.send(buf);
-        }
-
-        DecodeReport {
-            decoded,
-            starved,
-            summary: latency.summarize(),
-            stage: stage.summarize(),
-            lag: lag.summarize(),
-            errors: decoder.take_errors(),
-        }
+        decode_until_closed(decoder, &frames, &recycle, pictures, &offset)
     })
 }
 
 /// Starts a decode thread on a platform with no decoder yet.
 ///
 /// Drains the channel so the receive thread never blocks handing frames over.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn spawn_decoder(
     frames: Receiver<FrameBuf>,
     recycle: Sender<FrameBuf>,

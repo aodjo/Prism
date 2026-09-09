@@ -91,6 +91,16 @@ export interface HostSnapshot {
   readonly error: string | null;
 }
 
+/** One rendezvous server, as it answered a probe. */
+export interface RendezvousServer {
+  /** Where it is, as `address:port`. */
+  readonly address: string;
+  /** What its operator named it, such as `Japan (Osaka)`, or empty if it did not say. */
+  readonly region: string;
+  /** How long the round trip took, in milliseconds. */
+  readonly roundTripMs: number;
+}
+
 export interface Settings {
   /** Rendezvous server to find hosts through, or empty to connect directly. */
   rendezvous: string;
@@ -103,23 +113,30 @@ export interface Settings {
    */
   accountServer: string;
 
+  /**
+   * What the person at this machine calls it, or empty for none.
+   *
+   * Shown beside its name here and nowhere else: the account already carries a label that
+   * every other machine reads, and this is the one somebody gives a machine for their own
+   * sake — the one in the study, the loud one, the one with the good graphics card.
+   */
+  nickname: string;
   /** Address to listen on while shared. Port zero lets the operating system choose. */
   bind: string;
   /** Frames per second to capture at while shared. */
   fps: number;
   /** What to spend while shared, in bits per second. */
   bitrateBps: number;
-  /** Whether to start sharing as soon as the application launches. */
-  shareOnLaunch: boolean;
-
   /**
-   * Whether the setup flow has been through once.
+   * Whether this machine is meant to be shared.
    *
-   * Stored rather than inferred from whether anything is paired, because somebody who skipped
-   * setup deliberately should not be asked again every time they open the application with no
-   * machines added.
+   * Written by turning sharing on and off rather than by a setting of its own, and read at
+   * launch to put it back the way it was left. A machine somebody shared is one they meant to
+   * be able to reach, and a switch that reset itself every restart would make it reachable
+   * only while somebody had a window open on it.
    */
-  setupDone: boolean;
+  sharing: boolean;
+
   /** Whether to send input to the host, or only watch. */
   control: boolean;
   /** Whether to even out arrival jitter at the cost of a little latency. */
@@ -163,14 +180,6 @@ export interface Session {
 }
 
 /**
- * What the stream process is doing.
- *
- * The stream runs in a process of its own rather than in this one. On macOS a window has to
- * be driven from the main thread and Electron already owns that thread, so a stream window
- * inside this process could not exist — and putting the frame path in a separate process is
- * the better arrangement anyway.
- */
-/**
  * What the stream agreed to carry, said once when the session opens.
  *
  * Fixed for the life of a session: both sides negotiated it and neither can change it without
@@ -204,6 +213,14 @@ export interface StreamStats {
   readonly frames: number;
 }
 
+/**
+ * What the stream process is doing.
+ *
+ * The stream runs in a process of its own rather than in this one. On macOS a window has to be
+ * driven from the main thread and Electron already owns that thread, so a stream window inside
+ * this process could not exist — and putting the frame path in a separate process is the better
+ * arrangement anyway.
+ */
 export interface StreamState {
   /** `idle`, `connecting`, `streaming`, `stopped` or `failed`. */
   readonly phase: string;
@@ -407,6 +424,19 @@ export interface PrismApi {
   accountForgetDevice(publicKey: string): Promise<AccountState>;
 
   /**
+   * Renames this machine on the account.
+   *
+   * The name every other machine on the account sees, which is not the same as the one this
+   * one is called here — that is a nickname and stays local.
+   *
+   * @async
+   * @param {string} label - What to call it from now on.
+   * @returns {Promise<AccountState>} The account as it stands afterwards.
+   * @throws {Error} If nobody is signed in, or the server refuses.
+   */
+  accountRename(label: string): Promise<AccountState>;
+
+  /**
    * Returns the stored settings.
    *
    * @async
@@ -433,6 +463,17 @@ export interface PrismApi {
    * @throws {Error} If neither an address nor a rendezvous server is configured.
    */
   connect(host: string, address: string): Promise<StreamState>;
+
+  /**
+   * Asks every rendezvous server where it is, and how far.
+   *
+   * The round trip is measured here rather than reported by the server, so a server cannot
+   * make itself look near. Servers that do not answer are left out. Nearest first.
+   *
+   * @async
+   * @returns {Promise<RendezvousServer[]>} The servers that answered, nearest first.
+   */
+  rendezvousServers(): Promise<RendezvousServer[]>;
 
   /**
    * Closes the stream window.

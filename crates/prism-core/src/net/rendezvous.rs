@@ -128,7 +128,17 @@ mod tag {
     pub const RELAY: u8 = 0x0a;
     /// The server naming the port and token to relay through.
     pub const RELAYING: u8 = 0x0b;
+    /// A peer asking a server whether it is there, and what it calls itself.
+    pub const WHERE: u8 = 0x0c;
+    /// The server saying where it is.
+    pub const HERE: u8 = 0x0d;
 }
+
+/// Longest a server's name for itself may be, in bytes.
+///
+/// Enough for the longest place a person would write — "Netherlands (Amsterdam)" is
+/// twenty-three — and short enough that the answer stays one small datagram.
+pub const REGION_LEN: usize = 32;
 
 /// One message in the rendezvous protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +209,29 @@ pub enum Message {
     /// Which means the host is not running, not that the key is wrong. The two are
     /// indistinguishable from here and the client can say only the former.
     UnknownHost,
+
+    /// A peer asks a server whether it is there, carrying a number to match the answer to.
+    ///
+    /// Sent to every server a name resolves to, before anything else, so a person choosing
+    /// between them sees which is nearest rather than guessing from the place names.
+    Where {
+        /// Echoed back, so a late answer from one server is not read as a fast one from
+        /// another. Nothing is trusted to it: this measures a round trip, it does not
+        /// authenticate anybody.
+        nonce: [u8; 8],
+    },
+
+    /// The server answers, saying what it calls itself.
+    Here {
+        /// The number from the question.
+        nonce: [u8; 8],
+        /// What the operator named this server, as UTF-8 padded with zero bytes.
+        ///
+        /// Advisory and cosmetic. A server that lies about where it is has told a person the
+        /// wrong place name and changed nothing else — the round trip beside it is measured
+        /// here rather than claimed there.
+        region: [u8; REGION_LEN],
+    },
 
     /// A peer asks the server to carry its traffic.
     ///
@@ -298,6 +331,15 @@ impl Message {
                 writer.bytes(&port.to_le_bytes())?;
                 writer.bytes(token)?;
             }
+            Self::Where { nonce } => {
+                writer.byte(tag::WHERE)?;
+                writer.bytes(nonce)?;
+            }
+            Self::Here { nonce, region } => {
+                writer.byte(tag::HERE)?;
+                writer.bytes(nonce)?;
+                writer.bytes(region)?;
+            }
         }
 
         Ok(writer.written())
@@ -353,6 +395,13 @@ impl Message {
                 port: u16::from_le_bytes(reader.array("relaying")?),
                 token: reader.array("relaying")?,
             },
+            tag::WHERE => Self::Where {
+                nonce: reader.array("where")?,
+            },
+            tag::HERE => Self::Here {
+                nonce: reader.array("here")?,
+                region: reader.array("here")?,
+            },
             other => return Err(RendezvousError::UnknownType { tag: other }),
         };
 
@@ -378,6 +427,8 @@ fn kind_of(tag: u8) -> &'static str {
         tag::KEEPALIVE => "keepalive",
         tag::RELAY => "relay",
         tag::RELAYING => "relaying",
+        tag::WHERE => "where",
+        tag::HERE => "here",
         _ => "unknown",
     }
 }

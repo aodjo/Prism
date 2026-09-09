@@ -5,10 +5,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Holder } from '@prism/account/holder';
+import type { AccountView } from '@prism/account/holder';
 import { toDataURL } from 'qrcode';
 
 import type { AccountEnrolmentView, HostSnapshot, Session, Settings, StreamState } from './api.js';
 import { loadSessions, recordSession } from './sessions.js';
+import { PRISM_RENDEZVOUS } from './rendezvous.js';
 import { DEFAULTS, loadSettings, saveSettings } from './settings.js';
 import { Sharing } from './sharing.js';
 import { Stream } from './stream.js';
@@ -168,6 +170,33 @@ async function others(): Promise<string> {
 }
 
 /**
+ * Tells every open window what the account says, and hands the answer back to the caller.
+ *
+ * The window that asked learns the answer from its own call, but it is never the only one
+ * looking: the settings sheet and the list of machines behind it are drawn from the same
+ * account. A sign-out that reached only the sheet leaves the list still naming machines and
+ * still saying who is signed in, which reads as the button having done nothing.
+ *
+ * Takes the promise rather than the result so that a handler can wrap its one call and stay
+ * one line, which is what stops the next handler from forgetting to do this.
+ *
+ * @async
+ * @param {Promise<AccountView>} state - The account operation to announce the result of.
+ * @returns {Promise<AccountView>} What the account says, for the caller to return.
+ */
+async function announce(state: Promise<AccountView>): Promise<AccountView> {
+  const settled = await state;
+
+  for (const open of [window, setup, home]) {
+    if (open && !open.isDestroyed()) {
+      open.webContents.send('account:state', settled);
+    }
+  }
+
+  return settled;
+}
+
+/**
  * Asks the account who its machines are, and acts on a change.
  *
  * Two things go stale together. The list a window draws is one; the list a running session
@@ -187,13 +216,7 @@ async function catchUp(): Promise<void> {
 
   await account.refresh();
 
-  const state = await account.view();
-
-  for (const open of [window, setup, home]) {
-    if (open && !open.isDestroyed()) {
-      open.webContents.send('account:state', state);
-    }
-  }
+  await announce(account.view());
 
   const own = sharing.snapshot();
 
@@ -291,6 +314,30 @@ function openHome(): void {
 }
 
 /**
+ * Opens setup, and closes the home window if that is what was showing.
+ *
+ * The counterpart of {@link openHome}, used when signing out. Without it somebody who signs
+ * out is left looking at a window built entirely out of what the account said — a list of
+ * machines nobody can reach any more and a name that came from an account this machine is no
+ * longer on.
+ *
+ * @returns {void}
+ */
+function openSetup(): void {
+  if (setup && !setup.isDestroyed()) {
+    setup.focus();
+  } else {
+    setup = createStage('setup.html');
+  }
+
+  if (home && !home.isDestroyed()) {
+    home.close();
+  }
+
+  home = null;
+}
+
+/**
  * Registers every call the window is allowed to make.
  *
  * @returns {void}
@@ -322,8 +369,6 @@ function registerHandlers(): void {
   });
 
   ipcMain.on('setup:done', () => {
-    settings = { ...settings, setupDone: true };
-    saveSettings(settings);
     openHome();
   });
 
@@ -336,9 +381,21 @@ function registerHandlers(): void {
     window = createWindow();
   });
 
-  ipcMain.handle('share:start', () => sharing.start(settings));
+  // Sharing is remembered rather than asked about again. Somebody who turned this machine on
+  // for another one of theirs meant it to stay on: a switch that quietly returned to off every
+  // time the application restarted would be a machine that is reachable only when somebody
+  // happens to have opened a window on it, which is the opposite of what it is for.
+  ipcMain.handle('share:start', () => {
+    const state = sharing.start(settings);
+    remember(true);
 
-  ipcMain.handle('share:stop', () => sharing.stop());
+    return state;
+  });
+
+  ipcMain.handle('share:stop', () => {
+    sharing.stop();
+    remember(false);
+  });
 
   ipcMain.handle('share:state', () => sharing.snapshot());
 
@@ -359,19 +416,69 @@ function registerHandlers(): void {
     },
   );
 
+  // All four change who this machine belongs to, so all four tell every window rather than
+  // only the one that asked.
   ipcMain.handle(
     'account:signIn',
     (_event, email: string, password: string, code: string, label: string) =>
-      account.signIn(email, password, code, label),
+      announce(account.signIn(email, password, code, label)),
   );
 
-  ipcMain.handle('account:signOut', () => account.signOut());
+  // Signing out undoes what signing in set up, rather than only forgetting the token. What
+  // setup asked for was an account; without one there is nothing for the home window to draw,
+  // and the name this machine goes by came from the account it has just left. Leaving either
+  // behind is what makes a signed-out application look like a signed-in one with the names
+  // rubbed out.
+  ipcMain.handle('account:signOut', async () => {
+    const state = await announce(account.signOut());
+
+    sharing.stop();
+    settings = { ...settings, sharing: false, nickname: '' };
+    saveSettings(settings);
+    openSetup();
+
+    return state;
+  });
+
+  ipcMain.handle('account:rename', (_event, label: string) => announce(account.rename(label)));
 
   ipcMain.handle('account:forgetDevice', (_event, publicKey: string) =>
-    account.forget(publicKey),
+    announce(account.forget(publicKey)),
   );
 
+  /**
+   * Writes down whether this machine is meant to be shared.
+   *
+   * Separate from whether it is shared right now: the session can end for reasons nobody
+   * chose — a network that went away, a machine that slept — and coming back should put it
+   * back the way it was left rather than the way it happened to fail.
+   *
+   * @param {boolean} on - Whether sharing was turned on.
+   * @returns {void}
+   */
+  const remember = (on: boolean): void => {
+    if (settings.sharing === on) {
+      return;
+    }
+
+    settings = { ...settings, sharing: on };
+    saveSettings(settings);
+  };
+
   ipcMain.handle('settings:get', () => settings);
+
+  // Asked by the settings window, which shows the regions and how far each one is. Off the
+  // main thread's critical path by being a request rather than a subscription: the list is
+  // read when somebody opens the window, not kept warm.
+  ipcMain.handle('rendezvous:servers', async () => {
+    try {
+      return prism.rendezvousServers(settings.rendezvous || PRISM_RENDEZVOUS);
+    } catch {
+      // A name that resolves to nothing is an empty list rather than an error. The window
+      // says so in a sentence, which is more use than a dialog.
+      return [];
+    }
+  });
 
   ipcMain.handle('settings:set', (_event, next: Partial<Settings>) => {
     settings = { ...settings, ...next };
@@ -501,7 +608,7 @@ void app.whenReady().then(() => {
   registerHandlers();
   account.start();
 
-  if (settings.shareOnLaunch) {
+  if (settings.sharing) {
     try {
       sharing.start(settings);
     } catch {
@@ -517,11 +624,12 @@ void app.whenReady().then(() => {
   // window this machine's own state would not otherwise show.
   const forced = process.env['PRISM_WINDOW_PAGE'];
 
-  // Being signed in is itself an answer to every question setup asks, so somebody who is does
-  // not get asked again — whatever the settings file says. The two can disagree: a settings
-  // file that was lost or copied from another machine would otherwise send somebody who has
-  // been using this for weeks back to the first screen.
-  const settled = settings.setupDone || Holder.signedInBefore();
+  // Being signed in is the answer to what setup asks, so it is the whole of the question here.
+  // A separate flag recording that setup had been finished could disagree with it — and did:
+  // signing out left the flag behind, so the application kept opening on a home window built
+  // out of an account it was no longer on. The other thing setup asks about is permissions,
+  // and those are the system's answer to give, read afresh every time rather than remembered.
+  const settled = Holder.signedInBefore();
 
   if (forced === 'setup.html' || (!settled && forced !== 'home.html')) {
     setup = createStage('setup.html');
