@@ -751,7 +751,7 @@ async function drawRegions(column) {
         ]),
         el('dl', {}, [
           el('dt', { text: '주소' }),
-          el('dd', { text: region.url.replace(/^https?:\/\//u, '') }),
+          el('dd', { text: region.url }),
           el('dt', { text: '마지막 보고' }),
           el('dd', {
             class: region.up ? '' : 'is-bad',
@@ -842,7 +842,7 @@ function drawRegionChip(region) {
   return el('div.chip', {}, [
     el('i', { class: `dot ${region.up ? 'good' : 'bad'}` }),
     el('span.row-text.ink-2', { text: region.name }),
-    el('span.mono.dim', { text: region.url.replace(/^https?:\/\//u, '') }),
+    el('span.mono.dim', { text: region.url }),
     el('span.push'),
     allowed > 0
       ? el('span', { style: 'display:flex;align-items:center;gap:10px' }, [
@@ -1125,7 +1125,7 @@ function askRegion(region) {
     });
     const url = el('input.box.mono', {
       value: region?.url ?? '',
-      placeholder: 'https://160.251.203.14:47300',
+      placeholder: '129.225.129.149:47300',
     });
 
     const metered = el('input', {

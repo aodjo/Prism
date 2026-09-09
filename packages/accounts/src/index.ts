@@ -497,6 +497,16 @@ function compareVersions(left: string, right: string): number {
 const STALE_SECONDS = 240;
 
 /**
+ * What a region's address has to look like.
+ *
+ * `host:port`, because that is what a region *is*: one UDP port that clients send to. It used
+ * to be an `https://` origin, from when the dashboard fetched each region for its numbers —
+ * regions push now, so nothing here ever opens it, and requiring a scheme would be asking an
+ * operator to invent one.
+ */
+const ADDRESS = /^\[?[A-Za-z0-9.\-:]+\]?:\d{1,5}$/u;
+
+/**
  * Compares two strings without letting how long it takes say how much of one is right.
  *
  * The report token is a shared secret, and a comparison that stops at the first wrong character
@@ -1437,7 +1447,7 @@ export default {
             return malformed('name');
           }
 
-          if (!/^https?:\/\/[^\s/]+/u.test(url)) {
+          if (!ADDRESS.test(url)) {
             return malformed('url');
           }
 
@@ -1459,7 +1469,7 @@ export default {
           const sent = await body<{ url?: string; limit_gb?: number | null }>();
           const url = (sent?.url ?? '').trim();
 
-          if (url && !/^https?:\/\/[^\s/]+/u.test(url)) {
+          if (url && !ADDRESS.test(url)) {
             return malformed('url');
           }
 
