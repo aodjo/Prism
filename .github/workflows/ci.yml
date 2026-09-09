@@ -38,7 +38,17 @@ jobs:
       # Clippy also runs on every platform in the matrix below. It runs here as well because
       # this job fails fastest, and because a warning that only appears on Linux is still a
       # warning a reviewer should see before three build jobs have finished.
+      #
+      # The shell's bundle lists the stream client as a resource, and Tauri checks that the file
+      # is there while its build script runs — which is every time this crate is compiled, not
+      # only when an installer is being made. The client is built by `scripts/sidecar.mjs` as
+      # part of packaging, so at this point it does not exist, and linting would stop on a
+      # missing file it is not linting. Told here that the bundle has no resources, which is
+      # true of a build that produces no bundle. `pnpm package` below runs with the real
+      # configuration and is what proves the client actually ships.
       - run: cargo clippy --workspace --all-targets
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
 
   build:
     name: ${{ matrix.name }}
@@ -91,6 +101,10 @@ jobs:
       # compiles.
       - name: Lint on this platform
         run: cargo clippy --workspace --all-targets
+        # See the lint job: the stream client the bundle carries is built during packaging, and
+        # this runs before it.
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
 
       # The VAAPI encoder is behind a feature because building it needs the libva headers,
       # which not every machine that compiles this repository has. This job installed them, so
@@ -109,6 +123,9 @@ jobs:
 
       - name: Rust tests
         run: cargo test --workspace
+        # As above: the shell compiles here too, and the client it bundles is not built yet.
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
 
       - name: TypeScript tests
         run: pnpm test:ts
