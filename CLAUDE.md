@@ -66,7 +66,14 @@ packages/protocol/   와이어 포맷 — Rust와 TS가 공유하는 단일 진�
 packages/host/       Electron 트레이 UI
 packages/client/     Electron UI 셸 (스트림 창은 Rust/SDL3)
 crates/prism-rendezvous/  자체 호스팅 서버: 페어링·시그널링·주소 발견·릴레이 폴백
+crates/prism-tauri/  셸: 창·설정·계정·공유·스트림 제어 (Electron을 대체하는 중)
+packages/accounts/    계정 서버 — Cloudflare Worker + D1
 ```
+
+시그널링과 계정은 이름이 다르고 그래야 한다. `rv.presm.kr`은 리전마다 A 레코드가 하나씩이다 —
+시그널링 서버는 무상태 소개자라 아무 서버나 답해도 되고, 그래서 리전 추가가 레코드 하나로 끝난다.
+`accounts.presm.kr`은 한 곳만 가리킨다. 계정은 상태이고, 라운드로빈이면 한 서버에서 로그인하고
+다음 호출에서 "그런 계정 없음"이 된다.
 
 ## 와이어 포맷
 
