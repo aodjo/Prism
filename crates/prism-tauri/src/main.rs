@@ -20,6 +20,7 @@ mod sessions;
 mod settings;
 mod sharing;
 mod stream;
+mod updates;
 mod windows;
 
 use std::sync::Mutex;
@@ -207,6 +208,7 @@ fn opening() -> (&'static str, &'static str) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             app.manage(Held(Mutex::new(settings::load())));
             app.manage(account::Held::new());
@@ -232,6 +234,11 @@ fn main() {
                     let _ = recording.emit("sessions:changed", history);
                 }),
             ));
+
+            // Once, on its own, after everything a window needs is managed. It reads the
+            // setting, so it has to come after the settings are; it does not block a window,
+            // so it comes before one is staged rather than after.
+            updates::check_in_background(app.handle());
 
             let (label, page) = opening();
             let window = windows::stage(app.handle(), label, page)?;
@@ -293,6 +300,9 @@ fn main() {
             windows::finish_setup,
             windows::open_settings,
             windows::fit,
+            updates::build_info,
+            updates::check_for_update,
+            updates::install_update,
             harness::drive_result
         ])
         .run(tauri::generate_context!())

@@ -19,6 +19,8 @@
 import { toDataURL } from 'qrcode';
 
 import type {
+  Available,
+  Build,
   AccountEnrolmentView,
   AccountState,
   HostPermissions,
@@ -151,6 +153,13 @@ export function installBridge(): void {
       call<Settings>('set_settings', {
         next: { ...(await call<Settings>('get_settings')), ...next },
       }),
+
+    buildInfo: (): Promise<Build> => call<Build>('build_info'),
+
+    checkForUpdate: (): Promise<Available | null> =>
+      call<Available | null>('check_for_update'),
+
+    installUpdate: (): Promise<string | null> => call<string | null>('install_update'),
 
     permissions: (): Promise<HostPermissions> => call<HostPermissions>('permissions'),
 

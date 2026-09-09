@@ -244,6 +244,167 @@ function dashboard(path: string): Response {
   });
 }
 
+/** Where the builds live. Public, so nothing here needs a credential to read it. */
+const RELEASES = 'https://api.github.com/repos/aodjo/Prism/releases';
+
+/**
+ * Answers an installed application asking whether it is current.
+ *
+ * Tauri's updater asks a URL carrying its platform and the version it is running, and reads
+ * back either a manifest naming a newer one or a 204 meaning there is nothing. It checks the
+ * signature in that manifest against a public key compiled into the binary, so this endpoint
+ * cannot make a machine install anything — the worst it can do is point at the wrong file, and
+ * the wrong file will not verify.
+ *
+ * Which line to answer from comes from a header rather than the path, because the path is a
+ * template the bundler fills in at build time: an application that carried the channel in its
+ * URL could only ever ask about the line it was built on, and moving between them is a setting.
+ *
+ * @param {Env} env - The runtime.
+ * @param {string} path - `/v1/update/{target}/{arch}/{version}`.
+ * @param {string} channel - `production` or `development`.
+ * @returns {Promise<Response>} A manifest, or 204 when the running version is current.
+ */
+async function update(env: Env, path: string, channel: string): Promise<Response> {
+  const [target = '', arch = '', running = ''] = path.slice('/v1/update/'.length).split('/');
+
+  if (!target || !arch || !running) {
+    return malformed('update path');
+  }
+
+  const answer = await fetch(`${RELEASES}?per_page=30`, {
+    headers: { 'user-agent': 'prism-accounts', accept: 'application/vnd.github+json' },
+    // Releases change when one is cut and not otherwise, so asking GitHub on every launch of
+    // every machine would be spending somebody's rate limit on an answer that did not move.
+    cf: { cacheTtl: 300, cacheEverything: true },
+  }).catch(() => null);
+
+  if (!answer?.ok) {
+    return new Response(null, { status: 204 });
+  }
+
+  const releases = (await answer.json().catch(() => [])) as {
+    tag_name: string;
+    body: string | null;
+    published_at: string;
+    draft: boolean;
+    prerelease: boolean;
+    assets: { name: string; browser_download_url: string }[];
+  }[];
+
+  // A development build is a prerelease of the version being worked toward, so the two lines
+  // are the same list read with different eyes: production takes releases, development takes
+  // everything and lets the ordering below decide.
+  const wanted = releases.filter(
+    (release) => !release.draft && (channel === 'development' || !release.prerelease),
+  );
+
+  const newest = wanted
+    .map((release) => ({ release, version: release.tag_name.replace(/^v/u, '') }))
+    .sort((left, right) => compareVersions(right.version, left.version))[0];
+
+  if (!newest || compareVersions(newest.version, running) <= 0) {
+    return new Response(null, { status: 204 });
+  }
+
+  const found = assetFor(newest.release.assets, target, arch);
+
+  if (!found) {
+    return new Response(null, { status: 204 });
+  }
+
+  return json({
+    version: newest.version,
+    notes: newest.release.body ?? '',
+    pub_date: newest.release.published_at,
+    url: found.url,
+    signature: found.signature,
+  });
+}
+
+/**
+ * Finds the bundle and its signature for one platform in a release's assets.
+ *
+ * Named by what Tauri builds: an `.app.tar.gz` for macOS and an NSIS `-setup.exe` for Windows,
+ * each beside a `.sig` of the same name. A release missing the pair for a platform answers
+ * nothing for it rather than pointing at something else.
+ *
+ * @param {{name: string, browser_download_url: string}[]} assets - What the release carries.
+ * @param {string} target - `darwin`, `windows` or `linux`.
+ * @param {string} arch - `aarch64`, `x86_64`.
+ * @returns {{url: string, signature: string} | null} The pair, or null.
+ */
+function assetFor(
+  assets: { name: string; browser_download_url: string }[],
+  target: string,
+  arch: string,
+): { url: string; signature: string } | null {
+  const wanted = assets.find(
+    (asset) =>
+      asset.name.includes(target) && asset.name.includes(arch) && !asset.name.endsWith('.sig'),
+  );
+
+  if (!wanted) {
+    return null;
+  }
+
+  const signature = assets.find((asset) => asset.name === `${wanted.name}.sig`);
+
+  return signature
+    ? { url: wanted.browser_download_url, signature: signature.browser_download_url }
+    : null;
+}
+
+/**
+ * Orders two versions the way semver does.
+ *
+ * Written out rather than pulled in, because the whole of what is needed is here: three numbers
+ * and a prerelease tag, where having one makes a version *lower* than the same version without.
+ * That last rule is the one the release line depends on — `1.1.0` supersedes `1.1.0-dev.847` —
+ * and it is the one a naive string comparison gets backwards.
+ *
+ * @param {string} left - A version, without a leading `v`.
+ * @param {string} right - The other.
+ * @returns {number} Positive when `left` is newer, negative when older, zero when the same.
+ */
+function compareVersions(left: string, right: string): number {
+  const split = (version: string) => {
+    const [core = '', pre = ''] = version.split('-');
+
+    return { numbers: core.split('.').map(Number), pre };
+  };
+
+  const a = split(left);
+  const b = split(right);
+
+  for (let at = 0; at < 3; at += 1) {
+    const difference = (a.numbers[at] ?? 0) - (b.numbers[at] ?? 0);
+
+    if (difference !== 0) {
+      return difference;
+    }
+  }
+
+  if (a.pre === b.pre) {
+    return 0;
+  }
+
+  // A release beats every prerelease of itself.
+  if (!a.pre) {
+    return 1;
+  }
+
+  if (!b.pre) {
+    return -1;
+  }
+
+  // Both are prereleases of the same version: `dev.848` against `dev.847`. Compared by their
+  // numeric tail so that ten sorts after nine.
+  const tail = (pre: string) => Number(pre.split('.').pop() ?? 0);
+
+  return tail(a.pre) - tail(b.pre);
+}
+
 /** How long a region gets to answer before it is reported as not answering. */
 const PROBE_MS = 3000;
 
@@ -1182,6 +1343,17 @@ export default {
 
           return json({ signedOut: gone.meta.changes ?? 0 });
         }
+      }
+
+      // What an installed application asks when it wonders whether it is current.
+      //
+      // Open, deliberately. There is nothing private in a version number, every answer is a
+      // pointer at a public release, and what makes an update safe to install is the signature
+      // on it rather than who was allowed to ask about it. Requiring an account here would
+      // mean an application that cannot update until somebody signs in, which is exactly the
+      // machine most in need of one.
+      if (path.startsWith('/v1/update/') && method === 'GET') {
+        return update(env, path, request.headers.get('x-prism-channel') ?? 'production');
       }
 
       // The dashboard itself, which is the same API with somewhere to click.

@@ -57,6 +57,18 @@ pub struct Settings {
     pub addresses: BTreeMap<String, String>,
     /// The machines somebody wants at the front of the list, by public key.
     pub pinned: Vec<String>,
+    /// Whether to look for a new version and install it without being asked.
+    ///
+    /// On, because a remote desktop that is out of date on one of the two machines is a session
+    /// that fails for a reason neither end can see, and because the person who would otherwise
+    /// have to notice is the same person who would have to fix it.
+    pub auto_update: bool,
+    /// Which builds this machine is offered: `production` or `development`.
+    ///
+    /// Empty means the line this build came from, which is what an installation follows until
+    /// somebody moves it. Setting it is how a machine joins or leaves the development line
+    /// without being reinstalled.
+    pub update_channel: String,
     /// Whether somebody has been all the way through setup on this machine.
     ///
     /// Needed because the permissions step cannot be finished in one sitting: macOS only reads a
@@ -95,6 +107,8 @@ impl Default for Settings {
             smooth: false,
             addresses: BTreeMap::new(),
             pinned: Vec::new(),
+            auto_update: true,
+            update_channel: String::new(),
             setup_finished: false,
         }
     }

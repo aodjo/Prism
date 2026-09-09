@@ -157,6 +157,42 @@ export interface Settings {
    * somebody works from and the machine they reach for are different answers per desk.
    */
   pinned: readonly string[];
+  /**
+   * Whether to look for a new version and install it without being asked.
+   *
+   * On by default. A remote desktop that is out of date on one of the two machines is a session
+   * that fails for a reason neither end can see.
+   */
+  autoUpdate: boolean;
+  /**
+   * Which builds this machine is offered: `production` or `development`.
+   *
+   * Empty means the line this build came from, which is what an installation follows until
+   * somebody moves it.
+   */
+  updateChannel: string;
+  /** Whether somebody has been all the way through setup on this machine. */
+  setupFinished: boolean;
+}
+
+/** What this build is, in the two numbers that answer different questions. */
+export interface Build {
+  /** The version, as the updater compares it. */
+  version: string;
+  /** Which copy of that version this is. */
+  build: string;
+  /** The line this build came from. */
+  channel: string;
+  /** The line this machine is being offered. */
+  following: string;
+}
+
+/** A version that is available and is not the one running. */
+export interface Available {
+  /** What it calls itself. */
+  version: string;
+  /** What the release said about it, if anything. */
+  notes: string;
 }
 
 /**
@@ -452,6 +488,36 @@ export interface PrismApi {
    * @returns {Promise<Settings>} The settings as they now stand.
    */
   setSettings(next: Partial<Settings>): Promise<Settings>;
+
+  /**
+   * Returns what this build is: its version, which copy of it, and which line it follows.
+   *
+   * @async
+   * @returns {Promise<Build>} The version and the build number, kept apart.
+   */
+  buildInfo(): Promise<Build>;
+
+  /**
+   * Asks whether there is a newer version, without installing it.
+   *
+   * @async
+   * @returns {Promise<Available | null>} What is available, or null when this build is current.
+   * @throws {Error} If the check could not be made at all.
+   */
+  checkForUpdate(): Promise<Available | null>;
+
+  /**
+   * Downloads and installs the newer version, if there is one.
+   *
+   * The signature on it is checked against the key compiled into this application before any of
+   * it runs. What comes back is what was installed; the application has to restart for it to
+   * take effect.
+   *
+   * @async
+   * @returns {Promise<string | null>} The version installed, or null when there was none.
+   * @throws {Error} If the download or the install failed, including a bad signature.
+   */
+  installUpdate(): Promise<string | null>;
 
   /**
    * Opens a stream window onto a paired host.

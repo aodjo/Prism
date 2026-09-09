@@ -3,6 +3,10 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # A release is a tag on main. It runs the same jobs as a branch push and differs only in
+    # what the build calls itself, which is what makes a release the same build as the one
+    # before it with a different name rather than a separate path nobody exercises.
+    tags: ['v*']
   pull_request:
     branches: [main, develop]
 
@@ -152,21 +156,106 @@ jobs:
       - name: TypeScript types
         run: pnpm typecheck
 
+      # What this build calls itself. A push to a branch is a development build and numbers
+      # itself as a prerelease of the version being worked toward; a tag is that version. See
+      # `scripts/version.mjs` for why they cannot simply be the same number with a suffix.
+      - name: Name this build
+        id: name
+        shell: bash
+        run: |
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            PRISM_CHANNEL=production PRISM_BUILD=${{ github.run_number }} \
+              node scripts/version.mjs >> "$GITHUB_OUTPUT"
+          else
+            PRISM_CHANNEL=development PRISM_BUILD=${{ github.run_number }} \
+              node scripts/version.mjs >> "$GITHUB_OUTPUT"
+          fi
+
       # The shell is a Rust binary with the interface baked into it, so building the application
       # is building the crate. There is no addon to produce first and no Node in the result: the
       # window is a webview the system already has, and everything behind it is this repository's
       # own code.
       #
-      # Unsigned, so macOS and Windows will both say so on first launch. Signing is its own piece
-      # of work and a build nobody can download is worth less than a warning.
+      # Not signed by a developer certificate, so macOS and Windows both say so on first launch.
+      # It *is* signed for the updater: that key says an update came from this repository and is
+      # checked by the application before a byte of it runs, which is a different question from
+      # whether the operating system has heard of the publisher.
       - name: Package the application
         run: pnpm package
+        env:
+          PRISM_CHANNEL: ${{ steps.name.outputs.channel }}
+          PRISM_BUILD: ${{ steps.name.outputs.build }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - uses: actions/upload-artifact@v7
         with:
           name: prism-${{ matrix.name }}
           path: target/release/bundle/**
           if-no-files-found: error
+
+  # One release per run, carrying every platform's bundle and the signature beside it. The
+  # updater reads this list and nothing else, so a platform whose job failed is simply a
+  # platform this release does not offer — not a release that half exists.
+  #
+  # Only from this repository's own pushes. A fork's pull request runs with no secrets and
+  # would produce unsigned bundles nobody could install.
+  release:
+    name: release
+    needs: build
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Name this build
+        id: name
+        run: |
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            PRISM_CHANNEL=production PRISM_BUILD=${{ github.run_number }} \
+              node scripts/version.mjs >> "$GITHUB_OUTPUT"
+          else
+            PRISM_CHANNEL=development PRISM_BUILD=${{ github.run_number }} \
+              node scripts/version.mjs >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: bundles
+
+      # Flattened and renamed so that one look at a release says which file is for which
+      # machine. The updater matches on these names.
+      - name: Collect what each platform built
+        run: |
+          mkdir -p release
+          for dir in bundles/prism-*; do
+            platform="${dir#bundles/prism-}"
+            find "$dir" \( -name '*.tar.gz' -o -name '*.tar.gz.sig' -o -name '*-setup.exe' \
+              -o -name '*-setup.exe.sig' -o -name '*.dmg' -o -name '*.AppImage' \
+              -o -name '*.AppImage.sig' -o -name '*.deb' \) -type f | while read -r file; do
+              base="$(basename "$file")"
+              cp "$file" "release/${platform}-${base}"
+            done
+          done
+          ls -la release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.name.outputs.version) }}
+          name: ${{ steps.name.outputs.version }}
+          # A development build is a prerelease in GitHub's sense as well as in semver's, which
+          # is what keeps it out of the production line's answers.
+          prerelease: ${{ steps.name.outputs.channel == 'development' }}
+          files: release/*
+          fail_on_unmatched_files: true
 
   rendezvous:
     name: rendezvous image
