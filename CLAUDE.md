@@ -59,16 +59,19 @@ export const MAX_PACKET_SIZE = 1200;
 
 ```
 crates/prism-core/   데이터 평면 전체 (캡처·인코드·네트워크·디코드·표시·입력)
-crates/prism-napi/   napi-rs 표면 → .node (제어 + 통계 전용)
+crates/prism-tauri/  셸: 창·설정·계정·공유·스트림 제어 — 이것이 애플리케이션이다
 crates/prism-cli/    헤드리스 host/client (M1~M4 검증 및 CI 회귀)
+crates/prism-rendezvous/  자체 호스팅 서버: 시그널링·주소 발견·릴레이 폴백
 crates/amf-shim/     AMD AMF C 심
+packages/client/     UI — React/TSX. 셸이 웹뷰에 띄운다 (스트림 창은 별도 프로세스)
 packages/protocol/   와이어 포맷 — Rust와 TS가 공유하는 단일 진실 소스
-packages/host/       Electron 트레이 UI
-packages/client/     Electron UI 셸 (스트림 창은 Rust/SDL3)
-crates/prism-rendezvous/  자체 호스팅 서버: 페어링·시그널링·주소 발견·릴레이 폴백
-crates/prism-tauri/  셸: 창·설정·계정·공유·스트림 제어 (Electron을 대체하는 중)
-packages/accounts/    계정 서버 — Cloudflare Worker + D1
+packages/design/     디자인 시스템 (토큰·컴포넌트 클래스)
+packages/accounts/   계정 서버 — Cloudflare Worker + D1
 ```
+
+**Electron은 없다.** 셸은 Rust이고 시스템 웹뷰를 쓴다. 그래서 napi 경계도 없다 — 명령이
+`prism-core`를 직접 부른다. `packages/client`는 마크업과 스타일뿐이며, 기계와 이야기하는
+유일한 통로는 `src/bridge.ts`가 설치하는 `window.prism`이다.
 
 시그널링과 계정은 이름이 다르고 그래야 한다. `rv.presm.kr`은 리전마다 A 레코드가 하나씩이다 —
 시그널링 서버는 무상태 소개자라 아무 서버나 답해도 되고, 그래서 리전 추가가 레코드 하나로 끝난다.
@@ -97,9 +100,15 @@ pnpm lint:cross   # linux, windows 타깃 clippy (링커 없이 clippy만 수행
 네이티브로 수행한다.
 
 `prism-tauri`도 제외한다. 이 셸의 리눅스 백엔드는 WebKitGTK를 pkg-config로 찾는데, 리눅스
-sysroot이 없는 맥에서는 그 조회 자체가 실패한다. 셸 코드에도 `cfg(target_os)`는 스크린샷 경로
-하나뿐이라 이 검사가 얻을 것이 거의 없다. **따라서 셸의 플랫폼별 코드는 로컬에서 검사되지 않으며,
-CI의 각 OS 네이티브 잡이 유일한 검사다.**
+sysroot이 없는 맥에서는 그 조회 자체가 실패한다. **따라서 셸의 플랫폼별 코드는 로컬에서
+검사되지 않으며, CI의 각 OS 네이티브 잡이 유일한 검사다.**
+
+이 예외에 실제로 데인 적이 있다. `title_bar_style`과 `hidden_title`은 macOS 전용인데 `cfg` 없이
+썼고, 세 플랫폼이 CI에서 깨진 뒤에야 드러났다. 창을 만지는 코드를 쓸 때는 그 메서드가 플랫폼
+한정인지 Tauri 소스에서 먼저 확인하는 편이 9분짜리 왕복보다 싸다.
+
+반면 `prism-core`는 제외되지 않는다 — `ring`을 끌어오지 않아 두 타깃 모두 로컬에서 검사된다.
+그 크레이트를 건드렸다면 밀기 전에 `pnpm lint:cross`가 실제로 잡아준다.
 
 윈도우 타깃에서는 `prism-cli`도 제외한다. 클라이언트 창·오디오가 SDL을 소스에서 빌드하는데,
 MSVC용 C 툴체인이 없는 맥에서는 cmake 단계에서 실패한다. **따라서 윈도우 클라이언트 코드
