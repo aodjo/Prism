@@ -274,7 +274,16 @@ export default {
           .prepare('SELECT COUNT(*) AS n FROM accounts')
           .first<{ n: number }>();
 
-        return json({ ok: true, accounts: count?.n ?? 0 });
+        // Whether an address means anything here is said out loud. Without a mail key nobody is
+        // asked to prove one, so an address is only ever a name — fine for a server one person
+        // runs for their own machines, and wrong for one strangers can reach. The Rust server
+        // this replaced printed that at startup; a Worker has no startup to print at, so the
+        // only place it can be seen is somewhere somebody can ask.
+        return json({
+          ok: true,
+          accounts: count?.n ?? 0,
+          verifiesAddresses: Boolean(env.PRISM_RESEND_KEY && env.PRISM_MAIL_FROM),
+        });
       }
 
       // Answered for every address, registered or not, because an answer only registered

@@ -38,3 +38,4 @@ packages/client/renderer/prism.css
 
 # Written by tauri-build from tauri.conf.json and the capabilities beside it.
 crates/prism-tauri/gen/
+crates/prism-tauri/sidecar/

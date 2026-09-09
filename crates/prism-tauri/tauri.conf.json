@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.prism.client",
   "build": {
-    "frontendDist": "../../packages/client/renderer"
+    "frontendDist": "../../packages/client/renderer",
+    "beforeBuildCommand": "node scripts/sidecar.mjs"
   },
   "app": {
     "windows": [],
@@ -16,6 +17,7 @@
     "active": true,
     "targets": ["app", "dmg", "nsis", "deb", "appimage"],
     "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "resources": ["sidecar/*"],
     "copyright": "Prism",
     "category": "Utility",
     "shortDescription": "Low-latency remote desktop",

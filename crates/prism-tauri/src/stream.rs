@@ -543,8 +543,13 @@ fn find_client() -> Result<PathBuf, String> {
     {
         looked.push(beside.join(&name));
         // A macOS bundle runs from `Contents/MacOS` and keeps what it ships in
-        // `Contents/Resources`.
-        looked.push(beside.join("..").join("Resources").join(&name));
+        // `Contents/Resources`, under the directory the bundle configuration names.
+        let resources = beside.join("..").join("Resources");
+        looked.push(resources.join("sidecar").join(&name));
+        looked.push(resources.join(&name));
+        // Everywhere else the same files sit beside the executable rather than above it.
+        looked.push(beside.join("resources").join("sidecar").join(&name));
+        looked.push(beside.join("resources").join(&name));
         // A development run has the shell in one of the two profile directories and the client
         // in either, since the two are built by separate commands and nothing makes them agree.
         looked.push(beside.join("..").join("release").join(&name));
