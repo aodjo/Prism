@@ -45,6 +45,14 @@ export interface Env {
   readonly PRISM_RESEND_KEY?: string;
   /** The address confirmations come from. */
   readonly PRISM_MAIL_FROM?: string;
+  /**
+   * What a signalling region proves itself with when it reports.
+   *
+   * Without it no report is accepted at all. An open ingest would let anybody write whatever
+   * numbers they liked into an operator's dashboard — and a dashboard that can be lied to is
+   * worse than one that says nothing, because somebody acts on it.
+   */
+  readonly PRISM_REPORT_TOKEN?: string;
 }
 
 /** What this server says it is when asked. Bumped when the API it serves changes. */
@@ -479,8 +487,31 @@ function compareVersions(left: string, right: string): number {
   return tail(a.pre) - tail(b.pre);
 }
 
-/** How long a region gets to answer before it is reported as not answering. */
-const PROBE_MS = 3000;
+/**
+ * How long a region's last report stays believable.
+ *
+ * A region reports every minute, so this is four missed ones. Long enough that a restart or a
+ * lost packet does not paint a healthy region red, short enough that a machine which has gone
+ * away stops being presented as though its numbers still meant something.
+ */
+const STALE_SECONDS = 240;
+
+/**
+ * Compares two strings without letting how long it takes say how much of one is right.
+ *
+ * The report token is a shared secret, and a comparison that stops at the first wrong character
+ * tells anybody who can time it where that character was. Both are read to the end, and the
+ * length is checked by the caller before this is reached.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  let difference = a.length ^ b.length;
+
+  for (let at = 0; at < a.length; at += 1) {
+    difference |= a.charCodeAt(at) ^ b.charCodeAt(at % b.length);
+  }
+
+  return difference === 0;
+}
 
 /** What one signalling server was found to be doing. */
 interface Region {
@@ -490,16 +521,23 @@ interface Region {
   url: string;
   /** Gigabytes its plan allows each month, or `null` when the plan does not meter traffic. */
   limit_gb: number | null;
-  /** Whether it answered at all. */
-  up: boolean;
-  /** How long it took, or `null` when it did not answer. */
-  latency_ms: number | null;
   /**
-   * Whether that server told us what it is doing, rather than only that it is alive.
+   * Whether it has reported recently enough to be believed.
    *
-   * False against a rendezvous that only implements `/v1/health`. The dashboard shows a dash
-   * rather than a zero for everything below, because "nothing is happening" and "nobody asked
-   * the machine that knows" are different answers.
+   * A region sends every minute, so silence for several minutes is a region that is down, gone,
+   * or unable to reach here — which are different problems with the same symptom and the same
+   * answer for an operator: stop trusting these numbers.
+   */
+  up: boolean;
+  /** How many seconds ago it last reported, or `null` if it never has. */
+  heard_seconds: number | null;
+  /**
+   * Whether that server has ever told us what it is doing.
+   *
+   * False against a region running a build from before reporting existed, or one that has never
+   * been given a token. The dashboard shows a dash rather than a zero for everything below,
+   * because "nothing is happening" and "nobody has heard from the machine that knows" are
+   * different answers.
    */
   reports: boolean;
   /** Hosts registered and reachable there. */
@@ -508,85 +546,148 @@ interface Region {
   carrying: number;
   /** What those sessions are costing its link right now. */
   now_mbps: number;
-  /** The most they have cost it this month. */
+  /** The most they have cost it since it started. */
   peak_mbps: number;
   /** What its link will carry. */
   link_mbps: number;
-  /** Bytes it has relayed this month. */
+  /** Bytes it has relayed since it started. */
   carried_bytes: number;
   /** What it says it is running. */
   build: string;
-  /** How long since it last restarted. */
+  /**
+   * How long since it last restarted.
+   *
+   * Every total above covers exactly this window. A region holds no state, so there is nowhere
+   * for a monthly figure to live and nothing here pretends there is.
+   */
   uptime_seconds: number;
 }
 
 /**
- * Asks every configured signalling server whether it is up, all at once.
+ * Reads what every configured signalling region last said about itself.
  *
- * Measured from a Worker, so the number is what a machine somewhere in Cloudflare's network
- * sees and not what any particular person's connection sees. It answers "is that region alive",
- * which is the question an operator has, and not "how fast is my session", which the client's
- * own statistics answer far better.
+ * One query. Regions push their own numbers here on a timer, so opening this page costs a
+ * database read rather than five round trips to machines scattered around the world — and a
+ * region that is down slows nothing, because nothing waits on it.
  *
- * A region that does not answer is reported as down rather than failing the whole call: one
- * unreachable server must not be able to hide the state of the others.
+ * A region listed with no report is a region that has never been heard from. That is a real
+ * state and it is shown as one: it means the machine is running a build from before reporting
+ * existed, or was never given a token, not that it is idle.
  */
 async function regions(env: Env): Promise<Region[]> {
   const { results } = await env.prism_accounts
-    .prepare('SELECT name, url, limit_gb FROM regions ORDER BY name')
-    .all<{ name: string; url: string; limit_gb: number | null }>();
+    .prepare(
+      'SELECT r.name, r.url, r.limit_gb, s.at_unix, s.build, s.uptime_seconds, s.hosts,' +
+        ' s.carrying, s.now_mbps, s.peak_mbps, s.link_mbps, s.carried_bytes' +
+        ' FROM regions r LEFT JOIN region_reports s ON s.region = r.name' +
+        ' ORDER BY r.name',
+    )
+    .all<{
+      name: string;
+      url: string;
+      limit_gb: number | null;
+      at_unix: number | null;
+      build: string | null;
+      uptime_seconds: number | null;
+      hosts: number | null;
+      carrying: number | null;
+      now_mbps: number | null;
+      peak_mbps: number | null;
+      link_mbps: number | null;
+      carried_bytes: number | null;
+    }>();
 
-  return Promise.all(
-    (results ?? []).map(async (row) => {
-      const started = Date.now();
-      const blank: Region = {
-        ...row,
-        up: false,
-        latency_ms: null,
-        reports: false,
-        hosts: 0,
-        carrying: 0,
-        now_mbps: 0,
-        peak_mbps: 0,
-        link_mbps: 0,
-        carried_bytes: 0,
-        build: '',
-        uptime_seconds: 0,
-      };
+  const now = nowUnix();
 
-      try {
-        const answer = await fetch(`${row.url.replace(/\/$/, '')}/v1/health`, {
-          signal: AbortSignal.timeout(PROBE_MS),
-        });
+  return (results ?? []).map((row) => {
+    const heard = row.at_unix === null ? null : Math.max(0, now - row.at_unix);
 
-        if (!answer.ok) {
-          return blank;
-        }
+    return {
+      name: row.name,
+      url: row.url,
+      limit_gb: row.limit_gb,
+      up: heard !== null && heard <= STALE_SECONDS,
+      heard_seconds: heard,
+      reports: row.at_unix !== null,
+      hosts: row.hosts ?? 0,
+      carrying: row.carrying ?? 0,
+      now_mbps: row.now_mbps ?? 0,
+      peak_mbps: row.peak_mbps ?? 0,
+      link_mbps: row.link_mbps ?? 0,
+      carried_bytes: row.carried_bytes ?? 0,
+      build: row.build ?? '',
+      uptime_seconds: row.uptime_seconds ?? 0,
+    };
+  });
+}
 
-        // A rendezvous that only knows how to say it is alive answers `{ ok, accounts }`. One
-        // that has been taught to report activity adds the rest, and says so by carrying a
-        // link speed — the one field nothing older ever sent.
-        const said = (await answer.json().catch(() => ({}))) as Record<string, number | string>;
+/**
+ * Takes one region's report.
+ *
+ * Replaces whatever that region said last. Nothing here is history: a report is the current
+ * state of a machine that keeps none of its own, and the moment a newer one arrives the older
+ * is of no use to anybody.
+ *
+ * The timestamp is this server's, not the region's. A region with a wrong clock would otherwise
+ * be able to make itself look permanently fresh, or permanently stale.
+ *
+ * @async
+ * @param {Env} env - The runtime.
+ * @param {Request} request - The report, as JSON, with a bearer token.
+ * @returns {Promise<Response>} 204 when it was taken.
+ */
+async function takeReport(env: Env, request: Request): Promise<Response> {
+  const expected = (env.PRISM_REPORT_TOKEN ?? '').trim();
 
-        return {
-          ...blank,
-          up: true,
-          latency_ms: Date.now() - started,
-          reports: typeof said.link_mbps === 'number',
-          hosts: Number(said.hosts ?? 0),
-          carrying: Number(said.carrying ?? 0),
-          now_mbps: Number(said.now_mbps ?? 0),
-          peak_mbps: Number(said.peak_mbps ?? 0),
-          link_mbps: Number(said.link_mbps ?? 0),
-          carried_bytes: Number(said.carried_bytes ?? 0),
-          build: String(said.build ?? ''),
-          uptime_seconds: Number(said.uptime_seconds ?? 0),
-        };
-      } catch {
-        return blank;
-      }
-    }),
-  );
+  // No token configured means no reports accepted. Refusing is the safe direction: an open
+  // ingest lets anybody write numbers an operator will act on.
+  if (expected.length === 0) {
+    return new Response(null, { status: 404 });
+  }
+
+  const offered = (request.headers.get('authorization') ?? '').replace(/^Bearer /iu, '');
+
+  if (offered.length !== expected.length || !timingSafeEqual(offered, expected)) {
+    return new Response(null, { status: 401 });
+  }
+
+  const said = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const region = String(said?.region ?? '').trim();
+
+  if (!said || region.length === 0) {
+    return malformed('region');
+  }
+
+  await env.prism_accounts
+    .prepare(
+      'INSERT INTO region_reports (region, at_unix, build, uptime_seconds, hosts, carrying,' +
+        ' waiting, now_mbps, peak_mbps, link_mbps, carried_bytes, sessions, introduced)' +
+        ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)' +
+        ' ON CONFLICT(region) DO UPDATE SET at_unix = excluded.at_unix, build = excluded.build,' +
+        ' uptime_seconds = excluded.uptime_seconds, hosts = excluded.hosts,' +
+        ' carrying = excluded.carrying, waiting = excluded.waiting,' +
+        ' now_mbps = excluded.now_mbps, peak_mbps = excluded.peak_mbps,' +
+        ' link_mbps = excluded.link_mbps, carried_bytes = excluded.carried_bytes,' +
+        ' sessions = excluded.sessions, introduced = excluded.introduced',
+    )
+    .bind(
+      region,
+      nowUnix(),
+      String(said.build ?? ''),
+      Number(said.uptime_seconds ?? 0),
+      Number(said.hosts ?? 0),
+      Number(said.carrying ?? 0),
+      Number(said.waiting ?? 0),
+      Number(said.now_mbps ?? 0),
+      Number(said.peak_mbps ?? 0),
+      Number(said.link_mbps ?? 0),
+      Number(said.carried_bytes ?? 0),
+      JSON.stringify(said.sessions ?? []),
+      JSON.stringify(said.introduced ?? []),
+    )
+    .run();
+
+  return new Response(null, { status: 204 });
 }
 
 /**
@@ -606,7 +707,11 @@ async function regions(env: Env): Promise<Region[]> {
  * @returns {Promise<object>} `reports` is false when no region can answer this yet.
  */
 async function activityFor(env: Env, email: string | null): Promise<Record<string, unknown>> {
-  const found = (await regions(env)).filter((region) => region.reports);
+  const reported = await env.prism_accounts
+    .prepare('SELECT region, sessions, introduced FROM region_reports')
+    .all<{ region: string; sessions: string; introduced: string }>();
+
+  const found = reported.results ?? [];
 
   if (found.length === 0) {
     return { reports: false, carrying: [], introduced: [] };
@@ -629,60 +734,68 @@ async function activityFor(env: Env, email: string | null): Promise<Record<strin
   const carrying: Record<string, unknown>[] = [];
   const introduced: Record<string, unknown>[] = [];
 
-  await Promise.all(
-    found.map(async (region) => {
-      const answer = await fetch(`${region.url.replace(/\/$/, '')}/v1/activity`, {
-        signal: AbortSignal.timeout(PROBE_MS),
-      }).catch(() => null);
+  for (const row of found) {
+    for (const entry of parseList(row.sessions)) {
+      const host = machine(String(entry.host));
+      const client = machine(String(entry.client));
 
-      if (!answer?.ok) {
-        return;
+      if (email && host.email !== email && client.email !== email) {
+        continue;
       }
 
-      const said = (await answer.json().catch(() => ({}))) as Record<string, unknown[]>;
+      carrying.push({
+        email: host.email || client.email,
+        from: host.label,
+        to: client.label,
+        region: row.region,
+        since_unix: entry.since_unix,
+        bytes: entry.bytes,
+        token: entry.token,
+      });
+    }
 
-      for (const entry of (said.carrying ?? []) as Record<string, string | number>[]) {
-        const host = machine(String(entry.host));
-        const client = machine(String(entry.client));
+    for (const entry of parseList(row.introduced)) {
+      const host = machine(String(entry.host));
+      const client = machine(String(entry.client));
 
-        if (email && host.email !== email && client.email !== email) {
-          continue;
-        }
-
-        carrying.push({
-          email: host.email || client.email,
-          from: host.label,
-          to: client.label,
-          region: region.name,
-          since_unix: entry.since_unix,
-          bytes: entry.bytes,
-          token: entry.token,
-        });
+      if (email && host.email !== email && client.email !== email) {
+        continue;
       }
 
-      for (const entry of (said.introduced ?? []) as Record<string, string | number>[]) {
-        const host = machine(String(entry.host));
-        const client = machine(String(entry.client));
-
-        if (email && host.email !== email && client.email !== email) {
-          continue;
-        }
-
-        introduced.push({
-          email: host.email || client.email,
-          from: host.label,
-          to: client.label,
-          region: region.name,
-          at_unix: entry.at_unix,
-          relayed: Boolean(entry.relayed),
-        });
-      }
-    }),
-  );
+      introduced.push({
+        email: host.email || client.email,
+        from: host.label,
+        to: client.label,
+        region: row.region,
+        at_unix: entry.at_unix,
+        relayed: Boolean(entry.relayed),
+      });
+    }
+  }
 
   introduced.sort((left, right) => Number(right.at_unix) - Number(left.at_unix));
 
   return { reports: true, carrying, introduced: introduced.slice(0, 50) };
+}
+
+/**
+ * Reads one of a report's JSON columns back into a list.
+ *
+ * These columns are written by this server from what a region sent, so a body that will not
+ * parse means the row was written by something else. An empty list rather than a throw: one
+ * region's bad row must not empty the page for every other region.
+ *
+ * @param {string} stored - The column's contents.
+ * @returns {Record<string, string|number>[]} What it held, or nothing.
+ */
+function parseList(stored: string): Record<string, string | number>[] {
+  try {
+    const read = JSON.parse(stored) as unknown;
+
+    return Array.isArray(read) ? (read as Record<string, string | number>[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -1428,6 +1541,12 @@ export default {
       // machine most in need of one.
       if (path.startsWith('/v1/update/') && method === 'GET') {
         return update(env, path, request.headers.get('x-prism-channel') ?? 'production');
+      }
+
+      // A signalling region saying what it is doing. It sends; nothing asks it — which is what
+      // keeps a region to one open UDP port and no certificate of its own.
+      if (path === '/v1/regions/report' && method === 'POST') {
+        return takeReport(env, request);
       }
 
       // The dashboard itself, which is the same API with somewhere to click.

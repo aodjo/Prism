@@ -343,3 +343,95 @@ fn a_pair_can_relay_again_after_its_session_ended() {
 
     assert_ne!(first, second, "a swept-away token was handed out again");
 }
+
+#[test]
+fn what_a_relay_carries_is_counted_in_both_directions() {
+    let mut relays = Relays::new();
+    let now = opened(&mut relays);
+
+    assert_eq!(relays.carried(), 0, "an idle relay carried something");
+
+    relays.accept(host(), &[0u8; 1200], now);
+    relays.accept(client(), &[0u8; 300], now);
+    relays.accept(host(), &[0u8; 500], now);
+
+    assert_eq!(relays.carried(), 2000);
+}
+
+#[test]
+fn a_stranger_is_not_counted_against_the_bill() {
+    // The one thing this counter must never do. A relay's traffic is what an operator pays
+    // for, and a figure anybody on the internet can inflate by sending to the port is not a
+    // figure anybody can act on.
+    let mut relays = Relays::new();
+    let now = opened(&mut relays);
+
+    assert_eq!(
+        relays.accept(stranger(), &[0u8; 1500], now),
+        Forward::Ignored
+    );
+    assert_eq!(relays.carried(), 0);
+}
+
+#[test]
+fn presenting_a_token_is_not_traffic() {
+    let mut relays = Relays::new();
+    let now = opened(&mut relays);
+
+    relays.accept(host(), &TOKEN, now);
+
+    assert_eq!(relays.carried(), 0, "a token presentation was billed");
+}
+
+#[test]
+fn what_a_finished_relay_carried_is_not_forgotten() {
+    // Otherwise the total falls every time a session ends, and understates the month by
+    // however much the busiest sessions carried.
+    let mut relays = Relays::new();
+    let now = opened(&mut relays);
+
+    relays.accept(host(), &[0u8; 800], now);
+    assert_eq!(relays.carried(), 800);
+
+    relays.expire(now + IDLE_TTL + Duration::from_secs(1));
+
+    assert_eq!(relays.open(), 0, "the session survived its idle timeout");
+    assert_eq!(relays.carried(), 800);
+}
+
+#[test]
+fn a_carried_relay_is_reported_by_the_keys_it_was_allocated_for() {
+    let mut relays = Relays::new();
+    let now = Instant::now();
+    let host_key = [0xa1; 32];
+    let client_key = [0xb2; 32];
+
+    relays
+        .token_for(host_key, client_key, TOKEN, now)
+        .expect("a token");
+    relays.accept(host(), &TOKEN, now);
+    relays.accept(client(), &TOKEN, now);
+    relays.accept(host(), &[0u8; 400], now);
+
+    let carrying = relays.carrying();
+
+    assert_eq!(carrying.len(), 1);
+    assert_eq!(carrying[0].host, host_key);
+    assert_eq!(carrying[0].client, client_key);
+    assert_eq!(carrying[0].token, TOKEN);
+    assert_eq!(carrying[0].bytes, 400);
+}
+
+#[test]
+fn a_relay_waiting_for_its_other_side_is_not_reported_as_carrying() {
+    let mut relays = Relays::new();
+    let now = Instant::now();
+
+    relays
+        .token_for([0xa1; 32], [0xb2; 32], TOKEN, now)
+        .expect("a token");
+    relays.accept(host(), &TOKEN, now);
+
+    assert_eq!(relays.waiting(), 1);
+    assert!(relays.carrying().is_empty());
+}

@@ -68,7 +68,18 @@ enum Session {
     /// One side has presented its token and the other has not.
     Waiting { first: Side },
     /// Both sides are known and traffic is flowing.
-    Open { a: Side, b: Side },
+    Open {
+        a: Side,
+        b: Side,
+        /// When the second side arrived, against the wall clock.
+        ///
+        /// Wall clock rather than [`Instant`] because this leaves the machine: an operator
+        /// reading how long a session has been carried needs it against a clock they share,
+        /// and a monotonic count of nanoseconds since an arbitrary boot is not one.
+        opened_unix: u64,
+        /// Bytes forwarded for this session, both directions together.
+        bytes: u64,
+    },
 }
 
 /// What to do with a datagram that arrived at the relay port.
@@ -102,7 +113,30 @@ pub struct Relays {
     /// the two would wait at the relay for a partner that was never coming, which is precisely
     /// what the first end to end run did.
     pairs: HashMap<([u8; KEY_LEN], [u8; KEY_LEN]), [u8; RELAY_TOKEN_LEN]>,
+    /// Bytes carried by sessions that have since ended.
+    ///
+    /// Kept apart from the live sessions so that the total only ever climbs. Adding the two is
+    /// what an operator is billed against; a figure that fell as sessions ended would understate
+    /// it by however much the busiest ones carried.
+    finished_bytes: u64,
 }
+
+/// One relay this server is carrying, as an operator sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Carrying {
+    /// The host's public key.
+    pub host: [u8; KEY_LEN],
+    /// The client's public key.
+    pub client: [u8; KEY_LEN],
+    /// The relay's token, which is what names it in a log.
+    pub token: [u8; RELAY_TOKEN_LEN],
+    /// When both sides arrived, in seconds since the epoch.
+    pub since_unix: u64,
+    /// Bytes carried for it so far, both directions together.
+    pub bytes: u64,
+}
+
+use crate::report::unix_now;
 
 impl Relays {
     /// Creates an empty set.
@@ -180,7 +214,7 @@ impl Relays {
             return self.present(from, token, now);
         }
 
-        self.forward(from, now)
+        self.forward(from, now, datagram.len() as u64)
     }
 
     /// Records a peer presenting its token.
@@ -210,7 +244,12 @@ impl Relays {
             }
             Session::Waiting { first } => {
                 let other = first.address;
-                *session = Session::Open { a: *first, b: side };
+                *session = Session::Open {
+                    a: *first,
+                    b: side,
+                    opened_unix: unix_now(),
+                    bytes: 0,
+                };
                 self.routes.insert(from, token);
 
                 // The side that was already waiting is told too, so it stops presenting and
@@ -220,7 +259,7 @@ impl Relays {
 
                 Forward::Opened(other)
             }
-            Session::Open { a, b } => {
+            Session::Open { a, b, .. } => {
                 // A repeat from a side already present, which happens because a peer presents
                 // until it hears back and the reply may be lost.
                 if a.address == from {
@@ -240,23 +279,31 @@ impl Relays {
     }
 
     /// Works out where a packet from `from` should go.
-    fn forward(&mut self, from: SocketAddr, now: Instant) -> Forward {
+    /// `carried` is the datagram's length, added to the session's total when it is forwarded.
+    /// Counted here rather than at the socket because this is the one place that has already
+    /// decided the datagram belongs to a session: a stranger's packet is `Ignored` and must not
+    /// appear in what an operator is billed for. The addition sits beside a hash lookup that
+    /// happens anyway, on a path carrying tens of thousands of datagrams a second, so it costs
+    /// nothing measurable — but nothing else may be added here for the same reason.
+    fn forward(&mut self, from: SocketAddr, now: Instant, carried: u64) -> Forward {
         let Some(token) = self.routes.get(&from).copied() else {
             return Forward::Ignored;
         };
 
-        let Some(Session::Open { a, b }) = self.sessions.get_mut(&token) else {
+        let Some(Session::Open { a, b, bytes, .. }) = self.sessions.get_mut(&token) else {
             return Forward::Ignored;
         };
 
         if a.address == from {
             a.seen = now;
+            *bytes += carried;
 
             return Forward::To(b.address);
         }
 
         if b.address == from {
             b.seen = now;
+            *bytes += carried;
 
             return Forward::To(a.address);
         }
@@ -271,7 +318,7 @@ impl Relays {
         for (token, session) in &self.sessions {
             let stale = match session {
                 Session::Waiting { first } => now.duration_since(first.seen) > PAIRING_TTL,
-                Session::Open { a, b } => now.duration_since(a.seen.max(b.seen)) > IDLE_TTL,
+                Session::Open { a, b, .. } => now.duration_since(a.seen.max(b.seen)) > IDLE_TTL,
             };
 
             if stale {
@@ -280,7 +327,11 @@ impl Relays {
         }
 
         for token in dropped {
-            self.sessions.remove(&token);
+            // What a session carried is added to the running total as it goes, so that the
+            // figure an operator is billed against does not fall every time a session ends.
+            if let Some(Session::Open { bytes, .. }) = self.sessions.remove(&token) {
+                self.finished_bytes = self.finished_bytes.saturating_add(bytes);
+            }
         }
 
         // The route table is rebuilt from what survived rather than pruned alongside, because
@@ -305,5 +356,62 @@ impl Relays {
     #[must_use]
     pub fn waiting(&self) -> usize {
         self.sessions.len() - self.open()
+    }
+
+    /// Returns every byte this server has carried since it started.
+    ///
+    /// Live sessions and finished ones together. It resets when the process does, which is what
+    /// a region holding no state means — the figure is "since this server started", and whoever
+    /// reads it is told as much rather than being left to assume a month.
+    #[must_use]
+    pub fn carried(&self) -> u64 {
+        self.sessions
+            .values()
+            .filter_map(|session| match session {
+                Session::Open { bytes, .. } => Some(*bytes),
+                Session::Waiting { .. } => None,
+            })
+            .fold(self.finished_bytes, |total, bytes| {
+                total.saturating_add(bytes)
+            })
+    }
+
+    /// Describes every relay currently carrying traffic.
+    ///
+    /// The keys come from inverting the pair table rather than from the session, because that
+    /// is where they already are — a scan over at most [`MAX_SESSIONS`] entries, done when a
+    /// report is assembled and never on the path a packet takes.
+    ///
+    /// A session whose keys cannot be found is left out. That only happens for one allocated by
+    /// a token nobody claimed, which is not a relay anybody is being billed for.
+    #[must_use]
+    pub fn carrying(&self) -> Vec<Carrying> {
+        let mut by_token: HashMap<[u8; RELAY_TOKEN_LEN], ([u8; KEY_LEN], [u8; KEY_LEN])> =
+            HashMap::with_capacity(self.pairs.len());
+
+        for ((host, client), token) in &self.pairs {
+            by_token.insert(*token, (*host, *client));
+        }
+
+        self.sessions
+            .iter()
+            .filter_map(|(token, session)| {
+                let Session::Open {
+                    opened_unix, bytes, ..
+                } = session
+                else {
+                    return None;
+                };
+                let (host, client) = by_token.get(token)?;
+
+                Some(Carrying {
+                    host: *host,
+                    client: *client,
+                    token: *token,
+                    since_unix: *opened_unix,
+                    bytes: *bytes,
+                })
+            })
+            .collect()
     }
 }

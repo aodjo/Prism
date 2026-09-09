@@ -116,3 +116,46 @@ CREATE TABLE IF NOT EXISTS settings (
   id    INTEGER PRIMARY KEY CHECK (id = 1),
   decoy TEXT NOT NULL
 );
+
+-- The last thing each signalling region said about itself.
+--
+-- One row per region, replaced wholesale each time a report arrives. A region pushes this; the
+-- dashboard never asks it. That is what keeps adding a region to a machine, a port and an
+-- address record — being asked would mean every region answering HTTPS from the internet, with
+-- a hostname, a certificate and a proxy each — and it is why this table exists at all rather
+-- than the dashboard fanning out to five machines every time somebody opens a page.
+--
+-- Nothing here is history. A report replaces the one before it, and a region that stops
+-- reporting leaves its last one behind with a timestamp saying how stale it is.
+CREATE TABLE IF NOT EXISTS region_reports (
+  -- The region's name, which has to match the one in `regions`.
+  region         TEXT PRIMARY KEY NOT NULL,
+  -- When this arrived, by the account server's clock rather than the region's.
+  --
+  -- The server's own, because a region with a wrong clock would otherwise be able to make
+  -- itself look permanently fresh or permanently stale.
+  at_unix        INTEGER NOT NULL,
+  -- What the region says it is running.
+  build          TEXT NOT NULL,
+  -- How long since it started. Every total below covers exactly this window.
+  uptime_seconds INTEGER NOT NULL,
+  -- Hosts registered and reachable there.
+  hosts          INTEGER NOT NULL,
+  -- Relayed sessions it is carrying.
+  carrying       INTEGER NOT NULL,
+  -- Relays with one side present, waiting for the other.
+  waiting        INTEGER NOT NULL,
+  -- What those sessions are costing its link, in megabits per second.
+  now_mbps       REAL NOT NULL,
+  -- The most they have cost it since it started.
+  peak_mbps      REAL NOT NULL,
+  -- What its link will carry, as the operator configured the region.
+  link_mbps      REAL NOT NULL,
+  -- Bytes relayed since it started.
+  carried_bytes  INTEGER NOT NULL,
+  -- The relays it is carrying, as JSON. Read whole and never queried into, so a column rather
+  -- than a table: these rows live and die together with the report they came in.
+  sessions       TEXT NOT NULL,
+  -- The pairs it introduced lately, as JSON, for the same reason.
+  introduced     TEXT NOT NULL
+);
