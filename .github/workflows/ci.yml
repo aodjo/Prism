@@ -408,3 +408,183 @@ jobs:
           docker logs rv | tee /dev/stderr | grep -q 'listening on 0.0.0.0:47300'
           docker logs rv | grep -q 'relaying on port 47301'
           docker stop rv
+
+  # Building the image once, where every region will pull it from.
+  #
+  # Separate from the job above because that one proves the image works and this one publishes
+  # it. Both architectures, because the machines this runs on are not all the same one and an
+  # image that only runs where it was built is not a deployable artifact.
+  image:
+    name: publish the image
+    needs: rendezvous
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      # Pinned by digest, not by tag. A tag is a name somebody can move; a digest is the image
+      # or it is nothing.
+      image: ${{ steps.pinned.outputs.image }}
+      # Which machines to put it on. A secret rather than a list in this file, so adding a
+      # region is a machine, a port, an address record and a line in that secret — not a commit.
+      regions: ${{ steps.where.outputs.regions }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Which regions there are
+        id: where
+        env:
+          HOSTS: ${{ secrets.DEPLOY_HOSTS }}
+        run: |
+          # Collapsed to one line, because a matrix is read from a single output value. Checked
+          # here rather than discovered by five jobs failing to start.
+          printf '%s' "$HOSTS" | jq -c . > /tmp/regions.json
+          echo "regions=$(cat /tmp/regions.json)" >> "$GITHUB_OUTPUT"
+          echo "deploying to $(jq length /tmp/regions.json) regions"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Name the image after the commit it was built from
+        id: name
+        run: |
+          registry=ghcr.io/${{ github.repository_owner }}/prism-rendezvous
+          echo "image=${registry,,}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v7
+        id: push
+        with:
+          context: .
+          file: deploy/rendezvous/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.name.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Pin what was built
+        id: pinned
+        run: echo "image=${{ steps.name.outputs.image }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  # Putting it where it runs, on every region at once.
+  #
+  # Here rather than in a workflow of its own, and that is not tidiness. GitHub fires
+  # `workflow_run` and `workflow_dispatch` only for a file on the **default branch**, which is
+  # `main` — so `deploy.yml`, which lives on `develop`, has never run and cannot be run by hand.
+  # It is not even listed. This job is in the workflow that *is* registered from `main`.
+  #
+  # Every region is one shape: this repository's `compose.yaml`, an `.env` that is the only
+  # thing differing between them, and an image pulled by digest. The `.env` is not deployed and
+  # never should be — it holds the region's name and its report token, and a server's secrets
+  # belong to the server rather than to the repository that builds it.
+  deploy:
+    name: deploy ${{ matrix.region.region }}
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # To pull what the job above pushed. Read, not write: nothing here publishes.
+      packages: read
+    strategy:
+      # One unreachable machine must not stop the others being updated. A half-updated set is
+      # the ordinary state of a rolling deploy; a set nobody updated because the first machine
+      # was down is worse.
+      fail-fast: false
+      matrix:
+        region: ${{ fromJson(needs.image.outputs.regions) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Reach the region
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned rather than accepted on sight. A deploy that trusts whatever answers can be
+          # pointed somewhere else by anything that answers first.
+          printf '%s\n' "$HOSTS" > ~/.ssh/known_hosts
+
+      - name: Send what describes the deployment
+        run: |
+          scp deploy/rendezvous/compose.yaml \
+            "${{ matrix.region.user }}@${{ matrix.region.host }}:/tmp/compose.yaml"
+
+      - name: Pull the image and bring it up
+        run: |
+          ssh "${{ matrix.region.user }}@${{ matrix.region.host }}" "
+            set -e
+            # Root on most of these, a sudoer on the rest. One command shape either way.
+            if [ \"\$(id -u)\" -eq 0 ]; then SUDO=; else SUDO=sudo; fi
+            \$SUDO install -d -m 700 /opt/prism
+            \$SUDO mv /tmp/compose.yaml /opt/prism/compose.yaml
+            echo '${{ secrets.GITHUB_TOKEN }}' | \$SUDO docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+            cd /opt/prism
+            \$SUDO env PRISM_IMAGE='${{ needs.image.outputs.image }}' \
+              docker compose --env-file .env up -d --no-build --pull always
+            \$SUDO docker image prune -f
+          "
+
+      # Asking whether the container is running is not the same as asking whether it works. A
+      # region that came up but bound nothing is a container in perfect health serving nobody,
+      # which is exactly what a restart that lost its `.env` looks like.
+      - name: It is running and holding its ports
+        run: |
+          ssh "${{ matrix.region.user }}@${{ matrix.region.host }}" "
+            set -e
+            if [ \"\$(id -u)\" -eq 0 ]; then SUDO=; else SUDO=sudo; fi
+            sleep 8
+            \$SUDO docker inspect -f '{{.State.Running}}' prism-rendezvous | grep -qx true
+            ss -lnu | grep -q ':47300 '
+            ss -lnu | grep -q ':47301 '
+            \$SUDO docker logs --tail 5 prism-rendezvous
+          "
+
+      # And the question neither of those answers: does it serve *this* region to somebody who
+      # is not on the machine? Asked from here, over the internet, in the protocol itself.
+      #
+      # Three tries because this is UDP and one lost datagram is not a broken region — measured
+      # during the migration that produced this job, where the first probe to a healthy region
+      # timed out and the second answered.
+      - name: It answers for itself, from outside
+        run: |
+          python3 - <<'PY'
+          import os, socket, sys
+
+          host = "${{ matrix.region.host }}"
+          want = """${{ matrix.region.region }}"""
+
+          for attempt in range(3):
+              nonce = os.urandom(8)
+              sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+              sock.settimeout(5)
+              try:
+                  sock.sendto(bytes([0x0c]) + nonce, (host, 47300))
+                  answer, _ = sock.recvfrom(256)
+              except socket.timeout:
+                  print(f"attempt {attempt + 1}: no answer")
+                  continue
+              finally:
+                  sock.close()
+
+              if answer[0] != 0x0d or answer[1:9] != nonce:
+                  sys.exit(f"{host} answered something else")
+
+              said = answer[9:].split(b"\x00")[0].decode("utf8", "replace")
+
+              if said != want:
+                  sys.exit(f"{host} says it is {said!r}, not {want!r}")
+
+              print(f"{host} answers for {said}")
+              sys.exit(0)
+
+          sys.exit(f"{host} never answered")
+          PY
