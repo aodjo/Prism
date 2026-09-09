@@ -426,22 +426,8 @@ jobs:
       # Pinned by digest, not by tag. A tag is a name somebody can move; a digest is the image
       # or it is nothing.
       image: ${{ steps.pinned.outputs.image }}
-      # Which machines to put it on. A secret rather than a list in this file, so adding a
-      # region is a machine, a port, an address record and a line in that secret — not a commit.
-      regions: ${{ steps.where.outputs.regions }}
     steps:
       - uses: actions/checkout@v7
-
-      - name: Which regions there are
-        id: where
-        env:
-          HOSTS: ${{ secrets.DEPLOY_HOSTS }}
-        run: |
-          # Collapsed to one line, because a matrix is read from a single output value. Checked
-          # here rather than discovered by five jobs failing to start.
-          printf '%s' "$HOSTS" | jq -c . > /tmp/regions.json
-          echo "regions=$(cat /tmp/regions.json)" >> "$GITHUB_OUTPUT"
-          echo "deploying to $(jq length /tmp/regions.json) regions"
 
       - uses: docker/setup-buildx-action@v4
 
@@ -497,7 +483,17 @@ jobs:
       # was down is worse.
       fail-fast: false
       matrix:
-        region: ${{ fromJson(needs.image.outputs.regions) }}
+        # A repository variable rather than a secret, and rather than a list in this file.
+        #
+        # Not a secret because it is not one: every address here is already public, in the
+        # `rv.presm.kr` records that tell every client where to look. Making it a secret bought
+        # nothing and cost the first run — GitHub scrubs secret values out of job outputs, so
+        # the list arrived as `***`, `fromJson` refused it, and the matrix produced no jobs at
+        # all. Every job reported success and the run failed with nothing to look at.
+        #
+        # Not a list here because adding a region should stay a machine, a port, an address
+        # record and a line in that variable — not a commit.
+        region: ${{ fromJson(vars.DEPLOY_HOSTS) }}
     steps:
       - uses: actions/checkout@v7
 
