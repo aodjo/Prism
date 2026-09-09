@@ -17,9 +17,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # This job compiles the Linux host, which encodes through VAAPI.
-      - name: Install VAAPI development files
-        run: sudo apt-get update && sudo apt-get install -y libva-dev clang pkg-config
+      # This job compiles the Linux host, which encodes through VAAPI, and the shell, whose
+      # Linux backend is WebKitGTK. Both are found through pkg-config, so a runner without the
+      # headers does not skip them — it stops.
+      #
+      # This is also the only place they are checked. `pnpm lint:cross` cannot build either on a
+      # Mac with no Linux sysroot, so the shell's Linux path has no local check at all.
+      - name: Install the libraries the Linux build needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libva-dev clang pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -57,9 +65,12 @@ jobs:
       # The Linux host encodes through VAAPI, which needs the library and its headers to
       # build. Installed here rather than assumed, because a runner without them would skip
       # compiling the whole backend and report a green build for code nobody had checked.
-      - name: Install VAAPI development files
+      - name: Install the libraries the Linux build needs
         if: matrix.name == 'linux-x64'
-        run: sudo apt-get update && sudo apt-get install -y libva-dev clang pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libva-dev clang pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

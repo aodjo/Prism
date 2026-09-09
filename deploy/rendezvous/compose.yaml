@@ -1,4 +1,4 @@
-# One rendezvous region, with or without the accounts that go beside it.
+# One rendezvous region.
 #
 # Copy `.env.example` to `.env`, fill it in, and from the repository root:
 #
@@ -6,11 +6,11 @@
 #
 # See docs/rendezvous.md for what to open on the firewall and how to check it is working.
 
-# Named, and this matters more than it looks. Without it the project is the base name of
-# whichever directory the compose file happens to be in, and the accounts volume is named after
-# the project — so bringing the same stack up from a different path silently starts on an empty
-# account store rather than the one holding everybody's keys. Pinned so the path cannot decide.
-name: prism-rendezvous
+# Named rather than taken from whichever directory this file is in, so that the same stack
+# brought up from a different path is the same stack. `PRISM_NAME` is what lets a second one run
+# beside it — a staging region on the same machine, which is safe precisely because a region
+# holds nothing: no volume, no file, nothing two of them could disagree about.
+name: "${PRISM_NAME:-prism-rendezvous}"
 
 services:
   rendezvous:
@@ -21,7 +21,7 @@ services:
     # tested build rather than compiling one. Left as a local name by default: somebody running
     # this by hand on their own box wants the source in front of them, not a registry.
     image: "${PRISM_IMAGE:-prism-rendezvous}"
-    container_name: prism-rendezvous
+    container_name: "${PRISM_NAME:-prism-rendezvous}"
     restart: unless-stopped
 
     # Host networking, and this is not a preference.
@@ -35,8 +35,10 @@ services:
     network_mode: host
 
     command:
+      # The relay takes the next port up, so a second region on one machine needs a gap of at
+      # least two between them.
       - "--bind"
-      - "0.0.0.0:47300"
+      - "0.0.0.0:${PRISM_PORT:-47300}"
       - "--region"
       - "${PRISM_REGION}"
       # Handed to a machine when it signs in, so neither end has to be told by hand where to
