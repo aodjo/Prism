@@ -14,6 +14,7 @@ import { createRoot } from 'react-dom/client';
 
 import type {
   AccountDeviceView,
+  Available,
   HostSnapshot,
   PrismApi,
   Session,
@@ -148,6 +149,11 @@ function Home(): JSX.Element {
   const [tuning, setTuning] = useState(false);
   /** Whether the terms this machine is shared on are open beside the switch. */
   const [terms, setTerms] = useState(false);
+  /** The newer build the shell found at launch, until it is installed or waved away. */
+  const [update, setUpdate] = useState<Available | null>(null);
+  /** What went wrong installing it, which is the only place that would otherwise be silent. */
+  const [updateError, setUpdateError] = useState('');
+  const [installing, setInstalling] = useState(false);
   const search = useRef<HTMLInputElement | null>(null);
 
   const machineName = useCallback(
@@ -233,6 +239,8 @@ function Home(): JSX.Element {
           .filter((key) => key !== state.publicKey),
       );
     });
+
+    prism.onUpdate(setUpdate);
   }, []);
 
   const pinned = useMemo(() => new Set(settings?.pinned ?? []), [settings]);
@@ -604,6 +612,71 @@ function Home(): JSX.Element {
                   }}
                 >
                   Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Asked rather than done quietly. Installing replaces the application under a process
+            that is running it, and the last step is a restart — which is not something to do to
+            somebody who may be watching another machine at that moment. One question, and then
+            everything that follows from the answer happens without asking again.
+
+            No dismissing it by clicking away: the answer is one of the two buttons, because a
+            modal that vanishes on a stray click is one somebody never decides about. */}
+        {update && (
+          <div className="fixed inset-0 z-[4] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
+            <div className="w-full max-w-[420px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
+              <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+                새로운 빌드가 있습니다
+              </h2>
+              <p className="mt-3 mb-0 text-ui text-dim">
+                {update.version} 을 설치하면 Prism이 다시 시작됩니다.
+              </p>
+              {update.notes.trim() !== '' && (
+                <p className="mt-2 mb-0 max-h-24 overflow-y-auto text-ui text-dim">
+                  {update.notes}
+                </p>
+              )}
+              {updateError !== '' && (
+                <p className="mt-3 mb-0 text-ui text-danger-ink">{updateError}</p>
+              )}
+              <div className="mt-4 flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={installing}
+                  onClick={() => {
+                    setUpdate(null);
+                    setUpdateError('');
+                  }}
+                >
+                  나중에
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary-sm"
+                  disabled={installing}
+                  onClick={() => {
+                    setInstalling(true);
+                    setUpdateError('');
+                    // Nothing follows a success: the process is replaced. Reaching the next
+                    // line at all means it failed, and then the reason is worth more than a
+                    // window that has quietly gone back to how it was.
+                    void prism
+                      .installUpdate()
+                      .catch((error: unknown) => {
+                        setUpdateError(
+                          error instanceof Error ? error.message : String(error),
+                        );
+                      })
+                      .finally(() => {
+                        setInstalling(false);
+                      });
+                  }}
+                >
+                  {installing ? '설치 중…' : '설치'}
                 </button>
               </div>
             </div>

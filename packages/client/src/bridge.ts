@@ -211,6 +211,13 @@ export function installBridge(): void {
       listen<AccountState>('account:state', listener);
     },
 
+    // Announced rather than asked for, and announced once. The shell looks when it starts and
+    // says so only when it found something, so a window that hears nothing is a window on the
+    // newest build.
+    onUpdate: (listener: (available: Available) => void): void => {
+      listen<Available>('update:available', listener);
+    },
+
     accountChallenge: (email: string): Promise<boolean> =>
       call<boolean>('account_challenge', { email }),
 

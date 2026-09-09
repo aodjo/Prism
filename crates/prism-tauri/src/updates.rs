@@ -20,7 +20,7 @@
 //! nothing here should try to help.
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 
 /// What this build was made as, written in by the build and read back here.
@@ -121,10 +121,16 @@ pub async fn check_for_update(
     }))
 }
 
-/// Downloads and installs the newer version, if there is one.
+/// Downloads the newer version, installs it, and restarts into it.
 ///
-/// Returns what was installed, or `None` when there was nothing to install. The application has
-/// to be restarted for it to take effect; on Windows the installer does that itself.
+/// The three together, because separately they are three ways to end up somewhere confusing.
+/// Installing without restarting replaces the bundle under a process that goes on running the
+/// old code, so nothing appears to have happened and the next launch changes version for no
+/// reason anybody can see. Asking again after the download is asking a second time about a
+/// decision already made.
+///
+/// Never returns when it succeeds: the process is replaced. `Ok(None)` means there was nothing
+/// to install after all, which happens when a newer version was found and then withdrawn.
 ///
 /// # Errors
 ///
@@ -141,14 +147,14 @@ pub async fn install_update(
         return Ok(None);
     };
 
-    let version = update.version.clone();
-
     update
         .download_and_install(|_, _| {}, || {})
         .await
         .map_err(|err| err.to_string())?;
 
-    Ok(Some(version))
+    // Does not return. Anything after it is only reached when the platform refused to restart,
+    // and then the caller is told what was installed so it can say so.
+    app.restart();
 }
 
 /// Asks the endpoint for this channel what it has.
@@ -170,7 +176,11 @@ async fn look(
         .map_err(|err| err.to_string())
 }
 
-/// Looks once, shortly after the window opens, and installs anything it finds.
+/// Looks once, shortly after the window opens, and says what it found.
+///
+/// Emits `update:available` carrying an [`Available`] when there is a newer version, and
+/// nothing at all when there is not. Installing is a separate decision, made by whoever is
+/// looking at the window.
 ///
 /// Spawned rather than awaited: a check that has to finish before a window appears is a window
 /// that does not appear when the network is slow, and the reason for updating is not urgent
@@ -197,11 +207,22 @@ pub fn check_in_background(app: &AppHandle) {
             return;
         };
 
+        // Found, and then said rather than acted on. Installing here would replace the bundle
+        // under a running process — which changes nothing a person can see until they next
+        // launch, and would do it while they were in the middle of watching another machine.
+        // What happens next is their decision, and `install_update` carries it out.
+        //
         // Failures are not reported. Nothing is wrong with this machine because a server was
         // unreachable, and a window that says so on every launch without a network would be
         // reporting the network rather than the application.
         if let Ok(Some(update)) = look(&app, &channel).await {
-            let _ = update.download_and_install(|_, _| {}, || {}).await;
+            let _ = app.emit(
+                "update:available",
+                Available {
+                    version: update.version.clone(),
+                    notes: update.body.clone().unwrap_or_default(),
+                },
+            );
         }
     });
 }
