@@ -480,8 +480,18 @@ fn open(
 
                 return Ok((established, found.local));
             }
-            Err(err) if err.kind() != io::ErrorKind::TimedOut => return Err(err),
-            Err(_) => {}
+            // Any failure at all, and the attempt is simply over. This address is a hint the
+            // host offered about its own network, and a hint that does not work out has to cost
+            // nothing — there are two more ways to reach it below.
+            //
+            // It was written to tolerate only a timeout, and that was wrong the moment somebody
+            // tried it: a host on a subnet this machine has no route to answers immediately with
+            // `No route to host` rather than by going quiet, so the one case the address exists
+            // to handle badly was the one case that ended the whole connection.
+            Err(err) => say.note(format!(
+                "{} is not reachable from here ({err})",
+                found.local
+            )),
         }
     }
 
@@ -492,9 +502,11 @@ fn open(
     // to be tried.
     if config.force_relay {
         say.note("skipping the direct path because it was asked to".to_owned());
+    } else if let Err(err) = rendezvous::punch(transport, found.address) {
+        // Not fatal, and not worth the four seconds of dialling that would follow either. A
+        // machine that cannot even send to that address is one the relay exists for.
+        say.note(format!("cannot reach {} to punch ({err})", found.address));
     } else {
-        rendezvous::punch(transport, found.address)?;
-
         match dial(
             transport,
             found.address,
@@ -508,8 +520,11 @@ fn open(
 
                 return Ok((established, found.address));
             }
-            Err(err) if err.kind() != io::ErrorKind::TimedOut => return Err(err),
-            Err(_) => {}
+            // Every failure here falls through to the relay, whatever it was. This is the
+            // middle of a chain of three ways to reach a machine, and a chain that stops at the
+            // first thing to go wrong is one that never reaches the step written for exactly
+            // that case.
+            Err(err) => say.note(format!("no direct path to {} ({err})", found.address)),
         }
     }
 
