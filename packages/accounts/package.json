@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "deploy": "pnpm run build && wrangler deploy",
-    "dev": "pnpm run build && wrangler dev",
+    "bundle": "node scripts/build.mjs",
+    "deploy": "pnpm run bundle && wrangler deploy",
+    "dev": "pnpm run bundle && wrangler dev",
     "migrate": "node scripts/migrate.mjs --remote",
     "operator": "node scripts/operator.mjs",
     "schema": "wrangler d1 execute prism-accounts --remote --file schema.sql",

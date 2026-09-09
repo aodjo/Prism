@@ -12,6 +12,12 @@
  *
  * Run before every deploy. The Worker serves whatever this last wrote, so a stale copy is a
  * dashboard deriving with yesterday's parameters and nobody being able to sign in.
+ *
+ * The package script that runs this is called `bundle` and not `build`, deliberately. The root
+ * `build` is `pnpm -r build`, which the desktop application's packaging runs — and this needs a
+ * `wasm32-unknown-unknown` toolchain that a machine building the application has no reason to
+ * have. It is what `src/dashboard.ts` is committed for: a deploy from a machine with no Rust at
+ * all still ships a dashboard, and building the application never reaches for a cross target.
  */
 
 import { execFileSync } from 'node:child_process';
