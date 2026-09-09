@@ -136,19 +136,24 @@ jobs:
                   docker compose --env-file .env up -d --no-build --pull always \
                && docker image prune -f"
 
-      # Asking whether the container is running is not the same as asking whether it works, and
-      # the difference has teeth here: the account API is served from a thread, and a thread that
-      # cannot bind used to die on its own while the signalling loop kept the process — and the
+      # Asking whether the container is running is not the same as asking whether it works. A
+      # region that came up but bound neither port is a container in perfect health serving
+      # nobody, so this asks the kernel which ports are open rather than asking Docker how the
+      # process is feeling. The relay takes the port above the one it was given, and a region
+      # missing that is one that cannot carry a session for peers who could not meet directly.
+      #
+      # Which container and which port come from the server's own `.env`, so that a staging
+      # region beside a live one is checked as itself rather than as its neighbour.
       # container — alive and looking healthy. So this asks the API itself, from the machine, on
       # the loopback the proxy reaches it by.
       - name: Check it actually serves
         run: |
           ssh -p "${{ secrets.DEPLOY_PORT || 22 }}" \
               "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-              "sleep 10 \
-               && docker inspect -f '{{.State.Running}}' prism-rendezvous | grep -qx true \
-               && docker inspect -f '{{.State.Running}}' prism-proxy | grep -qx true \
-               && curl -sS -o /dev/null --max-time 10 \
-                    -X POST http://127.0.0.1:47380/v1/sessions \
-                    -H 'content-type: application/json' -d '{}' \
-               && docker logs --tail 20 prism-rendezvous"
+              "cd '${{ secrets.DEPLOY_PATH }}' \
+               && set -a && . ./.env && set +a \
+               && sleep 10 \
+               && docker inspect -f '{{.State.Running}}' \"\${PRISM_NAME:-prism-rendezvous}\" | grep -qx true \
+               && ss -lnu | grep -q \":\${PRISM_PORT:-47300} \" \
+               && ss -lnu | grep -q \":\$(( \${PRISM_PORT:-47300} + 1 )) \" \
+               && docker logs --tail 20 \"\${PRISM_NAME:-prism-rendezvous}\""
