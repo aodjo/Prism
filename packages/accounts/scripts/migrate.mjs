@@ -1,13 +1,19 @@
 /**
  * Brings a live database up to the shape `schema.sql` describes.
  *
- * `schema.sql` is written with `CREATE TABLE IF NOT EXISTS`, which is the right thing for a
- * database that does not exist yet and does nothing at all for one that does: a column added
- * to a table that is already there is not added. This asks the database what it actually has
- * and issues only what is missing, so running it on a fresh database and on the one serving
- * accounts right now both end at the same shape, and running it twice is running it once.
+ * Two halves, because SQLite treats the two cases differently.
  *
- * SQLite has no `ADD COLUMN IF NOT EXISTS`, which is why this is a script and not a file of SQL.
+ * **Tables and indexes** are `CREATE ... IF NOT EXISTS` in `schema.sql`, so that file is simply
+ * applied every time: a new table appears, an existing one is left alone. Nothing here lists
+ * them, deliberately — a copy of the schema kept in this script is a second place to describe
+ * one thing, and the copy is the one that gets forgotten.
+ *
+ * **Columns** cannot work that way. SQLite has no `ADD COLUMN IF NOT EXISTS`, and a column
+ * added to a table that already exists is not added by `CREATE TABLE IF NOT EXISTS`. So those
+ * are listed below, and this asks the database what it actually has before issuing each one.
+ *
+ * Running it on a fresh database and on the one serving accounts right now both end at the same
+ * shape, and running it twice is running it once.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -37,27 +43,8 @@ const COLUMNS = [
   },
 ];
 
-/**
- * Tables added after the first deployment.
- *
- * `CREATE TABLE IF NOT EXISTS` is already idempotent, so unlike a column these can simply be
- * issued every time.
- */
-const TABLES = [
-  'CREATE TABLE IF NOT EXISTS regions (' +
-    ' name TEXT PRIMARY KEY NOT NULL,' +
-    ' url TEXT NOT NULL,' +
-    ' limit_gb INTEGER,' +
-    ' added_unix INTEGER NOT NULL)',
-  'CREATE TABLE IF NOT EXISTS audit (' +
-    ' id INTEGER PRIMARY KEY AUTOINCREMENT,' +
-    ' actor TEXT NOT NULL,' +
-    ' action TEXT NOT NULL,' +
-    ' subject TEXT NOT NULL,' +
-    " detail TEXT NOT NULL DEFAULT ''," +
-    ' at_unix INTEGER NOT NULL)',
-  'CREATE INDEX IF NOT EXISTS audit_recent ON audit (at_unix DESC)',
-];
+/** The one description of what this database is meant to look like. */
+const SCHEMA = join(HERE, 'schema.sql');
 
 /**
  * Runs one statement against the database and returns what it answered.
@@ -83,9 +70,18 @@ function ask(sql, remote) {
 const remote = process.argv.includes('--remote');
 const added = [];
 
-for (const sql of TABLES) {
-  ask(sql, remote);
-}
+// The schema file itself, every time. Every statement in it is `IF NOT EXISTS`, so issuing it
+// against a database that already has everything does nothing at all.
+//
+// It used to be a list of `CREATE TABLE` statements copied into this script, and the copy is
+// what went wrong: `region_reports` was added to `schema.sql`, this list was not, and the
+// migration reported "already has every column" against a database with no such table. Two
+// places to describe one thing, and the one being edited was not the one being run.
+execFileSync(
+  WRANGLER,
+  ['d1', 'execute', DATABASE, remote ? '--remote' : '--local', '--file', SCHEMA],
+  { cwd: HERE, encoding: 'utf8', stdio: ['ignore', 'ignore', 'inherit'] },
+);
 
 for (const { table, column, sql } of COLUMNS) {
   const present = ask(`PRAGMA table_info(${table})`, remote).some((row) => row.name === column);
