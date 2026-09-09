@@ -242,6 +242,18 @@ jobs:
       # The extension is taken whole, because the ones that matter have two parts: `.app.tar.gz`
       # is what the updater installs on macOS and `.dmg` is what a person double-clicks, and a
       # rule that kept only the last dot would turn the first into `.gz`.
+      #
+      # `-maxdepth 2` is what keeps the bundler's own workings out of a release. The artifacts
+      # sit one directory down, at `<kind>/<file>`, but the deb bundler leaves a build tree
+      # beside its output — and the `control.tar.gz` inside it matched `*.tar.gz`, was renamed
+      # `prism-linux-x64-1.0.0-159.tar.gz`, and shipped as though it were something to install.
+      #
+      # The signatures Tauri v2 writes sit next to the bundle they belong to and are named for
+      # it: `Prism_x64-setup.exe.sig`, `Prism_amd64.AppImage.sig`, `Prism.app.tar.gz.sig`. There
+      # is no `.nsis.zip` and no `.AppImage.tar.gz` — v2 signs the installer and the AppImage
+      # themselves. Collecting only `*.tar.gz.sig` and `*.zip.sig`, as this did, left Windows and
+      # Linux with a bundle and no signature, which the update endpoint can only answer with
+      # silence.
       - name: Collect what each platform built
         env:
           BASE: ${{ steps.name.outputs.base }}
@@ -251,27 +263,40 @@ jobs:
           for dir in bundles/prism-*; do
             platform="${dir#bundles/prism-}"
 
-            find "$dir" -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sig' \
-              -o -name '*.zip' -o -name '*.zip.sig' -o -name '*.dmg' -o -name '*.exe' \
-              -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) | while read -r file; do
+            find "$dir" -maxdepth 2 -type f \( -name '*.tar.gz' -o -name '*.dmg' \
+              -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \
+              -o -name '*.sig' \) | while read -r file; do
               name="$(basename "$file")"
 
               case "$name" in
-                *.app.tar.gz.sig)     ext='.app.tar.gz.sig' ;;
-                *.app.tar.gz)         ext='.app.tar.gz' ;;
-                *.nsis.zip.sig)       ext='.nsis.zip.sig' ;;
-                *.nsis.zip)           ext='.nsis.zip' ;;
-                *.AppImage.tar.gz.sig) ext='.AppImage.tar.gz.sig' ;;
-                *.AppImage.tar.gz)    ext='.AppImage.tar.gz' ;;
-                *.tar.gz.sig)         ext='.tar.gz.sig' ;;
-                *.tar.gz)             ext='.tar.gz' ;;
-                *)                    ext=".${name##*.}" ;;
+                *.app.tar.gz.sig) ext='.app.tar.gz.sig' ;;
+                *.app.tar.gz)     ext='.app.tar.gz' ;;
+                *.tar.gz.sig)     ext='.tar.gz.sig' ;;
+                *.tar.gz)         ext='.tar.gz' ;;
+                *.sig)            ext=".${name%.sig}" ; ext=".${ext##*.}.sig" ;;
+                *)                ext=".${name##*.}" ;;
               esac
 
               cp "$file" "release/prism-${platform}-${BASE}-${BUILD}${ext}"
             done
           done
           ls -la release
+
+      # A release nobody can update from is the failure this whole job exists to prevent, and it
+      # looks exactly like a successful one: files uploaded, green tick, nothing installable.
+      # So the pairs are checked here rather than discovered weeks later by an application that
+      # quietly never updates.
+      - name: Every bundle has its signature
+        run: |
+          missing=0
+          for bundle in release/*.app.tar.gz release/*.exe release/*.AppImage; do
+            [ -e "$bundle" ] || continue
+            if [ ! -e "$bundle.sig" ]; then
+              echo "no signature for $(basename "$bundle")"
+              missing=1
+            fi
+          done
+          exit "$missing"
 
       - uses: softprops/action-gh-release@v2
         with:
