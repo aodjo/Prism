@@ -12,6 +12,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 prism-core.workspace = true
+# For the messages only. The window itself is the other half of that crate and is not built
+# here — this shell starts it as a process, it does not link it.
+prism-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = ["unstable"] }

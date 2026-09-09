@@ -3086,11 +3086,8 @@ name = "prism-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
- "objc2-metal",
- "objc2-quartz-core",
  "prism-core",
- "sdl3",
- "sdl3-sys",
+ "prism-stream",
  "windows 0.62.2",
 ]
 
@@ -3159,11 +3156,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "prism-stream"
+version = "0.0.0"
+dependencies = [
+ "objc2-metal",
+ "objc2-quartz-core",
+ "prism-core",
+ "sdl3",
+ "sdl3-sys",
+ "serde",
+ "serde_json",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "prism-tauri"
 version = "0.0.0"
 dependencies = [
  "objc2",
  "prism-core",
+ "prism-stream",
  "serde",
  "serde_json",
  "tauri",

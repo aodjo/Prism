@@ -1,0 +1,58 @@
+[package]
+name = "prism-stream"
+description = "The window Prism shows another machine in, and the process the shell runs it as"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "prism_stream"
+path = "src/lib.rs"
+
+# The process the shell starts. Built only where there is a window to start, because a binary
+# that opens nothing would still have to be found, shipped and signed.
+[[bin]]
+name = "prism-stream"
+path = "src/main.rs"
+required-features = ["window"]
+
+[dependencies]
+prism-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["window"]
+
+# The window, the relative mouse capture and the audio output.
+#
+# On by default, because a stream without them is not a stream. Turned off to build the parts
+# that need no window, which is what a machine checking a decoder against a recording wants.
+# SDL is built from source and linked statically so that a machine *running* this needs nothing
+# installed, and that costs the machine *building* it a C toolchain and CMake.
+window = ["dep:sdl3", "dep:sdl3-sys"]
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+sdl3 = { version = "0.18", features = ["build-from-source-static"], optional = true }
+sdl3-sys = { version = "0.6", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }
+objc2-metal = { version = "0.3", features = ["MTLPixelFormat"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

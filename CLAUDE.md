@@ -60,6 +60,7 @@ export const MAX_PACKET_SIZE = 1200;
 ```
 crates/prism-core/   데이터 평면 전체 (캡처·인코드·네트워크·디코드·표시·입력)
 crates/prism-tauri/  셸: 창·설정·계정·공유·스트림 제어 — 이것이 애플리케이션이다
+crates/prism-stream/ 스트림 창 프로세스 — 셸이 띄우고 `ipc`로 말한다
 crates/prism-cli/    헤드리스 host/client (M1~M4 검증 및 CI 회귀)
 crates/prism-rendezvous/  자체 호스팅 서버: 시그널링·주소 발견·릴레이 폴백
 crates/amf-shim/     AMD AMF C 심
@@ -110,9 +111,10 @@ sysroot이 없는 맥에서는 그 조회 자체가 실패한다. **따라서 �
 반면 `prism-core`는 제외되지 않는다 — `ring`을 끌어오지 않아 두 타깃 모두 로컬에서 검사된다.
 그 크레이트를 건드렸다면 밀기 전에 `pnpm lint:cross`가 실제로 잡아준다.
 
-윈도우 타깃에서는 `prism-cli`도 제외한다. 클라이언트 창·오디오가 SDL을 소스에서 빌드하는데,
-MSVC용 C 툴체인이 없는 맥에서는 cmake 단계에서 실패한다. **따라서 윈도우 클라이언트 코드
-(`render/d3d11.rs`, `render/hud.rs`, `display/d3d11.rs`)는 로컬 `lint:cross`가 검사하지 못한다.**
+윈도우 타깃에서는 `prism-stream`과 그것에 의존하는 `prism-cli`도 제외한다. 스트림 창·오디오가
+SDL을 소스에서 빌드하는데, MSVC용 C 툴체인이 없는 맥에서는 cmake 단계에서 실패한다. **따라서
+윈도우 클라이언트 코드(`render/d3d11.rs`, `render/hud.rs`, `display/d3d11.rs`)는 로컬
+`lint:cross`가 검사하지 못한다.**
 CI의 `windows-latest` 잡이 `cargo clippy --workspace --all-targets`로 네이티브 검사하며,
 그 코드를 건드렸다면 푸시 전에 실제 윈도우 머신에서 빌드해 보는 편이 빠르다.
 
