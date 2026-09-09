@@ -44,29 +44,18 @@ services:
       # knew this region would stop finding hosts the moment a nearer one was added.
       - "--advertise"
       - "${PRISM_RENDEZVOUS_NAME}"
-      # The file itself, not the directory it is in: `sessions.json` is written beside whatever
-      # this names. The volume is mounted over the directory so both survive a rebuild.
-      - "--accounts"
-      - "/var/lib/prism/accounts.json"
-      # Plain HTTP on the loopback, which is where the proxy in front of it reaches it. Binding
-      # this anywhere else would put the value that signs somebody in on the network in the
-      # clear, and the server refuses to unless told the exposure is deliberate.
-      - "--api-bind"
-      - "127.0.0.1:47380"
 
-    environment:
-      # Without a mail key the server creates accounts already verified and says so at startup,
-      # which is right for a server one person runs for their own machines and wrong for one
-      # anybody can reach.
-      PRISM_RESEND_KEY: "${PRISM_RESEND_KEY:-}"
-      PRISM_MAIL_FROM: "${PRISM_MAIL_FROM:-}"
-      PRISM_ADMIN_TOKEN: "${PRISM_ADMIN_TOKEN:-}"
+    # No `--accounts`, deliberately. This server keeps none: accounts live in
+    # `packages/accounts`, a Worker over D1 at its own name, because they are the one piece of
+    # state here that cannot be reconstructed and a single disk is a poor place for it. What is
+    # left is what a region is for — introducing two machines and relaying between them when
+    # they cannot meet — and all of it is soft state that rebuilds itself in fifteen seconds.
+    #
+    # Which is also why there is no volume and no reverse proxy any more. Nothing here writes
+    # anything down, and nothing here speaks HTTP.
 
-    volumes:
-      - accounts:/var/lib/prism
-
-    # It holds two hash maps, a socket, and however many accounts somebody made. This is a
-    # ceiling to make a runaway visible, not a figure it will approach.
+    # Two hash maps and a socket. This is a ceiling to make a runaway visible, not a figure it
+    # will approach.
     deploy:
       resources:
         limits:
@@ -79,47 +68,10 @@ services:
         max-file: "3"
 
     # The binary drops every capability it is given: it binds two unprivileged ports and does
-    # nothing else a kernel would ask permission for. The accounts volume is writable; the rest
-    # of the filesystem is not, and there is nothing in it anyway.
+    # nothing else a kernel would ask permission for. Nothing on the filesystem is writable
+    # because nothing here writes.
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     read_only: true
-
-  # What makes the account API reachable over anything worth sending a password across.
-  #
-  # Caddy rather than nginx because the certificate is the whole job here, and Caddy obtains and
-  # renews one by itself: there is no certbot to install, no timer to forget, and no renewal
-  # that quietly stops. It answers the challenge on port 80 and serves on 443.
-  proxy:
-    image: caddy:2-alpine
-    container_name: prism-proxy
-    restart: unless-stopped
-
-    # Host networking again, and for a plainer reason: the API it forwards to is on the host's
-    # loopback, which a bridged container has no route to.
-    network_mode: host
-
-    environment:
-      PRISM_ACCOUNT_HOST: "${PRISM_ACCOUNT_HOST}"
-      PRISM_ACCOUNT_EMAIL: "${PRISM_ACCOUNT_EMAIL}"
-
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      # The certificate and the account key it was issued against. Losing these means asking a
-      # certificate authority for another one, which is rate limited — so they outlive the
-      # container.
-      - caddy-data:/data
-      - caddy-config:/config
-
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-volumes:
-  accounts:
-  caddy-data:
-  caddy-config:
