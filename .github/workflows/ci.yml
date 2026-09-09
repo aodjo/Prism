@@ -66,9 +66,15 @@ jobs:
         env:
           TAURI_CONFIG: '{"bundle":{"resources":[]}}'
 
+      # The VAAPI encoder is behind a feature because building it needs the libva headers,
+      # which not every machine that compiles this repository has. This job installed them, so
+      # this is where the backend gets compiled and linted — once, rather than on each of the
+      # two Linux runners in the matrix.
+      - name: Lint the VAAPI encoder
+        run: cargo clippy --package prism-core --features vaapi --all-targets
+
   build:
     name: ${{ matrix.name }}
-    needs: lint
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -118,24 +124,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Per platform, because half of this repository is behind `cfg(target_os = ...)` and code
-      # that only exists on Windows is never linted by a Linux-only job. Every bug of that
-      # shape this project has had was caught by running clippy where the code actually
-      # compiles.
-      - name: Lint on this platform
-        run: cargo clippy --workspace --all-targets
-        # See the lint job: the stream client the bundle carries is built during packaging, and
-        # this runs before it.
-        env:
-          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
-
-      # The VAAPI encoder is behind a feature because building it needs the libva headers,
-      # which not every machine that compiles this repository has. This job installed them, so
-      # this is where the backend actually gets compiled and linted.
-      - name: Lint the VAAPI encoder
-        if: startsWith(matrix.name, 'linux')
-        run: cargo clippy --package prism-core --features vaapi --all-targets
-
       # Its tests are behind the same feature, so without this they compile nowhere and run
       # nowhere. They need no GPU: what they check is the reasoning around one — which
       # profile, which entrypoint, how the quantiser moves — and that is the part that would
@@ -144,9 +132,13 @@ jobs:
         if: startsWith(matrix.name, 'linux')
         run: cargo test --package prism-core --features vaapi
 
+      # Warnings are denied here too, so the code behind this platform's `cfg` is still held to
+      # the same bar — compiling the tests is what checks it. Clippy itself runs once, in the
+      # job above, rather than five more times over the same workspace in three profiles.
       - name: Rust tests
         run: cargo test --workspace
-        # As above: the shell compiles here too, and the client it bundles is not built yet.
+        # The shell compiles here, and the client its bundle carries is built during packaging,
+        # which is after this. See the lint job.
         env:
           TAURI_CONFIG: '{"bundle":{"resources":[]}}'
 
@@ -259,7 +251,6 @@ jobs:
 
   rendezvous:
     name: rendezvous image
-    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
