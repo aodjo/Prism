@@ -751,14 +751,17 @@ async function drawRegions(column) {
         ]),
         el('dl', {}, [
           el('dt', { text: '주소' }),
-          el('dd', { text: region.url.replace(/^https?:\/\//u, '') }),
-          el('dt', { text: '응답 시간' }),
-          el('dd', { class: region.up ? '' : 'is-bad', text: region.up ? `${region.latency_ms} ms` : '응답 없음' }),
+          el('dd', { text: region.url }),
+          el('dt', { text: '마지막 보고' }),
+          el('dd', {
+            class: region.up ? '' : 'is-bad',
+            text: region.reports ? since(region.heard_seconds) : '보고 없음',
+          }),
           el('dt', { text: '대기 중인 호스트' }),
           el('dd', { text: region.reports ? String(region.hosts) : '—' }),
           el('dt', { text: '운반 중' }),
           el('dd', { text: region.reports ? `세션 ${region.carrying}개, ${region.now_mbps} Mbps` : '—' }),
-          el('dt', { text: '이번 달 트래픽' }),
+          el('dt', { text: '운반한 트래픽' }),
           el('dd', {
             text: region.limit_gb
               ? `${(region.carried_bytes / 1e9).toFixed(0)} / ${region.limit_gb} GB`
@@ -839,7 +842,7 @@ function drawRegionChip(region) {
   return el('div.chip', {}, [
     el('i', { class: `dot ${region.up ? 'good' : 'bad'}` }),
     el('span.row-text.ink-2', { text: region.name }),
-    el('span.mono.dim', { text: region.url.replace(/^https?:\/\//u, '') }),
+    el('span.mono.dim', { text: region.url }),
     el('span.push'),
     allowed > 0
       ? el('span', { style: 'display:flex;align-items:center;gap:10px' }, [
@@ -852,7 +855,10 @@ function drawRegionChip(region) {
           ]),
         ])
       : el('span.note.muted', { text: '트래픽 무제한' }),
-    el('span.note', { class: region.up ? 'ink-3' : 'is-bad', text: region.up ? `${region.latency_ms} ms` : '응답 없음' }),
+    el('span.note', {
+      class: region.up ? 'ink-3' : 'is-bad',
+      text: region.reports ? since(region.heard_seconds) : '보고 없음',
+    }),
     el('button.pill.bare.quiet', { type: 'button', text: '설정', on: { click: () => askRegion(region) } }),
   ]);
 }
@@ -897,7 +903,7 @@ async function drawRelay(column) {
             ]),
             el('span', {}, [
               el('i.swatch', { style: 'background:rgba(255,255,255,.08)' }),
-              el('span', { text: `이번 달 최대 ${region.peak_mbps} Mbps` }),
+              el('span', { text: `최대 ${region.peak_mbps} Mbps` }),
             ]),
           ]),
         ]),
@@ -1119,7 +1125,7 @@ function askRegion(region) {
     });
     const url = el('input.box.mono', {
       value: region?.url ?? '',
-      placeholder: 'https://160.251.203.14:47300',
+      placeholder: '129.225.129.149:47300',
     });
 
     const metered = el('input', {

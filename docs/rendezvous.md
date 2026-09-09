@@ -37,9 +37,37 @@ docker compose -f deploy/rendezvous/compose.yaml up -d --build
 
 One container, built from source, coming out at **2.4 MB** — one statically linked binary in an
 otherwise empty image, with no shell, no package manager and no libraries. It writes nothing, so
-there is no volume, and it speaks no HTTP, so there is nothing to put a certificate in front of.
+there is no volume, and it answers no HTTP, so there is nothing to put a certificate in front of.
 
 Two ports have to be open: **47300/udp** for signalling and **47301/udp** for the relay.
+
+#### It reports; nothing asks it
+
+The operator dashboard shows how many hosts a region is holding, what it is relaying and what
+that is costing its link. Those numbers leave the region on an outbound connection, once a
+minute, to `accounts.presm.kr`:
+
+```sh
+--report-to https://accounts.presm.kr   # where the dashboard reads from
+--link-mbps 1000                        # what this machine's plan will carry
+PRISM_REPORT_TOKEN=…                    # what proves the report came from a region
+```
+
+Without all three the region reports nothing and works exactly as it did.
+
+The direction is the whole point. Being *asked* would mean every region answering HTTPS from
+the internet — a hostname each, a certificate each, a proxy each, and two more ports open on a
+box whose entire attack surface today is one UDP port and SSH. That would turn "a machine, a
+port, and an address record" into something nobody adds a region casually. Pushing costs an
+outbound connection and nothing else, and it means the dashboard reads its own database rather
+than waiting on five machines scattered around the world before it can draw anything.
+
+`--link-mbps` is configuration because a server cannot discover what its plan allows. A wrong
+number there makes a busy region look idle or an idle one look full.
+
+**Every total a region reports is since it last started.** It keeps no state — see below — so
+there is nowhere for a monthly figure to live, and one would reset without warning on every
+deploy. The uptime travels beside the totals so whoever reads them knows what window they cover.
 
 #### Accounts are not here
 

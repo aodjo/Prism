@@ -177,6 +177,26 @@ export function particle(word, after, otherwise) {
  * @param {number} unix - Seconds since the epoch.
  * @returns {string} Something like `2시간 전`, or a date once it is older than a week.
  */
+/**
+ * Words a length of time that has already passed.
+ *
+ * The same wording as {@link ago}, for a value that arrives as a duration rather than as a
+ * moment — a region reports how long it has been running, not when it started.
+ *
+ * @param {number|null} seconds - How long ago, or null if it never happened.
+ * @returns {string} The wording, in Korean.
+ *
+ * @example
+ * since(90); // '1분 전'
+ */
+function since(seconds) {
+  if (seconds === null || seconds === undefined) {
+    return '없음';
+  }
+
+  return ago(Math.floor(Date.now() / 1000) - Math.max(0, seconds));
+}
+
 function ago(unix) {
   if (!unix) {
     return '없음';

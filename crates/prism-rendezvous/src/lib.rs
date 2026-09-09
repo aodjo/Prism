@@ -11,4 +11,5 @@ pub mod api;
 pub mod mail;
 pub mod registry;
 pub mod relay;
+pub mod report;
 pub mod sessions;

@@ -38,6 +38,7 @@ use prism_core::net::rendezvous::{
 use prism_rendezvous::mail::Mailer;
 use prism_rendezvous::registry::{Proved, Registry};
 use prism_rendezvous::relay::{Forward, Relays};
+use prism_rendezvous::report::{self, Carried, Introductions, Report};
 
 /// How often expired entries are swept out.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
@@ -138,6 +139,32 @@ struct Cli {
     /// NATs then cannot connect at all, which is the honest outcome.
     #[arg(long)]
     no_relay: bool,
+
+    /// Where to send what this region is doing, as an origin.
+    ///
+    /// The account server, which is where an operator's dashboard reads from. The region sends;
+    /// nothing asks it. That is what keeps adding a region to a machine, a port and an address
+    /// record: being asked would mean answering HTTPS from the internet, which is a hostname, a
+    /// certificate and a proxy on every box.
+    ///
+    /// Without this the region reports nothing and works exactly as it did.
+    #[arg(long)]
+    report_to: Option<String>,
+
+    /// What proves a report came from a region and not from a stranger.
+    ///
+    /// Without it anybody who can reach the account server could claim to be a region and write
+    /// whatever numbers they liked into somebody's dashboard.
+    #[arg(long, env = "PRISM_REPORT_TOKEN", hide_env_values = true)]
+    report_token: Option<String>,
+
+    /// What this machine's link will carry, in megabits per second.
+    ///
+    /// Configuration rather than measurement: a server cannot discover what its plan allows.
+    /// It is what the traffic it *is* carrying gets read against, so a wrong number here makes
+    /// a busy region look idle or an idle one look full.
+    #[arg(long, default_value_t = 1000.0)]
+    link_mbps: f64,
 }
 
 /// Parses the command line and runs the server.
@@ -203,12 +230,35 @@ fn serve(cli: &Cli) -> io::Result<()> {
 
     let region = pack_region(cli.region.as_deref().unwrap_or_default());
 
+    // Started here rather than in the loop so that a region with nothing to report to costs
+    // nothing at all: no thread, no runtime, no client.
+    let reporter = match (cli.report_to.as_deref(), cli.report_token.as_deref()) {
+        (Some(to), Some(token)) if !to.trim().is_empty() && !token.trim().is_empty() => {
+            println!("prism-rendezvous: reporting to {to}");
+            Some(report::spawn(to.to_owned(), token.to_owned())?)
+        }
+        (Some(_), _) => {
+            // Said rather than ignored. A flag that is accepted and quietly does nothing is how
+            // a dashboard stays empty while everything looks configured.
+            eprintln!(
+                "prism-rendezvous: --report-to needs --report-token (or PRISM_REPORT_TOKEN); \
+                 this region will not be listed"
+            );
+            None
+        }
+        _ => None,
+    };
+
     let mut registry = Registry::new();
+    let mut introductions = Introductions::new();
     let mut buf = [0u8; MAX_MESSAGE_LEN];
     let mut reply = [0u8; MAX_MESSAGE_LEN];
 
+    let started = Instant::now();
     let mut swept = Instant::now();
     let mut reported = Instant::now();
+    let mut carried_at_report = 0u64;
+    let mut peak_mbps = 0.0f64;
 
     loop {
         let now = Instant::now();
@@ -222,15 +272,65 @@ fn serve(cli: &Cli) -> io::Result<()> {
         }
 
         if now.duration_since(reported) >= REPORT_INTERVAL {
-            let (open, waiting) = relays
-                .lock()
-                .map_or((0, 0), |relays| (relays.open(), relays.waiting()));
+            let elapsed = now.duration_since(reported).as_secs_f64();
+            let (open, waiting, carried, sessions) = relays.lock().map_or_else(
+                |_| (0, 0, 0, Vec::new()),
+                |relays| {
+                    (
+                        relays.open(),
+                        relays.waiting(),
+                        relays.carried(),
+                        relays.carrying(),
+                    )
+                },
+            );
+
             println!(
                 "prism-rendezvous: {} hosts registered, {} challenges outstanding, \
                  {open} relays open ({waiting} waiting)",
                 registry.registered(),
                 registry.outstanding()
             );
+
+            // What the link is carrying, from what moved between two reports rather than from
+            // a rate the server would otherwise have to keep continuously. Eight bits a byte,
+            // a million bits a megabit.
+            let moved = carried.saturating_sub(carried_at_report);
+            let now_mbps = if elapsed > 0.0 {
+                (moved as f64 * 8.0) / elapsed / 1e6
+            } else {
+                0.0
+            };
+            peak_mbps = peak_mbps.max(now_mbps);
+
+            if let Some(reporter) = reporter.as_ref() {
+                reporter.offer(Report {
+                    region: cli.region.clone().unwrap_or_default(),
+                    build: env!("CARGO_PKG_VERSION").to_owned(),
+                    uptime_seconds: now.duration_since(started).as_secs(),
+                    hosts: registry.registered() as u64,
+                    outstanding: registry.outstanding() as u64,
+                    carrying: open as u64,
+                    waiting: waiting as u64,
+                    now_mbps,
+                    peak_mbps,
+                    link_mbps: cli.link_mbps,
+                    carried_bytes: carried,
+                    sessions: sessions
+                        .iter()
+                        .map(|session| Carried {
+                            host: report::hex(&session.host),
+                            client: report::hex(&session.client),
+                            token: report::hex(&session.token),
+                            since_unix: session.since_unix,
+                            bytes: session.bytes,
+                        })
+                        .collect(),
+                    introduced: introductions.recent(),
+                });
+            }
+
+            carried_at_report = carried;
             reported = now;
         }
 
@@ -257,6 +357,7 @@ fn serve(cli: &Cli) -> io::Result<()> {
         handle(
             &socket,
             &mut registry,
+            &mut introductions,
             &relays,
             relay_port,
             &region,
@@ -273,6 +374,7 @@ fn serve(cli: &Cli) -> io::Result<()> {
 fn handle(
     socket: &UdpSocket,
     registry: &mut Registry,
+    introductions: &mut Introductions,
     relays: &Mutex<Relays>,
     relay_port: Option<u16>,
     region: &[u8; REGION_LEN],
@@ -336,6 +438,10 @@ fn handle(
                 return;
             };
 
+            // Recorded once the host is known to exist, so a scan for keys nobody holds does
+            // not fill the ring with introductions that never happened.
+            introductions.record(&host, &client);
+
             // The host is told first. Its answer to that address is what opens its own
             // router's mapping, and it needs to be on its way before the client starts
             // sending, or the client's first packets arrive at a closed door.
@@ -379,6 +485,11 @@ fn handle(
             let Ok(fresh) = relay_token() else {
                 return;
             };
+
+            // Marked here rather than when the relay opens, because this is the moment that
+            // says punching failed. Whether the relay then carried anything is a separate
+            // question, and the bytes answer it.
+            introductions.relayed(&host, &client);
 
             // The same token for both asks about the same pair. Each peer discovers on its own
             // that punching failed and asks separately; two tokens would leave each waiting at
