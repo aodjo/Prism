@@ -166,6 +166,16 @@ pub enum Message {
         host: [u8; KEY_LEN],
         /// The secret that was inside the challenge.
         secret: [u8; PROOF_LEN],
+        /// Where this machine is on its own network.
+        ///
+        /// Sent because two machines behind one router cannot reach each other at the address
+        /// that router shows the world: sending there means asking it to turn a packet around,
+        /// which many will not do. The address that does work is this one, and only the host
+        /// knows it — the server sees the outside of the router and nothing behind it.
+        ///
+        /// Handed on to a client that turns out to be behind the same router, and useless to
+        /// anybody else, who cannot route to it and will not try.
+        local: SocketAddr,
     },
 
     /// The server confirms a registration and reports where the host appears to be.
@@ -202,6 +212,12 @@ pub enum Message {
         address: SocketAddr,
         /// Where the server sees the client, for its own diagnostics.
         observed: SocketAddr,
+        /// Where the host said it is on its own network.
+        ///
+        /// Worth trying first when this address and the client's own are behind the same
+        /// router, and worth nothing otherwise. The client can tell which by comparing the two
+        /// addresses above: one public address for both means one router.
+        local: SocketAddr,
     },
 
     /// The server knows no host under that key.
@@ -290,10 +306,15 @@ impl Message {
                 writer.key(ephemeral)?;
                 writer.bytes(sealed)?;
             }
-            Self::Prove { host, secret } => {
+            Self::Prove {
+                host,
+                secret,
+                local,
+            } => {
                 writer.byte(tag::PROVE)?;
                 writer.key(host)?;
                 writer.bytes(secret)?;
+                writer.address(*local)?;
             }
             Self::Registered { observed } => {
                 writer.byte(tag::REGISTERED)?;
@@ -309,10 +330,15 @@ impl Message {
                 writer.key(client)?;
                 writer.address(*address)?;
             }
-            Self::Found { address, observed } => {
+            Self::Found {
+                address,
+                observed,
+                local,
+            } => {
                 writer.byte(tag::FOUND)?;
                 writer.address(*address)?;
                 writer.address(*observed)?;
+                writer.address(*local)?;
             }
             Self::UnknownHost => {
                 writer.byte(tag::UNKNOWN_HOST)?;
@@ -367,6 +393,7 @@ impl Message {
             tag::PROVE => Self::Prove {
                 host: reader.key("prove")?,
                 secret: reader.array("prove")?,
+                local: reader.address("prove")?,
             },
             tag::REGISTERED => Self::Registered {
                 observed: reader.address("registered")?,
@@ -382,6 +409,7 @@ impl Message {
             tag::FOUND => Self::Found {
                 address: reader.address("found")?,
                 observed: reader.address("found")?,
+                local: reader.address("found")?,
             },
             tag::UNKNOWN_HOST => Self::UnknownHost,
             tag::KEEPALIVE => Self::Keepalive {

@@ -49,6 +49,12 @@ pub const MAX_REGISTRATIONS: usize = 100_000;
 #[derive(Debug, Clone, Copy)]
 struct Registration {
     address: SocketAddr,
+    /// Where the host said it is on its own network.
+    ///
+    /// Kept because two machines behind one router cannot reach each other at the address this
+    /// server sees. Never used by this server for anything — it is repeated to a client and
+    /// nothing else, and a host that lies about it has misdirected its own clients.
+    local: SocketAddr,
     refreshed: Instant,
 }
 
@@ -117,6 +123,7 @@ impl Registry {
         from: SocketAddr,
         host: &[u8; KEY_LEN],
         secret: &[u8; PROOF_LEN],
+        local: SocketAddr,
         now: Instant,
     ) -> Proved {
         let Some(pending) = self.pending.get(&from).copied() else {
@@ -156,6 +163,7 @@ impl Registry {
             *host,
             Registration {
                 address: from,
+                local,
                 refreshed: now,
             },
         );
@@ -185,10 +193,19 @@ impl Registry {
     /// Returns where a host is, if it is registered and has not gone quiet.
     #[must_use]
     pub fn lookup(&self, host: &[u8; KEY_LEN], now: Instant) -> Option<SocketAddr> {
+        self.found(host, now).map(|(address, _)| address)
+    }
+
+    /// Returns where a host is and where it said it is on its own network.
+    ///
+    /// Both, because a client behind the same router as the host needs the second and cannot
+    /// be told which it needs until it has compared the first with its own.
+    #[must_use]
+    pub fn found(&self, host: &[u8; KEY_LEN], now: Instant) -> Option<(SocketAddr, SocketAddr)> {
         let registration = self.hosts.get(host)?;
 
         (now.duration_since(registration.refreshed) <= REGISTRATION_TTL)
-            .then_some(registration.address)
+            .then_some((registration.address, registration.local))
     }
 
     /// Returns whether `from` may ask for an introduction now, and records that it did.

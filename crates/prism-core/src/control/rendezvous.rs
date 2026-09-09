@@ -208,6 +208,11 @@ pub fn register(
     let mut out = [0u8; MAX_MESSAGE_LEN];
     let mut buf = [0u8; MAX_MESSAGE_LEN];
 
+    // Where this machine is on its own network, handed to the server so it can pass it to a
+    // client that turns out to be behind the same router. The server cannot work it out: it
+    // sees the outside of the router and nothing behind it.
+    let local = crate::control::host::reachable_address(transport.local_addr()?);
+
     transport.set_read_timeout(Some(RETRY_INTERVAL))?;
     let give_up = Instant::now() + SERVER_TIMEOUT;
 
@@ -249,6 +254,7 @@ pub fn register(
                         &Message::Prove {
                             host: *identity.public(),
                             secret,
+                            local,
                         },
                         from,
                     )?;
@@ -366,6 +372,8 @@ pub fn spawn_keepalive(
 /// panel wants, and what says whether this machine's router hands out a stable mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Located {
+    /// Where the host is on its own network, worth trying when both are behind one router.
+    pub local: SocketAddr,
     /// Where to send to reach the host.
     pub address: SocketAddr,
     /// Where the server saw this machine.
@@ -442,10 +450,15 @@ pub fn lookup(
             };
 
             match message {
-                Message::Found { address, observed } => {
+                Message::Found {
+                    address,
+                    observed,
+                    local,
+                } => {
                     return Ok(Located {
                         address,
                         observed,
+                        local,
                         server: from,
                     });
                 }

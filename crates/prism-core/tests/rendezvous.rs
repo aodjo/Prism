@@ -42,6 +42,7 @@ fn every_message() -> Vec<Message> {
         Message::Prove {
             host: HOST,
             secret: [0x3b; PROOF_LEN],
+            local: v4(),
         },
         Message::Registered { observed: v4() },
         Message::Registered { observed: v6() },
@@ -56,6 +57,7 @@ fn every_message() -> Vec<Message> {
         Message::Found {
             address: v6(),
             observed: v4(),
+            local: v4(),
         },
         Message::UnknownHost,
         Message::Keepalive { host: HOST },
@@ -101,6 +103,7 @@ fn an_ipv6_address_survives_intact() {
     let message = Message::Found {
         address: v6(),
         observed: v6(),
+        local: v6(),
     };
     let len = message.encode_into(&mut buf).expect("encodes");
 
