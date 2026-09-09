@@ -60,7 +60,7 @@ jobs:
     outputs:
       image: ${{ steps.pinned.outputs.image }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # The commit CI actually ran against, not whatever the branch has moved on to since.
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
@@ -71,9 +71,9 @@ jobs:
           registry=ghcr.io/${{ github.repository_owner }}/prism-rendezvous
           echo "image=${registry,,}:${{ github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -81,7 +81,7 @@ jobs:
 
       # Both architectures, because the servers this runs on are not all the same one and an
       # image that only ran on the machine that built it is not a deployable artifact.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         id: push
         with:
           context: .
@@ -105,7 +105,7 @@ jobs:
     environment:
       name: ${{ github.event.inputs.environment || (github.event.workflow_run.head_branch == 'main' && 'production' || 'staging') }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
@@ -118,12 +118,13 @@ jobs:
           # deploy that can be pointed somewhere else by anything that can answer first.
           printf '%s\n' "${{ secrets.DEPLOY_HOST_KEY }}" > ~/.ssh/known_hosts
 
-      # The compose file and the Caddyfile travel with the deploy; the `.env` beside them does
-      # not and never should. It holds the mail key, and a server's secrets belong to the server.
+      # The compose file travels with the deploy; the `.env` beside it does not and never should.
+      # It says which region this is and which ports it answers on, and that belongs to the
+      # server rather than to the repository that builds it.
       - name: Send what describes the deployment
         run: |
           scp -P "${{ secrets.DEPLOY_PORT || 22 }}" \
-            deploy/rendezvous/compose.yaml deploy/rendezvous/Caddyfile \
+            deploy/rendezvous/compose.yaml \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/"
 
       - name: Pull the image and bring it up
@@ -144,8 +145,6 @@ jobs:
       #
       # Which container and which port come from the server's own `.env`, so that a staging
       # region beside a live one is checked as itself rather than as its neighbour.
-      # container — alive and looking healthy. So this asks the API itself, from the machine, on
-      # the loopback the proxy reaches it by.
       - name: Check it actually serves
         run: |
           ssh -p "${{ secrets.DEPLOY_PORT || 22 }}" \
