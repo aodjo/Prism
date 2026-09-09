@@ -231,18 +231,44 @@ jobs:
         with:
           path: bundles
 
-      # Flattened and renamed so that one look at a release says which file is for which
-      # machine. The updater matches on these names.
+      # Renamed so that one look at a file says what it is:
+      #
+      #     prism-<os>-<architecture>-<version>-<build>.<extension>
+      #
+      # The build number is a field of its own rather than part of the version, which is why the
+      # version here is the plain one — a development build calls itself `1.0.0-dev.851` inside,
+      # and writing that beside `851` would say the same thing twice.
+      #
+      # The extension is taken whole, because the ones that matter have two parts: `.app.tar.gz`
+      # is what the updater installs on macOS and `.dmg` is what a person double-clicks, and a
+      # rule that kept only the last dot would turn the first into `.gz`.
       - name: Collect what each platform built
+        env:
+          BASE: ${{ steps.name.outputs.base }}
+          BUILD: ${{ steps.name.outputs.build }}
         run: |
           mkdir -p release
           for dir in bundles/prism-*; do
             platform="${dir#bundles/prism-}"
-            find "$dir" \( -name '*.tar.gz' -o -name '*.tar.gz.sig' -o -name '*-setup.exe' \
-              -o -name '*-setup.exe.sig' -o -name '*.dmg' -o -name '*.AppImage' \
-              -o -name '*.AppImage.sig' -o -name '*.deb' \) -type f | while read -r file; do
-              base="$(basename "$file")"
-              cp "$file" "release/${platform}-${base}"
+
+            find "$dir" -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sig' \
+              -o -name '*.zip' -o -name '*.zip.sig' -o -name '*.dmg' -o -name '*.exe' \
+              -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) | while read -r file; do
+              name="$(basename "$file")"
+
+              case "$name" in
+                *.app.tar.gz.sig)     ext='.app.tar.gz.sig' ;;
+                *.app.tar.gz)         ext='.app.tar.gz' ;;
+                *.nsis.zip.sig)       ext='.nsis.zip.sig' ;;
+                *.nsis.zip)           ext='.nsis.zip' ;;
+                *.AppImage.tar.gz.sig) ext='.AppImage.tar.gz.sig' ;;
+                *.AppImage.tar.gz)    ext='.AppImage.tar.gz' ;;
+                *.tar.gz.sig)         ext='.tar.gz.sig' ;;
+                *.tar.gz)             ext='.tar.gz' ;;
+                *)                    ext=".${name##*.}" ;;
+              esac
+
+              cp "$file" "release/prism-${platform}-${BASE}-${BUILD}${ext}"
             done
           done
           ls -la release

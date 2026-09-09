@@ -323,15 +323,43 @@ async function update(env: Env, path: string, channel: string): Promise<Response
 }
 
 /**
+ * What the updater calls a platform, and what the release files call it.
+ *
+ * Tauri asks with the names Rust uses for a target — `darwin`, `aarch64` — and the files are
+ * named for what somebody downloading one would call their machine. The two have to be mapped
+ * somewhere and this is the only place that sees both.
+ */
+const PLATFORMS: Record<string, string> = {
+  darwin: 'macos',
+  windows: 'windows',
+  linux: 'linux',
+  aarch64: 'arm64',
+  x86_64: 'x64',
+};
+
+/**
+ * Which extension carries an installable update on each platform.
+ *
+ * Not the one a person downloads. A `.dmg` is for double-clicking and cannot be applied to a
+ * running application; what the updater wants is the archive beside it. Offering the wrong one
+ * is an update that downloads and then does nothing.
+ */
+const UPDATABLE: Record<string, string> = {
+  darwin: '.app.tar.gz',
+  windows: '.nsis.zip',
+  linux: '.AppImage.tar.gz',
+};
+
+/**
  * Finds the bundle and its signature for one platform in a release's assets.
  *
- * Named by what Tauri builds: an `.app.tar.gz` for macOS and an NSIS `-setup.exe` for Windows,
- * each beside a `.sig` of the same name. A release missing the pair for a platform answers
- * nothing for it rather than pointing at something else.
+ * A release missing the pair for a platform answers nothing for it rather than pointing at
+ * something else: an unsigned or mismatched file would be refused by the application anyway,
+ * and refusing it here says so without spending somebody's bandwidth first.
  *
  * @param {{name: string, browser_download_url: string}[]} assets - What the release carries.
  * @param {string} target - `darwin`, `windows` or `linux`.
- * @param {string} arch - `aarch64`, `x86_64`.
+ * @param {string} arch - `aarch64` or `x86_64`.
  * @returns {{url: string, signature: string} | null} The pair, or null.
  */
 function assetFor(
@@ -339,9 +367,17 @@ function assetFor(
   target: string,
   arch: string,
 ): { url: string; signature: string } | null {
+  const os = PLATFORMS[target];
+  const machine = PLATFORMS[arch];
+  const extension = UPDATABLE[target];
+
+  if (!os || !machine || !extension) {
+    return null;
+  }
+
+  const prefix = `prism-${os}-${machine}-`;
   const wanted = assets.find(
-    (asset) =>
-      asset.name.includes(target) && asset.name.includes(arch) && !asset.name.endsWith('.sig'),
+    (asset) => asset.name.startsWith(prefix) && asset.name.endsWith(extension),
   );
 
   if (!wanted) {

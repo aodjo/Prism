@@ -61,6 +61,11 @@ config.version = version;
 writeFileSync(CONFIG, `${JSON.stringify(config, null, 2)}\n`);
 
 // Printed as `key=value` lines so a workflow can read them straight into its own environment.
+//
+// `version` is what the updater compares and what the application calls itself. `base` is the
+// same thing with the prerelease taken off, which is what a filename wants: the build number is
+// already a field of its own there, and `1.0.0-dev.851-851` says it twice.
 console.log(`version=${version}`);
+console.log(`base=${VERSION}`);
 console.log(`channel=${channel}`);
 console.log(`build=${build}`);
