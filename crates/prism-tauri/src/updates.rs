@@ -66,13 +66,18 @@ pub struct Available {
 
 /// Returns what this build is.
 ///
+/// The version is the one the bundle carries, which is the number the updater compares. It is
+/// not `CARGO_PKG_VERSION`: the crate is versioned with the workspace and stays at `0.0.0` in
+/// every build ever made, so a window told that number showed `0.0.0` before an update and
+/// `0.0.0` afterwards — which is indistinguishable from an update that never happened.
+///
 /// # Errors
 ///
 /// Fails only if the settings lock was poisoned.
 #[tauri::command]
-pub fn build_info(held: State<'_, crate::Held>) -> Result<Build, String> {
+pub fn build_info(app: AppHandle, held: State<'_, crate::Held>) -> Result<Build, String> {
     Ok(Build {
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        version: app.package_info().version.to_string(),
         build: BUILD.to_owned(),
         channel: CHANNEL.to_owned(),
         following: following(&held)?,

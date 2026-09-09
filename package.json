@@ -13,7 +13,7 @@
     "dev": "pnpm run client",
     "lint": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
     "lint:cross": "cargo clippy --workspace --exclude prism-rendezvous --exclude prism-tauri --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --exclude prism-rendezvous --exclude prism-tauri --exclude prism-cli --exclude prism-stream --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
-    "package": "pnpm run build && tauri build",
+    "package": "node scripts/version.mjs && pnpm run build && tauri build",
     "test": "pnpm -r test && pnpm run typecheck && cargo test --workspace",
     "test:rs": "cargo test --workspace",
     "test:ts": "pnpm -r test",

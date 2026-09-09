@@ -12,15 +12,21 @@
  * version that has not been released yet.
  *
  *     production   1.0.0            tagged by hand on main
- *     development  1.1.0-dev.847    the next version, build 847
+ *     development  1.0.0-dev.847    a step toward 1.0.0, build 847
  *
- * `1.1.0-dev.848 > 1.1.0-dev.847`, and `1.1.0 > 1.1.0-dev.anything`. So a development build
+ * `1.0.0-dev.848 > 1.0.0-dev.847`, and `1.0.0 > 1.0.0-dev.anything`. So a development build
  * updates to the next development build, and the day the release is cut it updates to that and
  * stops being a prerelease. Nobody has to move channel for it to happen.
  *
  * Reads `PRISM_CHANNEL` (`production` or `development`, default `development`) and
  * `PRISM_BUILD` (the CI run number, default `0`). Writes `tauri.conf.json` in place and prints
  * the version, so a workflow can capture it.
+ *
+ * `pnpm package` runs this first, and that is not optional. Skipping it leaves the version the
+ * bundler reads at whatever was last committed — `1.0.0` — while the binary follows the
+ * `development` line, whose releases are all `1.0.0-dev.n`. Every one of those is semver-*lower*
+ * than `1.0.0`, so the updater compares them, finds nothing greater, and such a build can never
+ * install anything for as long as it exists.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';

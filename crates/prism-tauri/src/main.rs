@@ -44,12 +44,12 @@ fn say(error: &dyn std::error::Error) -> String {
 
 /// Returns the Prism version string.
 ///
-/// The first thing a window asks for, and the proof that the shell and the core were built from
-/// one commit.
+/// The version the bundle carries, which is the one the updater compares — not the crate's,
+/// which is the workspace's `0.0.0` in every build there has ever been.
 #[tauri::command]
 #[must_use]
-fn version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+fn version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 /// Returns the wire format revision this build speaks.
