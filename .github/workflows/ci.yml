@@ -10,12 +10,20 @@ on:
   pull_request:
     branches: [main, develop]
 
-# A second push to the same branch makes the first run's answer worthless, and six jobs across
-# four architectures is not a cheap thing to leave running for an answer nobody will read. The
-# default branches are exempt: their runs are the record of what was merged.
+# A second push to the same branch makes the first run's answer worthless, so the first is
+# stopped rather than left to finish into a queue behind it.
+#
+# Grouped by branch rather than by `github.ref`, which is not the branch on a pull request — it
+# is `refs/pull/46/merge`, and a run of the merge commit is a different group from a run of the
+# push that produced it. Two runs of the same work then wait for each other instead of one
+# replacing the other, which is what happened.
+#
+# `main` and `develop` are exempt: their runs are the record of what was merged, and a record
+# that can be cancelled by the next push is not one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/develop' }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: >-
+    ${{ github.ref_name != 'main' && github.ref_name != 'develop' }}
 
 env:
   CARGO_TERM_COLOR: always
