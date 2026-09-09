@@ -397,6 +397,18 @@ export interface PrismApi {
   onAccount(listener: (state: AccountState) => void): void;
 
   /**
+   * Registers a listener for a newer build being available.
+   *
+   * Called at most once per launch, and only when there is one. Installing it is a separate
+   * call, because it ends with the application restarting and that is nobody's decision to make
+   * on somebody's behalf while they are watching another machine.
+   *
+   * @param {(available: Available) => void} listener - Called with what was found.
+   * @returns {void}
+   */
+  onUpdate(listener: (available: Available) => void): void;
+
+  /**
    * Asks the server to send a signup code to an address.
    *
    * Nothing is created by this. An account that existed before its address was proved would be
