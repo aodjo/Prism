@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
 };
 
-use crate::input::{Injector, InputError, PointerSample};
+use crate::input::{HeldKeys, Injector, InputError, PointerSample};
 use crate::net::packet::{InputEvent, MouseButton};
 
 /// One notch of a scroll wheel, the unit `mouseData` counts in.
@@ -35,6 +35,8 @@ const WHEEL_DELTA: i32 = 120;
 /// Injects input events onto this machine.
 pub struct WindowsInjector {
     landing: bool,
+    buttons: [bool; 3],
+    keys: HeldKeys,
 }
 
 impl WindowsInjector {
@@ -76,8 +78,19 @@ impl WindowsInjector {
         ))
     }
 
+    /// Returns the keys the injector is holding down.
+    ///
+    /// Public so a caller can see whether anything is still held, and so the release path
+    /// can be tested without a machine to press keys on.
+    #[must_use]
+    pub fn held_keys(&self) -> HeldKeys {
+        self.keys
+    }
+
     /// Presses or releases a pointer button.
     fn press_button(&mut self, button: MouseButton, pressed: bool) -> Result<(), InputError> {
+        self.buttons[button as usize] = pressed;
+
         let flags = match (button, pressed) {
             (MouseButton::Left, true) => MOUSEEVENTF_LEFTDOWN,
             (MouseButton::Left, false) => MOUSEEVENTF_LEFTUP,
@@ -135,13 +148,25 @@ impl WindowsInjector {
             flags |= KEYEVENTF_KEYUP;
         }
 
-        self.send(key_input(scan, flags))
+        let outcome = self.send(key_input(scan, flags));
+
+        // A press is remembered only once `SendInput` has taken it, and a release is
+        // forgotten whether it did or not: a key-down that never went out must not be
+        // released later, and a key-up the system refuses is not worth attempting again on
+        // every cleanup for the rest of the session.
+        self.keys.set(usage, pressed && outcome.is_ok());
+
+        outcome
     }
 }
 
 impl Injector for WindowsInjector {
     fn new() -> Result<Self, InputError> {
-        Ok(Self { landing: false })
+        Ok(Self {
+            landing: false,
+            buttons: [false; 3],
+            keys: HeldKeys::default(),
+        })
     }
 
     fn inject(&mut self, event: InputEvent) -> Result<(), InputError> {
@@ -151,6 +176,28 @@ impl Injector for WindowsInjector {
             InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
             InputEvent::Key { usage, pressed } => self.press_key(usage, pressed),
         }
+    }
+
+    fn release_all(&mut self) -> Result<(), InputError> {
+        // The held set is copied out first because releasing a key edits it, and because
+        // an empty set is the state to leave behind even if a send fails: a key this
+        // machine will not release is not a key worth trying again on the next cleanup.
+        let held = self.keys;
+        let mut outcome = Ok(());
+
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            if self.buttons[button as usize] {
+                outcome = outcome.and(self.press_button(button, false));
+            }
+        }
+
+        // `and` keeps the first failure while still evaluating the rest, because the whole
+        // point is that every key comes up.
+        for usage in held.iter() {
+            outcome = outcome.and(self.press_key(usage, false));
+        }
+
+        outcome
     }
 
     fn injection_is_landing(&self) -> bool {
