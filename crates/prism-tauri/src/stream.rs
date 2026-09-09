@@ -588,11 +588,16 @@ fn wanted(host: &str, address: &str, settings: &Settings) -> ipc::Start {
 
 /// Finds the process that draws the stream.
 ///
-/// Four places, in the order they should win: an explicit override for somebody testing a
-/// build, the copy shipped beside the shell, the one a macOS bundle keeps in its resources, and
-/// whichever build profile a development run left it in. Everything but the override is
-/// relative to this executable rather than to the working directory, because a shell launched
-/// from a dock icon has no working directory worth the name.
+/// Three places, in the order they should win: an explicit override for somebody testing a
+/// build, the copy shipped beside the shell, and whichever build profile a development run left
+/// it in. Everything but the override is relative to this executable rather than to the working
+/// directory, because a shell launched from a dock icon has no working directory worth the name.
+///
+/// Beside the shell covers every installer, which is the point of shipping it as an external
+/// binary rather than as a bundle resource: `Contents/MacOS` on macOS, the install root beside
+/// the shell on Windows, `usr/bin` in a deb or an AppImage. A resource would land in
+/// `Contents/Resources` and in `usr/lib/Prism` — the second of which nothing here ever looked
+/// in, so a Linux package could not open a stream at all.
 ///
 /// # Errors
 ///
@@ -610,14 +615,6 @@ fn find_stream() -> Result<PathBuf, String> {
         && let Some(beside) = exe.parent()
     {
         looked.push(beside.join(&name));
-        // A macOS bundle runs from `Contents/MacOS` and keeps what it ships in
-        // `Contents/Resources`, under the directory the bundle configuration names.
-        let resources = beside.join("..").join("Resources");
-        looked.push(resources.join("sidecar").join(&name));
-        looked.push(resources.join(&name));
-        // Everywhere else the same files sit beside the executable rather than above it.
-        looked.push(beside.join("resources").join("sidecar").join(&name));
-        looked.push(beside.join("resources").join(&name));
         // A development run has the shell in one of the two profile directories and the stream
         // in either, since the two are built by separate commands and nothing makes them agree.
         looked.push(beside.join("..").join("release").join(&name));

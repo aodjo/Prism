@@ -27,8 +27,8 @@
       "icons/icon.ico",
       "icons/icon.icns"
     ],
-    "resources": [
-      "sidecar/*"
+    "externalBin": [
+      "sidecar/prism-stream"
     ],
     "copyright": "Prism",
     "category": "Utility",

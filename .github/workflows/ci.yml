@@ -63,16 +63,16 @@ jobs:
       # this job fails fastest, and because a warning that only appears on Linux is still a
       # warning a reviewer should see before three build jobs have finished.
       #
-      # The shell's bundle lists the stream client as a resource, and Tauri checks that the file
-      # is there while its build script runs — which is every time this crate is compiled, not
-      # only when an installer is being made. The client is built by `scripts/sidecar.mjs` as
-      # part of packaging, so at this point it does not exist, and linting would stop on a
-      # missing file it is not linting. Told here that the bundle has no resources, which is
-      # true of a build that produces no bundle. `pnpm package` below runs with the real
-      # configuration and is what proves the client actually ships.
+      # The shell's bundle lists the stream process as an external binary, and Tauri checks that
+      # the file is there while its build script runs — which is every time this crate is
+      # compiled, not only when an installer is being made. It is built by `scripts/sidecar.mjs`
+      # as part of packaging, so at this point it does not exist, and linting would stop on a
+      # missing file it is not linting. Told here that the bundle has none, which is true of a
+      # build that produces no bundle. `pnpm package` below runs with the real configuration and
+      # is what proves the stream process actually ships.
       - run: cargo clippy --workspace --all-targets
         env:
-          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
 
       # The VAAPI encoder is behind a feature because building it needs the libva headers,
       # which not every machine that compiles this repository has. This job installed them, so
@@ -145,10 +145,10 @@ jobs:
       # job above, rather than five more times over the same workspace in three profiles.
       - name: Rust tests
         run: cargo test --workspace
-        # The shell compiles here, and the client its bundle carries is built during packaging,
-        # which is after this. See the lint job.
+        # The shell compiles here, and the stream process its bundle carries is built during
+        # packaging, which is after this. See the lint job.
         env:
-          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
 
       - name: TypeScript tests
         run: pnpm test:ts
@@ -176,10 +176,58 @@ jobs:
       # window is a webview the system already has, and everything behind it is this repository's
       # own code.
       #
-      # Not signed by a developer certificate, so macOS and Windows both say so on first launch.
-      # It *is* signed for the updater: that key says an update came from this repository and is
-      # checked by the application before a byte of it runs, which is a different question from
-      # whether the operating system has heard of the publisher.
+      # Two different signatures, answering two different questions. The updater's minisign key
+      # says an update came from this repository, and the application checks it before a byte of
+      # it runs. A developer certificate says the operating system has heard of the publisher,
+      # and is what decides whether anybody gets to run it in the first place.
+      #
+      # The second is set up below and only on macOS. Windows still has none, so SmartScreen
+      # still warns on first launch there.
+      #
+      # Written into the environment rather than passed here, because Tauri reads these with
+      # `var_os` and cannot tell an empty value from a deliberate one: an unset secret renders as
+      # the empty string, and `APPLE_CERTIFICATE=""` makes it try to import a certificate that is
+      # not there and fail the build. So a fork, or this repository before the secrets exist,
+      # simply signs ad-hoc as it did before.
+      - name: Take out the developer certificate, if there is one
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -z "$CERTIFICATE" ]; then
+            echo "no developer certificate; this build will be signed ad-hoc"
+            exit 0
+          fi
+
+          {
+            echo "APPLE_CERTIFICATE<<PRISM_EOF"
+            echo "$CERTIFICATE"
+            echo "PRISM_EOF"
+            echo "APPLE_CERTIFICATE_PASSWORD<<PRISM_EOF"
+            echo "$CERTIFICATE_PASSWORD"
+            echo "PRISM_EOF"
+            echo "APPLE_SIGNING_IDENTITY<<PRISM_EOF"
+            echo "$IDENTITY"
+            echo "PRISM_EOF"
+          } >> "$GITHUB_ENV"
+
+          # Notarisation is asked for by the presence of credentials and nothing else. The key
+          # has to be a file on disk, because that is what `APPLE_API_KEY_PATH` names.
+          if [ -n "$API_KEY_P8" ]; then
+            mkdir -p ~/private_keys
+            printf '%s' "$API_KEY_P8" > ~/private_keys/AuthKey_"$API_KEY".p8
+            {
+              echo "APPLE_API_KEY=$API_KEY"
+              echo "APPLE_API_ISSUER=$API_ISSUER"
+              echo "APPLE_API_KEY_PATH=$HOME/private_keys/AuthKey_$API_KEY.p8"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: Package the application
         run: pnpm package
         env:
@@ -187,6 +235,37 @@ jobs:
           PRISM_BUILD: ${{ steps.name.outputs.build }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # Tauri notarises and staples the `.app` and stops there. The `.dmg` is what a person
+      # actually downloads, and an unstapled one is quarantined on a machine that has never
+      # seen it before — which is every machine that matters.
+      - name: Notarise the disk image
+        if: runner.os == 'macOS' && env.APPLE_API_KEY_PATH != ''
+        run: |
+          dmg=$(find target/release/bundle/dmg -maxdepth 1 -name '*.dmg')
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$dmg"
+
+      # What proves it worked. Every part of this has failed silently at least once: an
+      # executable inside the bundle signed by nobody, a ticket that was never stapled, a
+      # certificate that turned out to be the wrong kind. None of them stops a build.
+      - name: It is signed, stapled, and the stream process is signed too
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          app=target/release/bundle/macos/Prism.app
+
+          codesign --verify --deep --strict --verbose=4 "$app" 2>&1 | tee /tmp/verify
+          # `--deep` does not descend into Contents/Resources, so this line is the only thing
+          # that says the stream process was signed as code rather than copied in as data.
+          grep -q 'validated:.*Contents/MacOS/prism-stream' /tmp/verify
+
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -q 'flags=.*runtime'
+          xcrun stapler validate "$app"
+          spctl --assess --verbose=4 --type execute "$app" 2>&1 | grep -q 'source=Notarized Developer ID'
 
       - uses: actions/upload-artifact@v7
         with:
