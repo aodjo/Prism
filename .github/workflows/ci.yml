@@ -425,10 +425,70 @@ jobs:
   # Separate from the job above because that one proves the image works and this one publishes
   # it. Both architectures, because the machines this runs on are not all the same one and an
   # image that only runs where it was built is not a deployable artifact.
+  # Whether this push touched the server the regions run.
+  #
+  # Cheap, and it decides whether the two jobs below run at all: a change to the window, the
+  # shell or the dashboard has nothing to do with five machines in five countries, and
+  # rebuilding an image and recreating every container to ship it is minutes spent on nothing.
+  touched:
+    name: what this push touched
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    outputs:
+      rendezvous: ${{ steps.look.outputs.rendezvous }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history, because this compares two commits and a shallow clone may not
+          # have the older one.
+          fetch-depth: 0
+
+      - id: look
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Listed one argument at a time rather than expanded from a string. Word splitting
+          # is a shell-by-shell behaviour — zsh does not do it — and a path list that quietly
+          # became one long argument would match nothing, answer "unchanged" every time, and
+          # leave five regions running whatever they were running the day it broke.
+          #
+          # `prism-core` and the manifests are here because the server is built from them: a
+          # change there changes the binary even though nothing under `crates/prism-rendezvous`
+          # moved.
+          look() {
+            git "$@" -- \
+              crates/prism-rendezvous \
+              crates/prism-core \
+              deploy/rendezvous \
+              Cargo.lock \
+              Cargo.toml
+          }
+
+          # A first push to a branch, or a force push, reports a parent of all zeroes. Nothing
+          # can be compared against that, so the answer is yes — deploying when it was not
+          # needed costs minutes, and not deploying when it was needed leaves a region running
+          # something nobody meant to ship.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE" 2>/dev/null; then
+            echo "no comparable parent; treating the server as changed"
+            echo "rendezvous=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if look diff --quiet "$BEFORE" "$SHA"; then
+            echo "the server is untouched; the image and the regions stay as they are"
+            echo "rendezvous=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "the server changed:"
+            look diff --name-only "$BEFORE" "$SHA" | sed 's/^/  /'
+            echo "rendezvous=true" >> "$GITHUB_OUTPUT"
+          fi
+
   image:
     name: publish the image
-    needs: rendezvous
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: [rendezvous, touched]
+    if: needs.touched.outputs.rendezvous == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
