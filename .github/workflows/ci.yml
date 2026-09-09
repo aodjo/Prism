@@ -90,6 +90,17 @@ jobs:
         include:
           - name: macos-arm64
             os: macos-latest
+          # Intel Macs, which had no build at all until this line. An arm64 binary does not run
+          # on one and cannot be made to: Rosetta translates Intel code for Apple Silicon, not
+          # the other way round — so every release so far was uninstallable on half the Macs
+          # people own.
+          #
+          # A separate artifact rather than a universal binary, because the updater already
+          # keys on architecture: the endpoint maps `darwin/x86_64` to `macos-x64` and has done
+          # since it was written. And this job runs beside the others instead of doubling the
+          # length of one.
+          - name: macos-x64
+            os: macos-15-intel
           - name: windows-x64
             os: windows-latest
           # A runner of the architecture rather than a cross build from the x64 one: half of
@@ -448,7 +459,14 @@ jobs:
         with:
           context: .
           file: deploy/rendezvous/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # What the regions actually run, and nothing else. Every one of the five is x86_64;
+          # the arm64 half was built under emulation for machines that do not exist, and it was
+          # seventeen of this job's nineteen minutes.
+          #
+          # An arm region is a `ubuntu-24.04-arm` runner building its half natively and a
+          # manifest joining the two — which is a change to make when there is one, not a
+          # standing cost paid on every push in case there ever is.
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.name.outputs.image }}
           cache-from: type=gha
