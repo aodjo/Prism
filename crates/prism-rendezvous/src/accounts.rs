@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use prism_core::account::secret::{SALT_LEN, SECRET_LEN, auth_matches};
 use prism_core::account::totp;
@@ -652,24 +652,15 @@ impl Accounts {
             reason: err.to_string(),
         })?;
 
-        let temporary = self.path.with_extension("tmp");
-        write_then_rename(&temporary, &self.path, &json).map_err(|err| AccountError::Store {
+        // Durably, and this file more than any other. It is the only copy of every account's
+        // sealed key and second factor, and [`Accounts::open`] refuses to start on a store it
+        // cannot parse — so a half-written one is not a lost account but a server that will not
+        // come back up.
+        prism_core::store::replace(&self.path, &json).map_err(|err| AccountError::Store {
             doing: "written",
             reason: err.to_string(),
         })
     }
-}
-
-/// Writes a file and moves it into place, so a reader never sees a half-written one.
-fn write_then_rename(temporary: &Path, final_path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = final_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(temporary, bytes)?;
-    std::fs::rename(temporary, final_path)
 }
 
 /// Whether a name is one an account may have.
