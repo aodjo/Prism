@@ -158,10 +158,26 @@ pub fn fit(height: f64, app: AppHandle) -> Result<(), String> {
 
 /// Closes setup and opens the home window.
 ///
+/// Writes down that setup has been reached the end of, which is what the next launch reads. The
+/// permissions step cannot be finished in one sitting — macOS reads a new grant only when the
+/// application starts again — so without this the restart in the middle of setup looks like an
+/// ordinary launch and lands on the home window instead of back where somebody was.
+///
 /// # Errors
 ///
-/// Fails if the home window cannot be built.
+/// Fails if the settings lock was poisoned, if they cannot be written, or if the home window
+/// cannot be built.
 #[tauri::command]
-pub fn finish_setup(app: AppHandle) -> Result<(), String> {
+pub fn finish_setup(app: AppHandle, held: tauri::State<'_, crate::Held>) -> Result<(), String> {
+    {
+        let mut settings = held
+            .0
+            .lock()
+            .map_err(|_| "the settings lock was poisoned".to_owned())?;
+
+        settings.setup_finished = true;
+        crate::settings::save(&settings)?;
+    }
+
     open_home(&app).map_err(|error| error.to_string())
 }

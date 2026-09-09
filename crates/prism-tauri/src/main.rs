@@ -164,6 +164,10 @@ fn sign_out(
             .map_err(|_| "the settings lock was poisoned".to_owned())?;
 
         settings.nickname = String::new();
+        // Whoever signs in next starts at the beginning, which includes being shown what this
+        // machine still has to allow. Leaving it set would carry one person's answer over to
+        // somebody else's first run.
+        settings.setup_finished = false;
         settings::save(&settings)?;
     }
 
@@ -174,11 +178,18 @@ fn sign_out(
 
 /// The page a launch opens.
 ///
-/// Being signed in is the answer to what setup asks, so it is the whole of the question here. A
-/// separate record that setup had been finished could disagree with it, and did: signing out
-/// left it behind, so the application kept opening on a home window built out of an account it
-/// was no longer on. The other thing setup asks about is permissions, and those are the system's
-/// answer to give, read afresh every time rather than remembered.
+/// Both halves have to be true to skip setup: there has to be an account, and somebody has to
+/// have been all the way through. Neither answers for the other.
+///
+/// The account alone is not enough because setup cannot be finished in one sitting. Its
+/// permissions step ends by sending somebody to System Settings, and macOS reads a new grant
+/// only when the application starts again — so a launch in the middle of setup looks exactly
+/// like an ordinary one by somebody signed in, and used to land on the home window, skipping
+/// the step that had just sent them away.
+///
+/// The record alone is not enough either, and that was the earlier bug: consulted on its own it
+/// outlived a sign-out, and the application kept opening on a home window built out of an
+/// account it was no longer on. Reading both is what makes each one's failure harmless.
 ///
 /// The harness may override it, which is how a picture gets taken of a window this machine's own
 /// state would not otherwise show.
@@ -187,7 +198,9 @@ fn opening() -> (&'static str, &'static str) {
         Some("setup.html") => ("setup", "setup.html"),
         Some("index.html") => ("settings", "index.html"),
         Some(_) => ("home", "home.html"),
-        None if account::signed_in_before() => ("home", "home.html"),
+        None if account::signed_in_before() && settings::load().setup_finished => {
+            ("home", "home.html")
+        }
         None => ("setup", "setup.html"),
     }
 }

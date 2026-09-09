@@ -329,6 +329,15 @@ function Setup(): JSX.Element {
       setSettings(stored);
       setSignedIn(account.email);
       setArrivedSignedIn(account.email !== null);
+
+      // Arriving already signed in means this window was opened by a launch that found an
+      // account but no finished setup, and there is only one way to be in that state: the
+      // permissions step sent somebody to System Settings, and macOS reads a new grant only
+      // when the application starts again. They are coming back to that step, so start there
+      // rather than walking them through the welcome and the introduction a second time.
+      if (account.email !== null) {
+        setStep('permissions');
+      }
     })();
   }, []);
 

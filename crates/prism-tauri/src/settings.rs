@@ -57,6 +57,19 @@ pub struct Settings {
     pub addresses: BTreeMap<String, String>,
     /// The machines somebody wants at the front of the list, by public key.
     pub pinned: Vec<String>,
+    /// Whether somebody has been all the way through setup on this machine.
+    ///
+    /// Needed because the permissions step cannot be finished in one sitting: macOS only reads a
+    /// new grant when the application starts again, so setup ends with a restart in the middle
+    /// of it. Without a record of having reached the end, that restart looks exactly like an
+    /// ordinary launch by somebody signed in, and the window that opens is the home one.
+    ///
+    /// This is not a second answer to "is there an account" — it is only ever consulted
+    /// alongside that one, never instead of it. An earlier version of this flag was consulted
+    /// on its own and outlived a sign-out, which opened a home window built on an account the
+    /// machine was no longer on.
+    #[serde(default)]
+    pub setup_finished: bool,
 }
 
 impl Default for Settings {
@@ -82,6 +95,7 @@ impl Default for Settings {
             smooth: false,
             addresses: BTreeMap::new(),
             pinned: Vec::new(),
+            setup_finished: false,
         }
     }
 }
