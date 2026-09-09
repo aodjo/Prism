@@ -25,6 +25,7 @@ import {
   PLACES,
   remember,
   session,
+  since,
   size,
   state,
 } from './ui.js';
@@ -320,7 +321,6 @@ function drawStatusBar() {
       el('i.live-divider'),
       reading('리전', [
         el('span.mono', { class: healthy ? '' : 'is-bad', text: `${up}/${regions.length}` }),
-        el('span.fine.muted', { text: regions.map((region) => region.name).join(', ') || '없음' }),
       ]),
       el('i.live-divider'),
       reading('D1', [el('span.mono.ink-2', { text: `${database.latency_ms ?? '—'}ms` })]),
