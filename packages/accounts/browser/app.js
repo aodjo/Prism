@@ -1114,85 +1114,90 @@ function askSignOutEverybody() {
  */
 function askRegion(region) {
   modal((close) => {
-    const name = el('input.box', { value: region?.name ?? '', readonly: Boolean(region) });
-    const url = el('input.box.mono', { value: region?.url ?? 'https://' });
-    const metered = el('input', { type: 'checkbox', checked: Boolean(region?.limit_gb) });
-    const limit = el('input.box.mono', {
-      type: 'number',
-      min: '1',
-      value: region?.limit_gb ?? 500,
-      disabled: !region?.limit_gb,
+    const name = el('input.box', {
+      value: region?.name ?? '',
+      readonly: Boolean(region),
+      placeholder: '오사카',
+    });
+    const url = el('input.box.mono', {
+      value: region?.url ?? '',
+      placeholder: 'https://160.251.203.14:47300',
     });
 
+    const metered = el('input', {
+      type: 'checkbox',
+      checked: Boolean(region?.limit_gb),
+      'aria-label': '트래픽 상한이 있는 요금제',
+    });
+    const limit = el('input', { type: 'number', min: '1', value: region?.limit_gb ?? 500 });
+
+    // Hidden rather than greyed out when the plan does not meter: a number nobody may edit is
+    // still a number somebody reads, and this one would be a limit that does not exist.
+    const allowance = el('div.field', { hidden: !region?.limit_gb }, [
+      el('div.amount', {}, [limit, el('span', { text: 'GB / 월' })]),
+    ]);
+
     metered.addEventListener('change', () => {
-      limit.disabled = !metered.checked;
+      allowance.hidden = !metered.checked;
+
+      if (metered.checked) {
+        limit.focus();
+        limit.select();
+      }
+    });
+
+    const save = el('button.pill.primary', { type: 'button', text: '저장' });
+
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+
+      try {
+        const body = {
+          url: url.value.trim(),
+          limit_gb: metered.checked ? Number(limit.value) : null,
+        };
+
+        await (region
+          ? call(`/v1/admin/regions/${encodeURIComponent(region.name)}`, { method: 'PATCH', body })
+          : call('/v1/admin/regions', { method: 'POST', body: { name: name.value.trim(), ...body } }));
+
+        close();
+        await refresh();
+      } catch (error) {
+        save.disabled = false;
+        alert(error.message);
+      }
     });
 
     return el('div.modal', {}, [
       el('h2.heading', { text: region ? `${region.name} 설정` : '리전 추가' }),
-      el('div.field', { style: 'padding-top:20px' }, [
+      el('div.field', { style: 'padding-top:24px' }, [
         el('div.field-cap', {}, [el('span', { text: '이름' })]),
         name,
       ]),
-      el('div.field', {}, [
-        el('div.field-cap', {}, [el('span', { text: '주소' })]),
-        url,
+      el('div.field', {}, [el('div.field-cap', {}, [el('span', { text: '주소' })]), url]),
+      el('label.control-row', {}, [
+        el('span', { text: '트래픽 상한이 있는 요금제' }),
+        el('span.switch', {}, [metered, el('i')]),
       ]),
-      el('div.field', {}, [
-        el('label.field-cap', { style: 'cursor:pointer' }, [
-          el('span', { text: '트래픽 상한이 있는 요금제' }),
-          metered,
-        ]),
-        el('div', { style: 'display:flex;align-items:center;gap:10px' }, [
-          limit,
-          el('span.note.muted', { text: 'GB / 월' }),
-        ]),
-      ]),
+      allowance,
       el('div.modal-actions', {}, [
         region &&
-          el('button.pill.bare.danger', {
+          el('button.pill.bare.danger.apart', {
             type: 'button',
             text: '리전 제거',
             on: {
               click: async () => {
-                await call(`/v1/admin/regions/${encodeURIComponent(region.name)}`, { method: 'DELETE' });
+                await call(`/v1/admin/regions/${encodeURIComponent(region.name)}`, {
+                  method: 'DELETE',
+                });
                 close();
                 await refresh();
               },
             },
           }),
         el('button.pill', { type: 'button', text: '취소', on: { click: close } }),
-        el('button.pill.on', {
-          type: 'button',
-          text: '저장',
-          on: {
-            click: async () => {
-              const body = {
-                url: url.value.trim(),
-                limit_gb: metered.checked ? Number(limit.value) : null,
-              };
-
-              try {
-                if (region) {
-                  await call(`/v1/admin/regions/${encodeURIComponent(region.name)}`, {
-                    method: 'PATCH',
-                    body,
-                  });
-                } else {
-                  await call('/v1/admin/regions', {
-                    method: 'POST',
-                    body: { name: name.value.trim(), ...body },
-                  });
-                }
-
-                close();
-                await refresh();
-              } catch (error) {
-                alert(error.message);
-              }
-            },
-          },
-        }),
+        save,
       ]),
     ]);
   });

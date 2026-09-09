@@ -427,6 +427,144 @@ button:disabled {
   color: var(--ink);
 }
 
+/* The one action a dialog is open for. Everything beside it is quiet, so this does not have to
+   be loud to be found — it only has to be the one thing that is not grey. */
+.pill.primary {
+  background: var(--light);
+  border-color: var(--light);
+  color: var(--on-light);
+}
+
+.pill.primary:hover:not(:disabled) {
+  background: #fff;
+  border-color: #fff;
+}
+
+.pill.primary:disabled {
+  background: var(--wash-3);
+  border-color: transparent;
+  color: var(--dim);
+}
+
+/* A real switch rather than the browser's checkbox, which arrives at a size and a colour that
+   belong to no other control here. The input stays and carries the state; the box beside it is
+   what gets drawn. */
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 42px;
+  height: 24px;
+}
+
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch i {
+  display: block;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--wash-4);
+  transition: background 0.16s ease;
+  pointer-events: none;
+}
+
+.switch i::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition:
+    transform 0.16s ease,
+    background 0.16s ease;
+}
+
+.switch input:checked + i {
+  background: var(--mint);
+}
+
+.switch input:checked + i::after {
+  transform: translateX(18px);
+  background: var(--on-light);
+}
+
+.switch input:focus-visible + i {
+  outline: 2px solid var(--violet);
+  outline-offset: 2px;
+}
+
+/* A label on the left, the control that answers it on the right. */
+.control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 4px 0 14px;
+}
+
+.control-row > span {
+  color: var(--ink-2);
+  font-size: 13.5px;
+}
+
+/* A number and the unit it is in, reading as one field rather than a box beside a word. */
+.amount {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-field);
+  background: var(--wash-1);
+  overflow: hidden;
+}
+
+.amount:focus-within {
+  border-color: var(--line-4);
+}
+
+.amount input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 0;
+  background: none;
+  font-family: var(--mono);
+  font-size: 14px;
+  outline: 0;
+  -moz-appearance: textfield;
+}
+
+.amount input::-webkit-outer-spin-button,
+.amount input::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.amount span {
+  padding: 0 14px 0 4px;
+  color: var(--muted-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.box[readonly] {
+  color: var(--muted-2);
+  background: transparent;
+  border-style: dashed;
+}
+
 .pill:disabled {
   background: var(--wash-1);
   border-color: var(--line-1);
@@ -1030,13 +1168,20 @@ button:disabled {
 
 .modal-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 10px;
-  padding-top: 24px;
+  padding-top: 26px;
 }
 
 .modal-actions .pill {
-  padding: 11px 16px;
+  padding: 11px 17px;
+}
+
+/* Removing the thing the dialog is about is not one of the choices the dialog is offering, so
+   it sits away from the pair that are. */
+.modal-actions .apart {
+  margin-right: auto;
 }
 
 @media (max-width: 900px) {
