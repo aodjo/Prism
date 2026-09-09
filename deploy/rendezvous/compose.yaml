@@ -46,6 +46,23 @@ services:
       # knew this region would stop finding hosts the moment a nearer one was added.
       - "--advertise"
       - "${PRISM_RENDEZVOUS_NAME}"
+      # Where this region says what it is carrying, once a minute, on a connection it opens
+      # itself. Nothing asks it — being asked would mean answering HTTPS from the internet,
+      # which is a hostname, a certificate and a proxy on every box.
+      #
+      # `PRISM_REPORT_TO` empty turns it off, which is what a staging region wants: it would
+      # otherwise write a row under a name no dashboard lists.
+      - "--report-to"
+      - "${PRISM_REPORT_TO:-}"
+      # What this machine's link will carry. Configuration, because a server cannot discover
+      # what its plan allows, and it is what the traffic it *is* carrying gets read against.
+      - "--link-mbps"
+      - "${PRISM_LINK_MBPS:-1000}"
+
+    environment:
+      # What proves a report came from a region rather than from a stranger. Without it the
+      # region reports nothing and works exactly as it did.
+      PRISM_REPORT_TOKEN: "${PRISM_REPORT_TOKEN:-}"
 
     # No `--accounts`, deliberately. This server keeps none: accounts live in
     # `packages/accounts`, a Worker over D1 at its own name, because they are the one piece of
@@ -53,8 +70,8 @@ services:
     # left is what a region is for — introducing two machines and relaying between them when
     # they cannot meet — and all of it is soft state that rebuilds itself in fifteen seconds.
     #
-    # Which is also why there is no volume and no reverse proxy any more. Nothing here writes
-    # anything down, and nothing here speaks HTTP.
+    # Which is also why there is no volume and no inbound HTTP. Nothing here writes anything
+    # down, and nothing here answers a request.
 
     # Two hash maps and a socket. This is a ceiling to make a runaway visible, not a figure it
     # will approach.
