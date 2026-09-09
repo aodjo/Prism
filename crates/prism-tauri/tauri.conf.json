@@ -20,6 +20,9 @@
     "resources": ["sidecar/*"],
     "copyright": "Prism",
     "category": "Utility",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "shortDescription": "Low-latency remote desktop",
     "longDescription": "Watch and control another machine, at a latency you can play a game through."
   }
