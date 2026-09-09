@@ -7,26 +7,20 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "pnpm run build:native && pnpm -r --filter '!@prism/native' build",
-    "build:native": "pnpm --filter @prism/native build",
-    "build:native:debug": "pnpm --filter @prism/native build:debug",
-    "client": "pnpm run client:deps && pnpm --filter @prism/client start",
-    "client:deps": "pnpm --filter '@prism/client^...' --filter '!@prism/native' build",
-    "client:setup": "pnpm run client:deps && pnpm --filter @prism/client start:setup",
+    "build": "pnpm -r build",
+    "client": "pnpm run build && tauri dev",
+    "client:setup": "pnpm run build && PRISM_WINDOW_PAGE=setup.html tauri dev",
+    "dev": "pnpm run client",
     "lint": "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
-    "package": "node scripts/package-app.mjs",
-    "lint:cross": "cargo clippy --workspace --exclude prism-rendezvous --exclude prism-tauri --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --exclude prism-rendezvous --exclude prism-tauri --exclude prism-cli --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
-    "smoke:electron": "electron scripts/electron-smoke.cjs",
-    "smoke:node": "node scripts/node-smoke.cjs",
+    "lint:cross": "cargo clippy --workspace --exclude prism-rendezvous --exclude prism-tauri --all-targets --target x86_64-unknown-linux-gnu -- -D warnings && cargo clippy --workspace --exclude prism-rendezvous --exclude prism-tauri --exclude prism-cli --exclude prism-stream --all-targets --target x86_64-pc-windows-msvc -- -D warnings",
+    "package": "node scripts/version.mjs && pnpm run build && tauri build",
     "test": "pnpm -r test && pnpm run typecheck && cargo test --workspace",
     "test:rs": "cargo test --workspace",
     "test:ts": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
-    "@electron/packager": "^20.3.0",
-    "@napi-rs/cli": "^3.5.0",
-    "electron": "^44.2.0",
+    "@tauri-apps/cli": "^2",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },

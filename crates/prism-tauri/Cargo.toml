@@ -12,9 +12,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 prism-core.workspace = true
+# For the messages only. The window itself is the other half of that crate and is not built
+# here — this shell starts it as a process, it does not link it.
+prism-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = ["unstable"] }
+tauri-plugin-updater = "2.11.0"
 # The smallest thing that does blocking HTTPS. The account is control plane — a request here is
 # a function call on its own thread, and an async runtime would be a scheduler this shell has no
 # use for. `rustls` rather than the system's TLS so there is nothing to find at build time, and

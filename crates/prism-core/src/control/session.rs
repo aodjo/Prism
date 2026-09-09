@@ -46,6 +46,14 @@ const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 /// Waiting longer only delays the fallback a person is waiting through.
 pub const DIRECT_PATIENCE: Duration = Duration::from_secs(4);
 
+/// How long to try the address the host reported on its own network.
+///
+/// Shorter than everything else here because the path being tried is a local one: it either
+/// answers in under a millisecond or the two machines cannot talk to each other at all,
+/// which is what a router with client isolation turned on looks like. This whole duration is
+/// added to a connection that then has to punch anyway, so it buys retries and nothing more.
+pub const LOCAL_PATIENCE: Duration = Duration::from_secs(1);
+
 /// How long to keep trying once a path is known to work.
 ///
 /// Longer, because by this point the only thing that can go wrong is loss, and a relay that

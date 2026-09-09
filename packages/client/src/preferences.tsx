@@ -9,7 +9,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 
-import type { AccountEnrolmentView, AccountState, PrismApi, Settings } from './api.js';
+import type {
+  AccountEnrolmentView,
+  AccountState,
+  Available,
+  Build,
+  PrismApi,
+  Settings,
+} from './api.js';
 import { Trouble, reason, short } from './ui.js';
 
 declare global {
@@ -110,16 +117,24 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
   const [proof, setProof] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
+  const [build, setBuild] = useState<Build | null>(null);
+  /** What a manual check found, or the sentence saying it found nothing. */
+  const [update, setUpdate] = useState<Available | 'current' | 'checking' | null>(null);
 
 
   const body = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     void (async () => {
-      const [known, stored] = await Promise.all([prism.accountState(), prism.getSettings()]);
+      const [known, stored, made] = await Promise.all([
+        prism.accountState(),
+        prism.getSettings(),
+        prism.buildInfo(),
+      ]);
 
       setAccount(known);
       setSettings(stored);
+      setBuild(made);
     })();
   }, []);
 
@@ -369,6 +384,76 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
         {/* What this machine does when it is the one watching. Separate from what it does when
             it is the one being watched, because they are answers to different questions and a
             person is usually here about one of them. */}
+        {/* Version and build number are two answers, not one. A person reads the version to
+            know what they have; they report the build number when something is wrong with it,
+            and it is the only one of the two that moves between two builds of a release. */}
+        <Band title="Updates">
+          <Row label="Version">
+            <span className="text-note-2 text-ink-3">
+              {build ? `${build.version} · build ${build.build}` : '—'}
+            </span>
+          </Row>
+          <Row label="Automatic">
+            <input
+              type="checkbox"
+              className={TOGGLE}
+              checked={settings?.autoUpdate ?? true}
+              onChange={(event) => {
+                save({ autoUpdate: event.target.checked });
+              }}
+            />
+          </Row>
+          <Row label="Builds">
+            <select
+              className="rounded-lg border border-line-2 bg-wash-1 px-2 py-1 text-note-2 text-ink-2"
+              value={settings?.updateChannel || build?.channel || 'production'}
+              onChange={(event) => {
+                save({ updateChannel: event.target.value });
+                setUpdate(null);
+              }}
+            >
+              <option value="production">Released</option>
+              <option value="development">Every build</option>
+            </select>
+          </Row>
+          <Row label="">
+            <div className="flex items-center gap-3">
+              <span className="text-note-2 text-muted">
+                {update === 'checking'
+                  ? 'Checking'
+                  : update === 'current'
+                    ? 'Up to date'
+                    : update
+                      ? `${update.version} is available`
+                      : ''}
+              </span>
+              <button
+                type="button"
+                className="rounded-full border border-line-2 bg-wash-2 px-3 py-1 text-note-2 text-ink-3"
+                onClick={() => {
+                  void (async () => {
+                    setUpdate('checking');
+
+                    try {
+                      const found = await prism.checkForUpdate();
+                      setUpdate(found ?? 'current');
+
+                      if (found) {
+                        await prism.installUpdate();
+                      }
+                    } catch (error) {
+                      setUpdate(null);
+                      setTrouble(error instanceof Error ? error.message : String(error));
+                    }
+                  })();
+                }}
+              >
+                {update && update !== 'checking' && update !== 'current' ? 'Install' : 'Check now'}
+              </button>
+            </div>
+          </Row>
+        </Band>
+
         <Band title="Watching">
           <Row label="Send input">
             <input

@@ -31,7 +31,7 @@ use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::mouse::MouseButton as SdlMouseButton;
 
-use crate::client::{self, ClientConfig};
+use prism_core::control::client::{self, ClientConfig, Reporter};
 
 #[cfg(target_os = "macos")]
 #[path = "display/metal.rs"]
@@ -201,16 +201,16 @@ fn hud_lines(
     lines
 }
 
-/// Prints what the pacer cost and what it bought.
+/// Reports what the pacer cost and what it bought.
 ///
 /// The delay it added belongs next to the end-to-end latency rather than hidden inside
 /// it: smoothness is bought with latency, and the price should be visible.
-fn report_pacing(pacer: &mut PresentPacer) {
+fn report_pacing(say: &Reporter, pacer: &mut PresentPacer) {
     if !pacer.enabled() {
-        println!(
+        say.note(format!(
             "pacing : off — every picture was shown the moment it decoded ({} pictures)",
             pacer.total()
-        );
+        ));
         return;
     }
 
@@ -219,17 +219,17 @@ fn report_pacing(pacer: &mut PresentPacer) {
     let total = pacer.total();
 
     let Some(held) = pacer.held_summary() else {
-        println!("pacing : no pictures were paced");
+        say.note("pacing : no pictures were paced");
         return;
     };
 
-    println!(
+    say.note(format!(
         "pacing : target {:.2} ms, held p50 {:.2} p99 {:.2} max {:.2} ms, {late}/{total} arrived late",
         f64::from(target) / 1000.0,
         f64::from(held.p50_us) / 1000.0,
         f64::from(held.p99_us) / 1000.0,
         f64::from(held.max_us) / 1000.0,
-    );
+    ));
 }
 
 /// Returns the new size in pixels when an event says the window changed.
@@ -246,6 +246,9 @@ fn resized(event: &Event) -> bool {
 
 /// Opens a window and shows the stream until it ends or the window is closed.
 ///
+/// Everything this would otherwise print goes to `say`, because the two callers want it in
+/// different places: a terminal for one, a pipe to the shell for the other.
+///
 /// # Errors
 ///
 /// Returns an error if SDL cannot start, the window or renderer cannot be created, or the
@@ -261,6 +264,7 @@ pub fn run(
     pacing_us: u32,
     capture_input: bool,
     synthetic_input: bool,
+    say: &Reporter,
 ) -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
@@ -276,10 +280,10 @@ pub fn run(
     // window owns, and releasing them afterwards would be releasing them into nothing.
     let mut surface = surface::Surface::new(&window, drawable_width, drawable_height)?;
 
-    println!(
+    say.note(format!(
         "display: window {width}x{height}, drawable {drawable_width}x{drawable_height}, {}",
         surface.describe()
-    );
+    ));
 
     // A machine with no sound device still shows picture. Audio is worth having and not worth
     // ending a session over, so a failure here is reported once and the stream carries on.
@@ -290,11 +294,15 @@ pub fn run(
     {
         Ok((playback, sink)) => Some((playback, sink)),
         Err(err) => {
-            eprintln!("display: no audio output ({err}); the stream will be silent");
+            say.note(format!(
+                "display: no audio output ({err}); the stream will be silent"
+            ));
             None
         }
     };
-    let audio_sink = playback.as_ref().map(|(_, sink)| sink.clone());
+    let audio_sink: Option<Arc<dyn client::Playback>> = playback
+        .as_ref()
+        .map(|(_, sink)| Arc::new(sink.clone()) as Arc<dyn client::Playback>);
 
     let (pictures_tx, pictures_rx) = sync_channel(PICTURE_QUEUE_DEPTH);
     let offset = Arc::new(AtomicI64::new(client::OFFSET_UNKNOWN));
@@ -306,6 +314,7 @@ pub fn run(
         let cursor = Arc::clone(&cursor_sink);
         #[cfg(target_os = "windows")]
         let gpu = surface.gpu();
+        let report = say.clone();
         thread::spawn(move || {
             client::run(
                 config,
@@ -315,6 +324,7 @@ pub fn run(
                     input: Some(input),
                     cursor: Some(cursor),
                     audio: audio_sink,
+                    report: Some(report),
                     #[cfg(target_os = "windows")]
                     gpu,
                 },
@@ -335,7 +345,7 @@ pub fn run(
 
     if capture_input {
         sdl.mouse().set_relative_mouse_mode(&window, true);
-        println!("display: forwarding input, control alt shift Q to quit");
+        say.note("display: forwarding input, control alt shift Q to quit");
     }
 
     'main: loop {
@@ -346,7 +356,7 @@ pub fn run(
             if resized(&event) {
                 let (width, height) = window.size_in_pixels();
                 if let Err(err) = surface.resize(width, height) {
-                    eprintln!("display: {err}");
+                    say.note(format!("display: {err}"));
                     break 'main;
                 }
                 drawable_width = width;
@@ -423,22 +433,24 @@ pub fn run(
         }
     }
 
-    println!("display: {shown} pictures shown, {missed} were dropped to stay in time");
+    say.note(format!(
+        "display: {shown} pictures shown, {missed} were dropped to stay in time"
+    ));
     if capture_input {
-        println!("input  : {sent_input} events sent");
+        say.note(format!("input  : {sent_input} events sent"));
     }
     if let Some((_, sink)) = playback.as_ref() {
         let stats = sink.stats();
-        println!(
+        say.note(format!(
             "audio  : {} frames played, {} concealed, {} starved, {} dropped, buffer {} frames",
             stats.played.load(Ordering::Relaxed),
             stats.concealed.load(Ordering::Relaxed),
             stats.starved.load(Ordering::Relaxed),
             stats.dropped.load(Ordering::Relaxed),
             stats.depth.load(Ordering::Relaxed),
-        );
+        ));
     }
-    report_pacing(&mut pacer);
+    report_pacing(say, &mut pacer);
     worker
         .join()
         .expect("the receive thread should not panic")?;

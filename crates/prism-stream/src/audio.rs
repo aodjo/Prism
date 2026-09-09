@@ -97,6 +97,16 @@ impl AudioSink {
     }
 }
 
+/// Lets a session hand its audio to this device.
+///
+/// Spelled out rather than imported, because this file already has a `Playback` of its own —
+/// the SDL callback — and the two are unrelated.
+impl prism_core::control::client::Playback for AudioSink {
+    fn push(&self, sequence: u32, payload: &[u8], arrived_us: u64) {
+        Self::push(self, sequence, payload, arrived_us);
+    }
+}
+
 impl core::fmt::Debug for AudioSink {
     /// Describes the sink by what playback has done.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

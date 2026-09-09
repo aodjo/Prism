@@ -19,6 +19,13 @@ packages/native/index.d.ts
 # Isolated worktrees created for parallel agent runs; never part of the tree
 .claude/worktrees/
 
+# Wrangler's local state: the D1 database `wrangler dev` keeps on this machine, and its caches.
+# The deployed database is the one that matters and it is not in here.
+.wrangler/
+
+# Where the browser automation drops screenshots while a page is being checked
+.playwright-mcp/
+
 # Bundled from each application's sources, next to the markup that loads them.
 packages/host/renderer/panel.js
 packages/host/renderer/panel.js.map
@@ -38,3 +45,4 @@ packages/client/renderer/prism.css
 
 # Written by tauri-build from tauri.conf.json and the capabilities beside it.
 crates/prism-tauri/gen/
+crates/prism-tauri/sidecar/

@@ -3,8 +3,27 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # A release is a tag on main. It runs the same jobs as a branch push and differs only in
+    # what the build calls itself, which is what makes a release the same build as the one
+    # before it with a different name rather than a separate path nobody exercises.
+    tags: ['v*']
   pull_request:
     branches: [main, develop]
+
+# A second push to the same branch makes the first run's answer worthless, so the first is
+# stopped rather than left to finish into a queue behind it.
+#
+# Grouped by branch rather than by `github.ref`, which is not the branch on a pull request — it
+# is `refs/pull/46/merge`, and a run of the merge commit is a different group from a run of the
+# push that produced it. Two runs of the same work then wait for each other instead of one
+# replacing the other, which is what happened.
+#
+# `main` and `develop` are exempt: their runs are the record of what was merged, and a record
+# that can be cancelled by the next push is not one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: >-
+    ${{ github.ref_name != 'main' && github.ref_name != 'develop' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,13 +51,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Saved even when the job fails. The default throws the cache away on a red run, which
+      # is exactly the run somebody is about to push a fix to — and that fix would then compile
+      # everything from nothing a second time.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: cargo fmt --all --check
 
       # Clippy also runs on every platform in the matrix below. It runs here as well because
       # this job fails fastest, and because a warning that only appears on Linux is still a
       # warning a reviewer should see before three build jobs have finished.
+      #
+      # The shell's bundle lists the stream client as a resource, and Tauri checks that the file
+      # is there while its build script runs — which is every time this crate is compiled, not
+      # only when an installer is being made. The client is built by `scripts/sidecar.mjs` as
+      # part of packaging, so at this point it does not exist, and linting would stop on a
+      # missing file it is not linting. Told here that the bundle has no resources, which is
+      # true of a build that produces no bundle. `pnpm package` below runs with the real
+      # configuration and is what proves the client actually ships.
       - run: cargo clippy --workspace --all-targets
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
+
+      # The VAAPI encoder is behind a feature because building it needs the libva headers,
+      # which not every machine that compiles this repository has. This job installed them, so
+      # this is where the backend gets compiled and linted — once, rather than on each of the
+      # two Linux runners in the matrix.
+      - name: Lint the VAAPI encoder
+        run: cargo clippy --package prism-core --features vaapi --all-targets
 
   build:
     name: ${{ matrix.name }}
@@ -59,6 +100,11 @@ jobs:
             os: windows-11-arm
           - name: linux-x64
             os: ubuntu-latest
+          # Same reasoning as Windows on arm64, one milestone early: the Linux backends are
+          # still empty, so for now this proves the crate builds for the architecture a thin
+          # client would most likely be — a small board on somebody's desk rather than a tower.
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
 
@@ -66,7 +112,7 @@ jobs:
       # build. Installed here rather than assumed, because a runner without them would skip
       # compiling the whole backend and report a green build for code nobody had checked.
       - name: Install the libraries the Linux build needs
-        if: matrix.name == 'linux-x64'
+        if: startsWith(matrix.name, 'linux')
         run: |
           sudo apt-get update
           sudo apt-get install -y libva-dev clang pkg-config \
@@ -76,6 +122,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
+          cache-on-failure: true
 
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
@@ -85,76 +132,156 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Per platform, because half of this repository is behind `cfg(target_os = ...)` and code
-      # that only exists on Windows is never linted by a Linux-only job. Every bug of that
-      # shape this project has had was caught by running clippy where the code actually
-      # compiles.
-      - name: Lint on this platform
-        run: cargo clippy --workspace --all-targets
-
-      # The VAAPI encoder is behind a feature because building it needs the libva headers,
-      # which not every machine that compiles this repository has. This job installed them, so
-      # this is where the backend actually gets compiled and linted.
-      - name: Lint the VAAPI encoder
-        if: matrix.name == 'linux-x64'
-        run: cargo clippy --package prism-core --features vaapi --all-targets
-
       # Its tests are behind the same feature, so without this they compile nowhere and run
       # nowhere. They need no GPU: what they check is the reasoning around one — which
       # profile, which entrypoint, how the quantiser moves — and that is the part that would
       # otherwise only be checked by a machine nobody has to hand.
       - name: Test the VAAPI encoder
-        if: matrix.name == 'linux-x64'
+        if: startsWith(matrix.name, 'linux')
         run: cargo test --package prism-core --features vaapi
 
+      # Warnings are denied here too, so the code behind this platform's `cfg` is still held to
+      # the same bar — compiling the tests is what checks it. Clippy itself runs once, in the
+      # job above, rather than five more times over the same workspace in three profiles.
       - name: Rust tests
         run: cargo test --workspace
+        # The shell compiles here, and the client its bundle carries is built during packaging,
+        # which is after this. See the lint job.
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
 
       - name: TypeScript tests
         run: pnpm test:ts
 
-      - name: Build native addon
-        run: pnpm build:native
-
-      - name: Addon loads in Node
-        run: pnpm smoke:node
-
-      - name: Addon loads in Electron
-        run: pnpm smoke:electron
-        if: runner.os != 'Linux'
-
-      # Electron ships chrome-sandbox expecting setuid root, which a CI checkout cannot
-      # provide. The smoke test never renders, so dropping the sandbox is safe here.
-      - name: Addon loads in Electron
-        run: xvfb-run --auto-servernum pnpm exec electron scripts/electron-smoke.cjs --no-sandbox
-        if: runner.os == 'Linux'
-
-      # Both after the addon: its TypeScript declarations are generated by that build, so a
-      # fresh checkout has nothing for the shells to compile against until it has run.
       - name: TypeScript types
         run: pnpm typecheck
 
-      - name: Build the Electron shells
-        run: pnpm --filter '!@prism/native' -r build
+      # What this build calls itself. A push to a branch is a development build and numbers
+      # itself as a prerelease of the version being worked toward; a tag is that version. See
+      # `scripts/version.mjs` for why they cannot simply be the same number with a suffix.
+      - name: Name this build
+        id: name
+        shell: bash
+        run: |
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            PRISM_CHANNEL=production PRISM_BUILD=${{ github.run_number }} \
+              node scripts/version.mjs >> "$GITHUB_OUTPUT"
+          else
+            PRISM_CHANNEL=development PRISM_BUILD=${{ github.run_number }} \
+              node scripts/version.mjs >> "$GITHUB_OUTPUT"
+          fi
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: prism-native-${{ matrix.name }}
-          path: packages/native/*.node
-          if-no-files-found: error
-
-      # The addon on its own is not something anybody can run. This is: the client, the addon
-      # and the one runtime dependency, laid out as an application for the platform the job is
-      # on. Unsigned, so macOS and Windows will both say so on first launch — signing is its
-      # own piece of work and a build nobody can download is worth less than a warning.
+      # The shell is a Rust binary with the interface baked into it, so building the application
+      # is building the crate. There is no addon to produce first and no Node in the result: the
+      # window is a webview the system already has, and everything behind it is this repository's
+      # own code.
+      #
+      # Not signed by a developer certificate, so macOS and Windows both say so on first launch.
+      # It *is* signed for the updater: that key says an update came from this repository and is
+      # checked by the application before a byte of it runs, which is a different question from
+      # whether the operating system has heard of the publisher.
       - name: Package the application
         run: pnpm package
+        env:
+          PRISM_CHANNEL: ${{ steps.name.outputs.channel }}
+          PRISM_BUILD: ${{ steps.name.outputs.build }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - uses: actions/upload-artifact@v7
         with:
           name: prism-${{ matrix.name }}
-          path: out/*
+          path: target/release/bundle/**
           if-no-files-found: error
+
+  # One release per run, carrying every platform's bundle and the signature beside it. The
+  # updater reads this list and nothing else, so a platform whose job failed is simply a
+  # platform this release does not offer — not a release that half exists.
+  #
+  # Only from this repository's own pushes. A fork's pull request runs with no secrets and
+  # would produce unsigned bundles nobody could install.
+  release:
+    name: release
+    needs: build
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Name this build
+        id: name
+        run: |
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            PRISM_CHANNEL=production PRISM_BUILD=${{ github.run_number }} \
+              node scripts/version.mjs >> "$GITHUB_OUTPUT"
+          else
+            PRISM_CHANNEL=development PRISM_BUILD=${{ github.run_number }} \
+              node scripts/version.mjs >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: bundles
+
+      # Renamed so that one look at a file says what it is:
+      #
+      #     prism-<os>-<architecture>-<version>-<build>.<extension>
+      #
+      # The build number is a field of its own rather than part of the version, which is why the
+      # version here is the plain one — a development build calls itself `1.0.0-dev.851` inside,
+      # and writing that beside `851` would say the same thing twice.
+      #
+      # The extension is taken whole, because the ones that matter have two parts: `.app.tar.gz`
+      # is what the updater installs on macOS and `.dmg` is what a person double-clicks, and a
+      # rule that kept only the last dot would turn the first into `.gz`.
+      - name: Collect what each platform built
+        env:
+          BASE: ${{ steps.name.outputs.base }}
+          BUILD: ${{ steps.name.outputs.build }}
+        run: |
+          mkdir -p release
+          for dir in bundles/prism-*; do
+            platform="${dir#bundles/prism-}"
+
+            find "$dir" -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sig' \
+              -o -name '*.zip' -o -name '*.zip.sig' -o -name '*.dmg' -o -name '*.exe' \
+              -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) | while read -r file; do
+              name="$(basename "$file")"
+
+              case "$name" in
+                *.app.tar.gz.sig)     ext='.app.tar.gz.sig' ;;
+                *.app.tar.gz)         ext='.app.tar.gz' ;;
+                *.nsis.zip.sig)       ext='.nsis.zip.sig' ;;
+                *.nsis.zip)           ext='.nsis.zip' ;;
+                *.AppImage.tar.gz.sig) ext='.AppImage.tar.gz.sig' ;;
+                *.AppImage.tar.gz)    ext='.AppImage.tar.gz' ;;
+                *.tar.gz.sig)         ext='.tar.gz.sig' ;;
+                *.tar.gz)             ext='.tar.gz' ;;
+                *)                    ext=".${name##*.}" ;;
+              esac
+
+              cp "$file" "release/prism-${platform}-${BASE}-${BUILD}${ext}"
+            done
+          done
+          ls -la release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.name.outputs.version) }}
+          name: ${{ steps.name.outputs.version }}
+          # A development build is a prerelease in GitHub's sense as well as in semver's, which
+          # is what keeps it out of the production line's answers.
+          prerelease: ${{ steps.name.outputs.channel == 'development' }}
+          files: release/*
+          fail_on_unmatched_files: true
 
   rendezvous:
     name: rendezvous image

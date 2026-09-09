@@ -9,7 +9,16 @@
 //! The receive thread therefore does nothing but read, reassemble, and hand off. When the
 //! decoder falls behind, frames are dropped rather than queued: a frame that has waited
 //! behind another is already too late to be worth showing.
+//!
+//! # Why nothing here prints
+//!
+//! This ran as a command for long enough that its progress was sentences on standard output,
+//! and the shell that drove it read them back — watching for the words "session established"
+//! to decide a person was looking at a screen. That is a contract nobody declared and any
+//! rewording breaks. What a caller wants to show now arrives as [`Report`], and the wording
+//! belongs to whoever is doing the showing.
 
+use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -18,38 +27,33 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use prism_core::clock::now_us;
-use prism_core::net::ack::AckTracker;
-use prism_core::net::clocksync::ClockSync;
-use prism_core::net::handshake::{Identity, KEY_LEN};
-use prism_core::net::negotiate::Offer;
-use prism_core::net::packet::{
+use crate::clock::now_us;
+use crate::net::ack::AckTracker;
+use crate::net::clocksync::ClockSync;
+use crate::net::handshake::{Identity, KEY_LEN};
+use crate::net::negotiate::Offer;
+use crate::net::packet::{
     AudioPacket, CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
     FEEDBACK_PACKET_LEN, FEEDBACK_WANTS_KEYFRAME, FecPacket, INPUT_PACKET_LEN, InputEvent,
     InputPacket, MAX_PACKET_SIZE, VideoPacket, channel_of, control_type_of,
 };
-use prism_core::net::reassemble::{FrameReassembler, PushOutcome};
-use prism_core::net::secure::{SecureReceiver, SecureSender};
-use prism_core::net::transport::UdpTransport;
+use crate::net::reassemble::{FrameReassembler, PushOutcome};
+use crate::net::secure::{SecureReceiver, SecureSender};
+use crate::net::transport::UdpTransport;
 
-#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
-use crate::audio::AudioSink;
+use crate::stats::{LatencyRecorder, LatencySummary};
 
-/// Stands in for the playback sink on platforms with no client window yet.
+/// Something that can play the audio arriving with a stream.
 ///
-/// The wire side of audio is built and tested everywhere; only the playing of it needs a
-/// window, because that is what owns the audio device.
-#[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
-#[derive(Debug, Clone)]
-pub struct AudioSink;
-
-#[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
-impl AudioSink {
-    /// Discards a frame, on a platform that cannot play it.
-    pub fn push(&self, _sequence: u32, _payload: &[u8], _arrived_us: u64) {}
+/// A trait because the thing that plays sound is the thing that owns a window, and this crate
+/// owns none. A session with no window leaves it out and the frames are counted and dropped.
+pub trait Playback: fmt::Debug + Send + Sync {
+    /// Passes one decoded-order frame to playback.
+    ///
+    /// Called from the receive thread, so it must not block: a sink that waits here stalls
+    /// video as well as sound.
+    fn push(&self, sequence: u32, payload: &[u8], arrived_us: u64);
 }
-
-use prism_core::stats::{LatencyRecorder, LatencySummary};
 
 /// Where decoded pictures go when the client is showing them.
 ///
@@ -57,11 +61,11 @@ use prism_core::stats::{LatencyRecorder, LatencySummary};
 /// decoder produced and stays in its own GPU's memory; the alias keeps the signatures below
 /// identical everywhere.
 #[cfg(target_os = "macos")]
-pub type PictureSink = SyncSender<prism_core::decode::videotoolbox::DecodedFrame>;
+pub type PictureSink = SyncSender<crate::decode::videotoolbox::DecodedFrame>;
 
 /// Where decoded pictures go when the client is showing them.
 #[cfg(target_os = "windows")]
-pub type PictureSink = SyncSender<prism_core::decode::mediafoundation::DecodedFrame>;
+pub type PictureSink = SyncSender<crate::decode::mediafoundation::DecodedFrame>;
 
 /// Where decoded pictures would go on a platform with no decoder yet.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -180,7 +184,112 @@ impl InputSender {
 /// copy, which is not the kind of work the no-locks rule exists to keep off this path.
 pub type CursorSink = Arc<Mutex<Option<CursorPosition>>>;
 
-/// What the caller wants from a client session beyond the counters it prints.
+/// What this build can decode and therefore offers a host.
+///
+/// Naming a codec with no decoder behind it would agree a session that never shows a frame, so
+/// this is the one place that answer is written down and both callers ask it rather than
+/// keeping a list of their own.
+#[must_use]
+pub fn decodable() -> crate::net::negotiate::Codecs {
+    use crate::net::negotiate::{Codecs, H264};
+
+    #[cfg(target_os = "macos")]
+    {
+        // Both: VideoToolbox decodes each in hardware, and which is used is whichever the host
+        // can also produce.
+        Codecs::none().with(H264).with(crate::net::negotiate::HEVC)
+    }
+
+    // Every other platform decodes nothing yet, so it offers the floor and gets a session it
+    // can at least reassemble and measure.
+    #[cfg(not(target_os = "macos"))]
+    {
+        Codecs::none().with(H264)
+    }
+}
+
+/// The counters a running session publishes once a second.
+///
+/// Everything a person watching would want to see, and nothing that has to be parsed out of a
+/// sentence to get at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Counters {
+    /// Round trip to the host, in microseconds, as the clock exchange last measured it.
+    pub round_trip_us: u64,
+    /// Frames completed per second over the last interval.
+    pub fps: f64,
+    /// Everything arriving, in kilobits per second over the last interval.
+    pub kbps: f64,
+    /// Frames completed since the session opened.
+    pub frames: u32,
+}
+
+/// What a running client has to say.
+///
+/// [`Report::Note`] is prose and may be reworded at any time; everything else is the state a
+/// caller is allowed to act on.
+#[derive(Debug, Clone)]
+pub enum Report {
+    /// Something worth a line in a log: progress, and what went wrong.
+    Note(String),
+    /// The handshake completed, and the session runs against this address.
+    Established(SocketAddr),
+    /// What the two sides settled on, once the session is open.
+    Terms(crate::net::negotiate::Accept),
+    /// The counters, once every [`STATS_INTERVAL`].
+    Counters(Counters),
+}
+
+/// Where a client's reports go.
+///
+/// Called from the receive thread, so what it does with a report has to be cheap: this is the
+/// thread that must never stop reading the socket.
+#[derive(Clone)]
+pub struct Reporter(Arc<dyn Fn(Report) + Send + Sync>);
+
+impl Reporter {
+    /// Wraps a function that takes reports.
+    #[must_use]
+    pub fn new(to: impl Fn(Report) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(to))
+    }
+
+    /// Sends one report.
+    pub fn send(&self, report: Report) {
+        (self.0)(report);
+    }
+
+    /// Sends a line of prose.
+    pub fn note(&self, line: impl Into<String>) {
+        self.send(Report::Note(line.into()));
+    }
+}
+
+impl fmt::Debug for Reporter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Reporter")
+    }
+}
+
+/// A reporter that may not be there, so the calling code does not say so at every site.
+#[derive(Debug, Clone, Default)]
+struct Say(Option<Reporter>);
+
+impl Say {
+    /// Sends one report, if anyone is listening.
+    fn send(&self, report: Report) {
+        if let Some(Reporter(to)) = &self.0 {
+            to(report);
+        }
+    }
+
+    /// Sends a line of prose.
+    fn note(&self, line: String) {
+        self.send(Report::Note(line));
+    }
+}
+
+/// What the caller wants from a client session beyond the counters it reports.
 #[derive(Debug, Default)]
 pub struct ClientHooks {
     /// Where decoded pictures go, when someone is showing them.
@@ -195,7 +304,11 @@ pub struct ClientHooks {
     ///
     /// Absent when nothing is showing the stream, because a session with no window is a
     /// measurement run and playing its audio out loud would be a surprise.
-    pub audio: Option<AudioSink>,
+    pub audio: Option<Arc<dyn Playback>>,
+    /// Where the session says what it is doing.
+    ///
+    /// Absent for a run whose caller only wants the return value.
+    pub report: Option<Reporter>,
     /// The GPU to decode onto, when a renderer already has one.
     ///
     /// Absent for a run with no window, which decodes onto whichever device the decoder finds
@@ -298,9 +411,10 @@ fn describe_size(width: u16, height: u16) -> String {
 fn open(
     transport: &UdpTransport,
     config: &ClientConfig,
-) -> io::Result<(prism_core::net::handshake::Established, SocketAddr)> {
-    use prism_core::control::rendezvous;
-    use prism_core::control::session::{DIRECT_PATIENCE, RELAYED_PATIENCE, dial};
+    say: &Say,
+) -> io::Result<(crate::net::handshake::Established, SocketAddr)> {
+    use crate::control::rendezvous;
+    use crate::control::session::{DIRECT_PATIENCE, LOCAL_PATIENCE, RELAYED_PATIENCE, dial};
 
     // An address given by hand is one somebody has arranged to be reachable, so there is
     // nothing to fall back to and nothing to punch.
@@ -331,16 +445,45 @@ fn open(
     let me = *config.identity.public();
     let found = rendezvous::lookup(transport, &servers, config.peer_key, me)?;
     if servers.len() > 1 {
-        println!(
-            "client: asked {} rendezvous servers, {} answered first",
+        say.note(format!(
+            "asked {} rendezvous servers, {} answered first",
             servers.len(),
             found.server
-        );
+        ));
     }
-    println!(
-        "client: the host is at {}, and this machine appears at {}",
+    say.note(format!(
+        "the host is at {}, and this machine appears at {}",
         found.address, found.observed
-    );
+    ));
+
+    // One public address for both machines means one router between them and the internet,
+    // and two machines behind one router usually cannot reach each other at that address —
+    // the packet leaves, the router has no reason to send it back in, and the connection
+    // fails on the same network where it should be fastest. The host reported where it is on
+    // that network when it registered, so it is tried before anything else.
+    if !config.force_relay
+        && found.address.ip() == found.observed.ip()
+        && found.local.ip() != found.address.ip()
+    {
+        say.note(format!("the host is on this network at {}", found.local));
+
+        match dial(
+            transport,
+            found.local,
+            &config.identity,
+            &config.peer_key,
+            config.offer,
+            LOCAL_PATIENCE,
+        ) {
+            Ok(established) => {
+                say.note(format!("connected across the network to {}", found.local));
+
+                return Ok((established, found.local));
+            }
+            Err(err) if err.kind() != io::ErrorKind::TimedOut => return Err(err),
+            Err(_) => {}
+        }
+    }
 
     // Both sides punch. The handshake message about to be sent repeatedly is this side's own
     // punch, but the host's router will only pass it once the host has sent outward here —
@@ -348,7 +491,7 @@ fn open(
     // Skipping the punch as well as the dial: a punch is only useful to a path that is about
     // to be tried.
     if config.force_relay {
-        println!("client: skipping the direct path because it was asked to");
+        say.note("skipping the direct path because it was asked to".to_owned());
     } else {
         rendezvous::punch(transport, found.address)?;
 
@@ -361,7 +504,7 @@ fn open(
             DIRECT_PATIENCE,
         ) {
             Ok(established) => {
-                println!("client: connected directly to {}", found.address);
+                say.note(format!("connected directly to {}", found.address));
 
                 return Ok((established, found.address));
             }
@@ -374,7 +517,7 @@ fn open(
     // destination. There is no address to reach the host at, so the server carries it — at the
     // cost of its bandwidth and its distance added to every round trip, which is why this is
     // reached rather than chosen.
-    println!("client: no direct path opened; asking the rendezvous server to relay");
+    say.note("no direct path opened; asking the rendezvous server to relay".to_owned());
 
     // Through the one that answered the lookup. A relay pairs two peers presenting the same
     // token, so it has to be a server they are both registered with — and that one has just
@@ -389,7 +532,7 @@ fn open(
         RELAYED_PATIENCE,
     )?;
 
-    println!("client: relaying through {}", relayed.address);
+    say.note(format!("relaying through {}", relayed.address));
 
     Ok((established, relayed.address))
 }
@@ -409,21 +552,23 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         input,
         cursor,
         audio,
+        report,
         ..
     } = hooks;
+    let say = Say(report);
     let offset = offset.unwrap_or_else(|| Arc::new(AtomicI64::new(OFFSET_UNKNOWN)));
     let transport = UdpTransport::bind("0.0.0.0:0".parse().expect("valid bind address"))?;
 
-    println!(
-        "client: connecting ({} frames in flight, decode {})",
+    say.note(format!(
+        "connecting ({} frames in flight, decode {})",
         config.in_flight,
         if config.decode { "on" } else { "off" }
-    );
+    ));
 
     // Nothing is read as a packet until the handshake completes, and it only completes with
     // the host pairing recorded: the first message is encrypted to that key and no other.
-    let (established, host) = open(&transport, &config)?;
-    let agreed = prism_core::control::session::agreed(&established)?;
+    let (established, host) = open(&transport, &config, &say)?;
+    let agreed = crate::control::session::agreed(&established)?;
 
     // Connected only now that it is settled where the session runs. Doing it earlier would
     // have made the fallback to a relay impossible: a connected socket refuses to send
@@ -431,28 +576,22 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     transport.connect(host)?;
     transport.set_read_timeout(Some(config.idle_timeout))?;
 
-    println!(
-        "client: session established with {host} ({})",
-        prism_core::identity::to_hex(&established.session.peer_static)
-    );
-    println!(
-        "client: agreed {:?}, {}, {} fps, {:.1} Mbps, audio {}",
+    say.note(format!(
+        "session established with {host} ({})",
+        crate::identity::to_hex(&established.session.peer_static)
+    ));
+    say.note(format!(
+        "agreed {:?}, {}, {} fps, {:.1} Mbps, audio {}",
         agreed.codec,
         describe_size(agreed.width, agreed.height),
         agreed.fps,
         f64::from(agreed.bitrate_bps) / 1e6,
         if agreed.audio { "on" } else { "off" },
-    );
-    // The same thing again, in a shape a program can read. The line above is written for a
-    // person and has been reworded before; anything parsing it would break the next time it is.
-    println!(
-        "client: terms codec={:?} width={} height={} fps={} audio={}",
-        agreed.codec,
-        agreed.width,
-        agreed.height,
-        agreed.fps,
-        u8::from(agreed.audio),
-    );
+    ));
+    // The state, after the prose. These two are what a caller acts on, and they are the reason
+    // nothing outside this file has to recognise a sentence.
+    say.send(Report::Established(host));
+    say.send(Report::Terms(agreed));
 
     let (frames_tx, frames_rx) = sync_channel::<FrameBuf>(DECODE_QUEUE_DEPTH);
     let (recycle_tx, recycle_rx) = channel::<FrameBuf>();
@@ -463,6 +602,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             pictures,
             Arc::clone(&offset),
             agreed.codec,
+            say.clone(),
             #[cfg(target_os = "windows")]
             gpu,
         )
@@ -514,7 +654,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             if ping.encode_into(&mut ping_buf).is_ok() {
                 match sender.send(&ping_buf) {
                     Ok(_) => pings_sent += 1,
-                    Err(err) => eprintln!("client: ping to {host} failed: {err}"),
+                    Err(err) => say.note(format!("ping to {host} failed: {err}")),
                 }
             }
         }
@@ -534,12 +674,12 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             let seconds = last_stats.elapsed().as_secs_f64();
             last_stats = Instant::now();
 
-            println!(
-                "client: stats rtt_us={} fps={:.1} kbps={:.0} frames={frames}",
-                sync.round_trip_us().unwrap_or(0),
-                f64::from(window_frames) / seconds,
-                (window_bytes as f64 * 8.0 / 1000.0) / seconds,
-            );
+            say.send(Report::Counters(Counters {
+                round_trip_us: sync.round_trip_us().unwrap_or(0),
+                fps: f64::from(window_frames) / seconds,
+                kbps: (window_bytes as f64 * 8.0 / 1000.0) / seconds,
+                frames,
+            }));
 
             window_frames = 0;
             window_bytes = 0;
@@ -679,7 +819,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         }
 
         if config.report_every > 0 && frames % config.report_every == 0 {
-            report("arrival ", &mut arrival);
+            summarize(&say, "arrival ", &mut arrival);
         }
         if config.frames.is_some_and(|target| frames >= target) {
             break;
@@ -689,66 +829,73 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     drop(frames_tx);
     let decode_report = decoder.map(|handle| handle.join().unwrap_or_default());
 
-    println!("\nclient: {frames} frames reassembled, {malformed} packets unparseable");
+    say.note(format!(
+        "{frames} frames reassembled, {malformed} packets unparseable"
+    ));
     match (sync.offset_us(), sync.round_trip_us()) {
-        (Some(offset_us), Some(round_trip_us)) => println!(
+        (Some(offset_us), Some(round_trip_us)) => say.note(format!(
             "clock: host is {:+.2} ms from this machine, best round trip {:.2} ms ({} samples, {} refused)",
             offset_us as f64 / 1000.0,
             round_trip_us as f64 / 1000.0,
             sync.accepted(),
             sync.rejected()
-        ),
-        _ => println!(
+        )),
+        _ => say.note(format!(
             "clock: never synchronised ({pings_sent} pings sent, {pongs_seen} answers seen), \
              so cross-machine latency is unmeasurable"
-        ),
+        )),
     }
     if unsynced > 0 {
-        println!(
-            "client: {unsynced} frames could not be timed — the host stamp was in the future \
-             even after correcting for the clock offset"
-        );
+        say.note(format!(
+            "{unsynced} frames could not be timed — the host stamp was in the future even \
+             after correcting for the clock offset"
+        ));
     }
-    report("arrival ", &mut arrival);
+    summarize(&say, "arrival ", &mut arrival);
 
     if let Some(decode_report) = decode_report {
-        println!(
-            "client: {} frames decoded, {behind} dropped at the decoder, {} produced no picture in time",
+        say.note(format!(
+            "{} frames decoded, {behind} dropped at the decoder, {} produced no picture in time",
             decode_report.decoded, decode_report.starved
-        );
-        print_summary("decode  ", decode_report.stage);
-        print_summary("outlag  ", decode_report.lag);
-        print_summary("pipeline", decode_report.summary);
+        ));
+        stage(&say, "decode  ", decode_report.stage);
+        stage(&say, "outlag  ", decode_report.lag);
+        stage(&say, "pipeline", decode_report.summary);
         if !decode_report.errors.is_empty() {
-            println!(
-                "client: decoder reported {} failures: {:?}",
+            say.note(format!(
+                "decoder reported {} failures: {:?}",
                 decode_report.errors.len(),
                 decode_report.errors
-            );
+            ));
         }
     }
 
     let stats = reassembler.stats();
-    println!(
+    say.note(format!(
         "packets  accepted {}  duplicate {}  stale {}  invalid {}",
         stats.accepted, stats.duplicates, stats.stale, stats.invalid
-    );
-    println!(
+    ));
+    say.note(format!(
         "frames   completed {}  dropped incomplete {}",
         stats.completed, stats.dropped_incomplete
-    );
+    ));
     if stats.recovered > 0 {
-        println!("recovery {} slices rebuilt from parity", stats.recovered);
+        say.note(format!(
+            "recovery {} slices rebuilt from parity",
+            stats.recovered
+        ));
     }
-    println!("feedback sent {reports_sent}  failed to send {reports_failed}");
+    say.note(format!(
+        "feedback sent {reports_sent}  failed to send {reports_failed}"
+    ));
 
     if audio_frames > 0 {
         // Five milliseconds a frame, so the count is also how long the sound was. Reported
         // against the run's own length because the useful question is whether it was
         // continuous, not how much of it there was.
-        println!(
+        say.note(format!(
             "audio    {audio_frames} frames ({:.1}s of sound), {:.1} kB, mean {} bytes{}",
-            audio_frames as f64 * f64::from(prism_core::audio::FRAME_US) / 1e6,
+            audio_frames as f64 * f64::from(crate::audio::FRAME_US) / 1e6,
             audio_bytes as f64 / 1e3,
             audio_bytes / audio_frames,
             if audio.is_some() {
@@ -756,11 +903,12 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
             } else {
                 ", not played (no window)"
             }
-        );
+        ));
     } else if agreed.audio {
-        println!(
+        say.note(
             "audio    none arrived, though the session agreed to it. The host has no system \
-             audio capture on its platform, or it was started without --audio."
+             audio capture on its platform, or it was started without audio."
+                .to_owned(),
         );
     }
 
@@ -790,10 +938,9 @@ trait Decoder {
     ///
     /// # Errors
     ///
-    /// Whatever the backend reports; [`prism_core::decode::DecodeError::NoParameterSets`] is
+    /// Whatever the backend reports; [`crate::decode::DecodeError::NoParameterSets`] is
     /// the ordinary case of a stream that has not described itself yet.
-    fn decode(&mut self, annexb: &[u8], pts_us: u64)
-    -> Result<(), prism_core::decode::DecodeError>;
+    fn decode(&mut self, annexb: &[u8], pts_us: u64) -> Result<(), crate::decode::DecodeError>;
 
     /// Waits up to `timeout` for a picture.
     fn poll(&mut self, timeout: Duration) -> Option<Self::Picture>;
@@ -806,14 +953,10 @@ trait Decoder {
 }
 
 #[cfg(target_os = "macos")]
-impl Decoder for prism_core::decode::videotoolbox::VideoToolboxDecoder {
-    type Picture = prism_core::decode::videotoolbox::DecodedFrame;
+impl Decoder for crate::decode::videotoolbox::VideoToolboxDecoder {
+    type Picture = crate::decode::videotoolbox::DecodedFrame;
 
-    fn decode(
-        &mut self,
-        annexb: &[u8],
-        pts_us: u64,
-    ) -> Result<(), prism_core::decode::DecodeError> {
+    fn decode(&mut self, annexb: &[u8], pts_us: u64) -> Result<(), crate::decode::DecodeError> {
         Self::decode(self, annexb, pts_us)
     }
 
@@ -831,14 +974,10 @@ impl Decoder for prism_core::decode::videotoolbox::VideoToolboxDecoder {
 }
 
 #[cfg(target_os = "windows")]
-impl Decoder for prism_core::decode::mediafoundation::MediaFoundationDecoder {
-    type Picture = prism_core::decode::mediafoundation::DecodedFrame;
+impl Decoder for crate::decode::mediafoundation::MediaFoundationDecoder {
+    type Picture = crate::decode::mediafoundation::DecodedFrame;
 
-    fn decode(
-        &mut self,
-        annexb: &[u8],
-        pts_us: u64,
-    ) -> Result<(), prism_core::decode::DecodeError> {
+    fn decode(&mut self, annexb: &[u8], pts_us: u64) -> Result<(), crate::decode::DecodeError> {
         Self::decode(self, annexb, pts_us)
     }
 
@@ -866,6 +1005,7 @@ fn decode_until_closed<D: Decoder>(
     recycle: &Sender<FrameBuf>,
     pictures: Option<SyncSender<D::Picture>>,
     offset: &Arc<AtomicI64>,
+    say: &Say,
 ) -> DecodeReport {
     // A developer affordance: writes exactly what is handed to the decoder, so a stream the
     // decoder refuses can be put in front of an independent one. A bitstream that ffmpeg reads
@@ -889,8 +1029,8 @@ fn decode_until_closed<D: Decoder>(
         }
 
         match decoder.decode(&buf.data, buf.capture_ts_us) {
-            Ok(()) | Err(prism_core::decode::DecodeError::NoParameterSets) => {}
-            Err(err) => eprintln!("client: {err}"),
+            Ok(()) | Err(crate::decode::DecodeError::NoParameterSets) => {}
+            Err(err) => say.note(err.to_string()),
         }
 
         // Everything the decoder has finished, not just the first of it. Waiting once and
@@ -951,9 +1091,10 @@ fn spawn_decoder(
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
     offset: Arc<AtomicI64>,
-    codec: prism_core::net::negotiate::Codec,
+    codec: crate::net::negotiate::Codec,
+    say: Say,
 ) -> thread::JoinHandle<DecodeReport> {
-    use prism_core::decode::videotoolbox::VideoToolboxDecoder;
+    use crate::decode::videotoolbox::VideoToolboxDecoder;
 
     thread::spawn(move || {
         decode_until_closed(
@@ -962,6 +1103,7 @@ fn spawn_decoder(
             &recycle,
             pictures,
             &offset,
+            &say,
         )
     })
 }
@@ -976,10 +1118,11 @@ fn spawn_decoder(
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
     offset: Arc<AtomicI64>,
-    codec: prism_core::net::negotiate::Codec,
+    codec: crate::net::negotiate::Codec,
+    say: Say,
     gpu: Option<Gpu>,
 ) -> thread::JoinHandle<DecodeReport> {
-    use prism_core::decode::mediafoundation::MediaFoundationDecoder;
+    use crate::decode::mediafoundation::MediaFoundationDecoder;
 
     thread::spawn(move || {
         let decoder = match gpu {
@@ -987,7 +1130,7 @@ fn spawn_decoder(
             None => MediaFoundationDecoder::new(codec),
         };
 
-        decode_until_closed(decoder, &frames, &recycle, pictures, &offset)
+        decode_until_closed(decoder, &frames, &recycle, pictures, &offset, &say)
     })
 }
 
@@ -1000,9 +1143,10 @@ fn spawn_decoder(
     recycle: Sender<FrameBuf>,
     pictures: Option<PictureSink>,
     offset: Arc<AtomicI64>,
-    codec: prism_core::net::negotiate::Codec,
+    codec: crate::net::negotiate::Codec,
+    say: Say,
 ) -> thread::JoinHandle<DecodeReport> {
-    let _ = (pictures, offset, codec);
+    let _ = (pictures, offset, codec, say);
     thread::spawn(move || {
         while let Ok(buf) = frames.recv() {
             let _ = recycle.send(buf);
@@ -1032,19 +1176,19 @@ pub fn age_of(host_ts_us: u64, offset_us: i64) -> Option<u32> {
     (now >= local_ts).then(|| (now - local_ts).min(i128::from(u32::MAX)) as u32)
 }
 
-/// Prints a latency summary under the given label.
-fn report(label: &str, recorder: &mut LatencyRecorder) {
-    print_summary(label, recorder.summarize());
+/// Reports a latency summary under the given label.
+fn summarize(say: &Say, label: &str, recorder: &mut LatencyRecorder) {
+    stage(say, label, recorder.summarize());
 }
 
-/// Prints an already computed summary, or a placeholder when there is none.
-fn print_summary(label: &str, summary: Option<LatencySummary>) {
+/// Reports an already computed summary, or a placeholder when there is none.
+fn stage(say: &Say, label: &str, summary: Option<LatencySummary>) {
     let Some(summary) = summary else {
-        println!("{label}: no frames measured");
+        say.note(format!("{label}: no frames measured"));
         return;
     };
 
-    println!(
+    say.note(format!(
         "{label}: n={} min {:.2} p50 {:.2} p95 {:.2} p99 {:.2} max {:.2} ms",
         summary.count,
         ms(summary.min_us),
@@ -1052,7 +1196,7 @@ fn print_summary(label: &str, summary: Option<LatencySummary>) {
         ms(summary.p95_us),
         ms(summary.p99_us),
         ms(summary.max_us)
-    );
+    ));
 }
 
 /// Converts microseconds to milliseconds for display.

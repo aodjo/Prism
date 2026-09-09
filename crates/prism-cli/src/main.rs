@@ -4,13 +4,6 @@
 //! with no Electron and no window, so the latency numbers describe the pipeline rather
 //! than a compositor. CI drives it for protocol regression runs.
 
-/// Playing the stream's sound, which only a client with a window does.
-#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
-mod audio;
-mod client;
-/// Showing the stream, which needs a decoder, a renderer, and a window to put it in.
-#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
-mod display;
 #[cfg(target_os = "macos")]
 mod encode;
 mod host;
@@ -26,9 +19,34 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use prism_core::control::client;
 use prism_core::identity;
 use prism_core::net::handshake::Identity;
-use prism_core::net::negotiate::{Codecs, H264, Offer};
+use prism_core::net::negotiate::Offer;
+
+/// Prints what a client session says, which is what this command is for.
+///
+/// The session itself no longer writes to standard output — it is a library now, and the shell
+/// that also drives it wants these as messages rather than sentences. So the terminal is this
+/// command's own doing, and the wording is its own to choose.
+fn printing() -> client::Reporter {
+    client::Reporter::new(|report| match report {
+        client::Report::Note(line) => println!("client: {line}"),
+        client::Report::Established(address) => println!("client: established with {address}"),
+        client::Report::Terms(agreed) => println!(
+            "client: terms {:?} {}x{} {} fps, audio {}",
+            agreed.codec,
+            agreed.width,
+            agreed.height,
+            agreed.fps,
+            if agreed.audio { "on" } else { "off" }
+        ),
+        client::Report::Counters(counters) => println!(
+            "client: stats rtt_us={} fps={:.1} kbps={:.0} frames={}",
+            counters.round_trip_us, counters.fps, counters.kbps, counters.frames
+        ),
+    })
+}
 
 /// Which codec a recording holds.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -414,27 +432,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// Returns what this machine can decode.
-///
-/// A statement about the hardware, not a wish: naming a codec that is not implemented would
-/// agree a session that never shows a frame, and the symptom is a black window with nothing
-/// reporting an error.
-fn client_codecs() -> Codecs {
-    #[cfg(target_os = "macos")]
-    {
-        Codecs::none()
-            .with(H264)
-            .with(prism_core::net::negotiate::HEVC)
-    }
-
-    // Every other platform decodes nothing yet, so it offers the floor and gets a session it
-    // can at least reassemble and measure.
-    #[cfg(not(target_os = "macos"))]
-    {
-        Codecs::none().with(H264)
-    }
-}
-
 /// Prints what the system allows, and what to do about anything it does not.
 ///
 /// # Errors
@@ -806,7 +803,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 offer: Offer {
                     // Both, on macOS: VideoToolbox decodes each in hardware, and the codec
                     // that ends up being used is whichever the host can also produce.
-                    codecs: client_codecs(),
+                    codecs: client::decodable(),
                     // The window the stream will be shown in, when there is one. A host
                     // sending more pixels than that is spending bitrate on pixels thrown
                     // away before anybody sees them. A run with no window is measuring the
@@ -854,6 +851,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     client::ClientHooks {
                         offset: Some(offset),
                         input: synthetic_input.then(windowless_input),
+                        report: Some(printing()),
                         ..client::ClientHooks::default()
                     },
                 )?)
@@ -862,13 +860,14 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             #[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
             {
                 if display {
-                    display::run(
+                    prism_stream::display::run(
                         config,
                         window_width,
                         window_height,
                         pacing_us,
                         !no_input,
                         synthetic_input,
+                        &printing(),
                     )
                 } else {
                     Ok(client::run(
@@ -876,6 +875,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         client::ClientHooks {
                             offset: Some(offset),
                             input: synthetic_input.then(windowless_input),
+                            report: Some(printing()),
                             ..client::ClientHooks::default()
                         },
                     )?)

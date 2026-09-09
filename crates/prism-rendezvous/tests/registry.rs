@@ -30,13 +30,18 @@ fn elsewhere() -> SocketAddr {
     "203.0.113.9:52000".parse().expect("valid")
 }
 
+/// Where a host says it is on its own network.
+fn inside() -> SocketAddr {
+    "192.168.1.40:41000".parse().expect("valid")
+}
+
 /// Registers `HOST` at `home()` and returns the moment it happened.
 fn registered(registry: &mut Registry) -> Instant {
     let now = Instant::now();
 
     registry.challenge_issued(home(), HOST, SECRET, now);
     assert_eq!(
-        registry.prove(home(), &HOST, &SECRET, now),
+        registry.prove(home(), &HOST, &SECRET, inside(), now),
         Proved::Registered
     );
 
@@ -53,6 +58,17 @@ fn a_proved_claim_becomes_a_registration() {
 }
 
 #[test]
+fn a_registration_keeps_the_address_the_host_gave_for_its_own_network() {
+    // A client behind the same router reaches the host at this one and at no other, so a
+    // server that dropped it would leave two machines on one desk connecting through a relay
+    // on another continent.
+    let mut registry = Registry::new();
+    let now = registered(&mut registry);
+
+    assert_eq!(registry.found(&HOST, now), Some((home(), inside())));
+}
+
+#[test]
 fn an_unproved_claim_is_not_a_registration() {
     // Without this, anyone who has ever seen a host's public key could claim it and every
     // client would afterwards be sent to them. They would learn nothing, because the Noise
@@ -63,7 +79,7 @@ fn an_unproved_claim_is_not_a_registration() {
     registry.challenge_issued(home(), HOST, SECRET, now);
 
     assert_eq!(
-        registry.prove(home(), &HOST, &[0x00; 16], now),
+        registry.prove(home(), &HOST, &[0x00; 16], inside(), now),
         Proved::Wrong
     );
     assert_eq!(registry.lookup(&HOST, now), None);
@@ -79,11 +95,11 @@ fn a_wrong_answer_spends_the_challenge() {
 
     registry.challenge_issued(home(), HOST, SECRET, now);
     assert_eq!(
-        registry.prove(home(), &HOST, &[0x00; 16], now),
+        registry.prove(home(), &HOST, &[0x00; 16], inside(), now),
         Proved::Wrong
     );
     assert_eq!(
-        registry.prove(home(), &HOST, &SECRET, now),
+        registry.prove(home(), &HOST, &SECRET, inside(), now),
         Proved::NoChallenge,
         "the right answer still worked after a wrong one"
     );
@@ -99,7 +115,7 @@ fn an_answer_from_a_different_address_proves_nothing() {
     registry.challenge_issued(home(), HOST, SECRET, now);
 
     assert_eq!(
-        registry.prove(elsewhere(), &HOST, &SECRET, now),
+        registry.prove(elsewhere(), &HOST, &SECRET, inside(), now),
         Proved::NoChallenge
     );
     assert_eq!(registry.lookup(&HOST, now), None);
@@ -112,7 +128,10 @@ fn an_answer_naming_a_different_key_proves_nothing() {
 
     registry.challenge_issued(home(), HOST, SECRET, now);
 
-    assert_eq!(registry.prove(home(), &OTHER, &SECRET, now), Proved::Wrong);
+    assert_eq!(
+        registry.prove(home(), &OTHER, &SECRET, inside(), now),
+        Proved::Wrong
+    );
     assert_eq!(registry.lookup(&OTHER, now), None);
 }
 
@@ -125,7 +144,7 @@ fn a_challenge_expires() {
 
     let late = now + CHALLENGE_TTL + Duration::from_secs(1);
     assert_eq!(
-        registry.prove(home(), &HOST, &SECRET, late),
+        registry.prove(home(), &HOST, &SECRET, inside(), late),
         Proved::NoChallenge
     );
 }
@@ -153,7 +172,7 @@ fn a_registration_can_move_after_a_new_proof() {
 
     registry.challenge_issued(elsewhere(), HOST, SECRET, now);
     assert_eq!(
-        registry.prove(elsewhere(), &HOST, &SECRET, now),
+        registry.prove(elsewhere(), &HOST, &SECRET, inside(), now),
         Proved::Registered
     );
     assert_eq!(registry.lookup(&HOST, now), Some(elsewhere()));
@@ -257,7 +276,7 @@ fn a_second_claim_from_one_address_replaces_the_first() {
 
     assert_eq!(registry.outstanding(), 1);
     assert_eq!(
-        registry.prove(home(), &HOST, &SECRET, now),
+        registry.prove(home(), &HOST, &SECRET, inside(), now),
         Proved::Registered
     );
 }

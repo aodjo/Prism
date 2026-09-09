@@ -1,6 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/prism-core", "crates/prism-napi", "crates/prism-cli", "crates/prism-rendezvous", "crates/prism-tauri"]
+members = [
+    "crates/prism-account-wasm",
+    "crates/prism-cli",
+    "crates/prism-core",
+    "crates/prism-rendezvous",
+    "crates/prism-secret",
+    "crates/prism-stream",
+    "crates/prism-tauri",
+]
 
 [workspace.package]
 version = "0.0.0"
@@ -11,6 +19,8 @@ repository = "https://github.com/aodjo/Prism"
 
 [workspace.dependencies]
 prism-core = { path = "crates/prism-core" }
+prism-secret = { path = "crates/prism-secret" }
+prism-stream = { path = "crates/prism-stream", default-features = false }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

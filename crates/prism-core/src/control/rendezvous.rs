@@ -86,27 +86,52 @@ pub struct Servers {
     addresses: Vec<SocketAddr>,
 }
 
+/// Keeps whichever address family is better represented and drops the other.
+///
+/// Ties go to IPv4, which is what these servers are. A synthesised address is a route to the
+/// same machine and worth having only when it is the only one on offer.
+fn one_family(resolved: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let (v4, v6): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        resolved.into_iter().partition(SocketAddr::is_ipv4);
+
+    if v4.len() >= v6.len() { v4 } else { v6 }
+}
+
 impl Servers {
     /// Resolves `name`, which is a host and port such as `rv.example.com:47300`.
     ///
     /// Every address the name resolves to is a candidate, so a name with one record behaves
     /// exactly as a single server always did.
     ///
+    /// # Why one family wins
+    ///
+    /// A session runs on one socket from beginning to end — that is what makes the address a
+    /// server observes worth anything — and a socket bound for IPv4 cannot send to an IPv6
+    /// address at all. It does not fail to reach it; the send is refused before it leaves.
+    ///
+    /// That matters because a resolver on a NAT64 network answers an IPv4-only name with
+    /// synthesised IPv6 addresses under `64:ff9b::/96`. Handed the mixture, a client would ask
+    /// half the regions in a form its socket cannot use and read the refusals as regions that
+    /// are down. So the larger family is kept and the other dropped, which leaves every
+    /// candidate reachable by the one socket the session is going to use.
+    ///
     /// # Errors
     ///
     /// Returns [`io::ErrorKind::InvalidInput`] if the name cannot be resolved or resolves to
     /// nothing.
     pub fn resolve(name: &str) -> io::Result<Self> {
-        let addresses: Vec<SocketAddr> = name.to_socket_addrs()?.collect();
+        let resolved: Vec<SocketAddr> = name.to_socket_addrs()?.collect();
 
-        if addresses.is_empty() {
+        if resolved.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the rendezvous name resolved to no addresses",
             ));
         }
 
-        Ok(Self { addresses })
+        Ok(Self {
+            addresses: one_family(resolved),
+        })
     }
 
     /// Returns the candidates.
@@ -183,6 +208,11 @@ pub fn register(
     let mut out = [0u8; MAX_MESSAGE_LEN];
     let mut buf = [0u8; MAX_MESSAGE_LEN];
 
+    // Where this machine is on its own network, handed to the server so it can pass it to a
+    // client that turns out to be behind the same router. The server cannot work it out: it
+    // sees the outside of the router and nothing behind it.
+    let local = crate::control::host::reachable_address(transport.local_addr()?);
+
     transport.set_read_timeout(Some(RETRY_INTERVAL))?;
     let give_up = Instant::now() + SERVER_TIMEOUT;
 
@@ -224,6 +254,7 @@ pub fn register(
                         &Message::Prove {
                             host: *identity.public(),
                             secret,
+                            local,
                         },
                         from,
                     )?;
@@ -341,6 +372,8 @@ pub fn spawn_keepalive(
 /// panel wants, and what says whether this machine's router hands out a stable mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Located {
+    /// Where the host is on its own network, worth trying when both are behind one router.
+    pub local: SocketAddr,
     /// Where to send to reach the host.
     pub address: SocketAddr,
     /// Where the server saw this machine.
@@ -351,6 +384,15 @@ pub struct Located {
     /// that just proved it knows the host — and proved, by answering first, that it is the
     /// nearest of them to this machine.
     pub server: SocketAddr,
+}
+
+/// Says what was being attempted when a socket call failed.
+///
+/// `Invalid argument (os error 22)` on its own names a syscall's opinion and nothing a person
+/// or a log can act on. What is wanted is which step it came from, which is knowable here and
+/// nowhere above: by the time it reaches a window it has crossed two processes.
+fn doing(what: &'static str) -> impl FnOnce(io::Error) -> io::Error {
+    move |err| io::Error::new(err.kind(), format!("{what}: {err}"))
 }
 
 /// Asks the server where a host is and opens this side's router towards it.
@@ -369,11 +411,16 @@ pub fn lookup(
     let mut out = [0u8; MAX_MESSAGE_LEN];
     let mut buf = [0u8; MAX_MESSAGE_LEN];
 
-    transport.set_read_timeout(Some(RETRY_INTERVAL))?;
+    transport
+        .set_read_timeout(Some(RETRY_INTERVAL))
+        .map_err(doing("setting the lookup timeout"))?;
     let give_up = Instant::now() + SERVER_TIMEOUT;
 
     let request = Message::Connect { host, client };
     let mut unknown: Vec<SocketAddr> = Vec::new();
+    // What went wrong at the last server that refused, kept so that a lookup which reached
+    // nobody says why rather than saying the host is not running.
+    let mut trouble: Option<String> = None;
 
     while Instant::now() < give_up {
         // Asked of every server at once, and the first answer wins. That is the whole of the
@@ -381,21 +428,37 @@ pub fn lookup(
         // answer rather than a guess about where the machines are.
         for &server in servers.addresses() {
             if !unknown.contains(&server) {
-                send(transport, &mut out, &request, server)?;
+                // One region refusing the datagram is not the lookup failing. The others may
+                // still answer, and a server that cannot be reached from here is exactly the
+                // case having four of them is for.
+                if let Err(err) = send(transport, &mut out, &request, server) {
+                    if !unknown.contains(&server) {
+                        unknown.push(server);
+                    }
+
+                    trouble = Some(format!("asking {server}: {err}"));
+                }
             }
         }
 
         let retry_at = Instant::now() + RETRY_INTERVAL;
         while Instant::now() < retry_at {
-            let Some((message, from)) = recv_from_servers(transport, &mut buf, servers)? else {
+            let Some((message, from)) = recv_from_servers(transport, &mut buf, servers)
+                .map_err(doing("reading a reply"))?
+            else {
                 break;
             };
 
             match message {
-                Message::Found { address, observed } => {
+                Message::Found {
+                    address,
+                    observed,
+                    local,
+                } => {
                     return Ok(Located {
                         address,
                         observed,
+                        local,
                         server: from,
                     });
                 }
@@ -412,9 +475,19 @@ pub fn lookup(
         }
 
         if unknown.len() == servers.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "the host is not registered, so it is probably not running",
+            return Err(trouble.map_or_else(
+                || {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "the host is not registered, so it is probably not running",
+                    )
+                },
+                |why| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("no rendezvous server could be asked — {why}"),
+                    )
+                },
             ));
         }
     }
@@ -661,6 +734,54 @@ pub fn relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parses a list of addresses for a test.
+    fn addresses(written: &[&str]) -> Vec<SocketAddr> {
+        written
+            .iter()
+            .map(|one| one.parse().expect("a valid address"))
+            .collect()
+    }
+
+    #[test]
+    fn a_resolver_that_answers_in_both_families_is_narrowed_to_one() {
+        // A session runs on one socket, and a socket bound for IPv4 cannot send to an IPv6
+        // address at all — the send is refused rather than lost. Asking half the regions in a
+        // form that cannot be used reads, from here, exactly like half the regions being down.
+        let mixed = addresses(&[
+            "129.225.129.149:47300",
+            "[64:ff9b::81e1:8195]:47300",
+            "89.34.230.9:47300",
+            "[64:ff9b::5922:e609]:47300",
+            "2.25.215.40:47300",
+        ]);
+
+        let kept = one_family(mixed);
+
+        assert_eq!(kept.len(), 3);
+        assert!(kept.iter().all(SocketAddr::is_ipv4));
+    }
+
+    #[test]
+    fn a_network_with_only_synthesised_addresses_keeps_them() {
+        // What a NAT64 network answers with. They are the only route to those machines from
+        // there, so dropping them for being the wrong shape would leave nothing at all.
+        let synthesised = addresses(&["[64:ff9b::219:d728]:47300", "[64:ff9b::b253:79d3]:47300"]);
+
+        let kept = one_family(synthesised.clone());
+
+        assert_eq!(kept, synthesised);
+    }
+
+    #[test]
+    fn an_even_split_prefers_the_family_the_servers_actually_are() {
+        let split = addresses(&["129.225.129.149:47300", "[64:ff9b::81e1:8195]:47300"]);
+
+        let kept = one_family(split);
+
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].is_ipv4());
+    }
 
     #[test]
     fn an_address_resolves_to_itself() {

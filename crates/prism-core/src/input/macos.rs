@@ -16,7 +16,7 @@ use objc2_core_graphics::{
     CGEventTapLocation, CGEventType, CGMainDisplayID, CGMouseButton,
 };
 
-use crate::input::{Injector, InputError, PointerSample};
+use crate::input::{HeldKeys, Injector, InputError, PointerSample};
 use crate::net::packet::{InputEvent, MouseButton};
 
 /// Where injected events enter the system.
@@ -32,6 +32,7 @@ pub struct MacInjector {
     bounds: CGRect,
     position: CGPoint,
     buttons: [bool; 3],
+    keys: HeldKeys,
     flags: CGEventFlags,
 }
 
@@ -154,7 +155,15 @@ impl MacInjector {
             InputError::Inject {
                 reason: "could not build a key event",
             },
-        )?;
+        );
+
+        // A press is remembered only once its event exists, and a release is forgotten
+        // whether or not one could be built: a key-down that never went out must not be
+        // released later, and a key-up the system will not build is not worth attempting
+        // again on every cleanup for the rest of the session.
+        self.keys.set(usage, pressed && event.is_ok());
+
+        let event = event?;
 
         {
             CGEvent::set_flags(Some(&event), self.flags);
@@ -162,6 +171,15 @@ impl MacInjector {
         }
 
         Ok(())
+    }
+
+    /// Returns the keys the injector is holding down.
+    ///
+    /// Public so a caller can see whether anything is still held, and so the release path
+    /// can be tested without a machine to press keys on.
+    #[must_use]
+    pub fn held_keys(&self) -> HeldKeys {
+        self.keys
     }
 
     /// Returns the button being held, if exactly one is.
@@ -229,6 +247,7 @@ impl Injector for MacInjector {
             bounds,
             position,
             buttons: [false; 3],
+            keys: HeldKeys::default(),
             flags: CGEventFlags::empty(),
         })
     }
@@ -240,6 +259,34 @@ impl Injector for MacInjector {
             InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
             InputEvent::Key { usage, pressed } => self.press_key(usage, pressed),
         }
+    }
+
+    fn release_all(&mut self) -> Result<(), InputError> {
+        // The held set is copied out first because releasing a key edits it, and because
+        // an empty set is the state to leave behind even if a post fails: a key this
+        // machine will not release is not a key worth trying again on the next cleanup.
+        let held = self.keys;
+        let mut outcome = Ok(());
+
+        // Buttons go up first, while the modifiers they were pressed under are still down,
+        // which is the order a person letting go of a shift-click produces.
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            if self.buttons[button as usize] {
+                outcome = outcome.and(self.press_button(button, false));
+            }
+        }
+
+        // `and` keeps the first failure while still evaluating the rest, because the whole
+        // point is that every key comes up.
+        for usage in held.iter() {
+            outcome = outcome.and(self.press_key(usage, false));
+        }
+
+        // A modifier the table refused to release would otherwise leave its flag set on
+        // every event this injector posts for the rest of the session.
+        self.flags = CGEventFlags::empty();
+
+        outcome
     }
 
     fn injection_is_landing(&self) -> bool {
@@ -317,8 +364,19 @@ pub fn modifier_flag(usage: u16) -> Option<CGEventFlags> {
 ///
 /// The two numbering schemes have nothing in common — macOS's dates from the original
 /// Macintosh keyboard and is laid out by physical position — so the table is explicit.
-/// Covers the keys a remote session needs; anything else is refused rather than guessed,
-/// because a wrong key is worse than no key.
+/// Every number on the right is a `kVK_` constant from `<HIToolbox/Events.h>`, written in
+/// decimal because that is what `CGEvent` takes.
+///
+/// Four things a keyboard has are refused rather than guessed, because a wrong key is
+/// worse than no key:
+///
+/// - **Non-US hash and non-US backslash.** macOS decides which of virtual keys 10 and 50
+///   is the grave and which is the extra key from the *type* of keyboard it believes is
+///   attached, so either choice types the wrong character on half of them.
+/// - **Power.** It is a hardware signal on this machine, not something an event posts.
+/// - **F13 through F20.** The first three of them are the same physical keys as Print
+///   Screen, Scroll Lock and Pause, which claim those virtual keys above; a table cannot
+///   answer to both names at once and the PC names are the ones a client sends.
 pub fn hid_to_virtual_key(usage: u16) -> Option<u16> {
     let key = match usage {
         0x04 => 0,  // a
@@ -390,10 +448,49 @@ pub fn hid_to_virtual_key(usage: u16) -> Option<u16> {
         0x44 => 103, // F11
         0x45 => 111, // F12
 
+        // A Mac has no key called Print Screen, Scroll Lock, Pause or Insert. It has the
+        // keys those sit on: F13, F14, F15 and Help, which is what Apple's own USB driver
+        // hands a PC keyboard's four, and what an application on this machine will see.
+        0x46 => 105, // print screen (F13)
+        0x47 => 107, // scroll lock (F14)
+        0x48 => 113, // pause (F15)
+        0x49 => 114, // insert (help)
+
+        0x4A => 115, // home
+        0x4B => 116, // page up
+        0x4C => 117, // forward delete
+        0x4D => 119, // end
+        0x4E => 121, // page down
+
         0x4F => 124, // right arrow
         0x50 => 123, // left arrow
         0x51 => 125, // down arrow
         0x52 => 126, // up arrow
+
+        // Num Lock is Clear on a Mac keypad — the same key, doing what that keypad does
+        // with it. The keypad digits are deliberately separate from the number row: they
+        // carry their own virtual keys, and a game that binds keypad 4 does not want the 4
+        // above the letters.
+        0x53 => 71, // num lock (clear)
+        0x54 => 75, // keypad divide
+        0x55 => 67, // keypad multiply
+        0x56 => 78, // keypad minus
+        0x57 => 69, // keypad plus
+        0x58 => 76, // keypad enter
+        0x59 => 83, // keypad 1
+        0x5A => 84, // keypad 2
+        0x5B => 85, // keypad 3
+        0x5C => 86, // keypad 4
+        0x5D => 87, // keypad 5
+        0x5E => 88, // keypad 6
+        0x5F => 89, // keypad 7
+        0x60 => 91, // keypad 8
+        0x61 => 92, // keypad 9
+        0x62 => 82, // keypad 0
+        0x63 => 65, // keypad decimal
+
+        0x65 => 110, // application
+        0x67 => 81,  // keypad equals
 
         0xE0 => 59, // left control
         0xE1 => 56, // left shift
@@ -408,4 +505,183 @@ pub fn hid_to_virtual_key(usage: u16) -> Option<u16> {
     };
 
     Some(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::{MacInjector, hid_to_virtual_key};
+    use crate::input::{Injector, InputError};
+    use crate::net::packet::InputEvent;
+
+    #[test]
+    fn the_navigation_cluster_reaches_the_keys_it_names() {
+        assert_eq!(hid_to_virtual_key(0x49), Some(114), "insert, labelled help");
+        assert_eq!(hid_to_virtual_key(0x4A), Some(115), "home");
+        assert_eq!(hid_to_virtual_key(0x4B), Some(116), "page up");
+        assert_eq!(hid_to_virtual_key(0x4C), Some(117), "forward delete");
+        assert_eq!(hid_to_virtual_key(0x4D), Some(119), "end");
+        assert_eq!(hid_to_virtual_key(0x4E), Some(121), "page down");
+    }
+
+    #[test]
+    fn forward_delete_is_not_backspace() {
+        // The two are one letter apart in the usage table and a world apart to whoever is
+        // typing: 0x2A rubs out what is behind the caret, 0x4C what is in front of it.
+        assert_eq!(hid_to_virtual_key(0x2A), Some(51), "backspace");
+        assert_eq!(hid_to_virtual_key(0x4C), Some(117), "forward delete");
+    }
+
+    #[test]
+    fn print_screen_scroll_lock_and_pause_land_on_the_keys_a_mac_has_for_them() {
+        assert_eq!(hid_to_virtual_key(0x46), Some(105), "F13");
+        assert_eq!(hid_to_virtual_key(0x47), Some(107), "F14");
+        assert_eq!(hid_to_virtual_key(0x48), Some(113), "F15");
+    }
+
+    #[test]
+    fn the_keypad_is_complete() {
+        let mut seen = HashSet::new();
+
+        for usage in 0x53..=0x63u16 {
+            let key = hid_to_virtual_key(usage)
+                .unwrap_or_else(|| panic!("keypad key {usage:#04x} has no macOS key"));
+            assert!(
+                seen.insert(key),
+                "keypad key {usage:#04x} collides on {key}"
+            );
+        }
+
+        assert_eq!(seen.len(), 17, "num lock, five operators and eleven keys");
+    }
+
+    #[test]
+    fn the_keypad_digits_are_not_the_number_row() {
+        // A game that binds keypad 4 does not want the 4 above the letters, and macOS
+        // gives the two rows entirely separate virtual keys, so nothing here may collide.
+        for (row, keypad) in [
+            (0x27u16, 0x62u16), // 0
+            (0x1E, 0x59),       // 1
+            (0x21, 0x5C),       // 4
+            (0x26, 0x61),       // 9
+        ] {
+            assert_ne!(
+                hid_to_virtual_key(row),
+                hid_to_virtual_key(keypad),
+                "{row:#04x} and {keypad:#04x} are different keys"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_in_the_whole_table_collides() {
+        let mut seen = HashSet::new();
+
+        for usage in 0..=0xFFu16 {
+            let Some(key) = hid_to_virtual_key(usage) else {
+                continue;
+            };
+            assert!(
+                seen.insert(key),
+                "usage {usage:#04x} maps to {key}, which another key already claims"
+            );
+        }
+    }
+
+    #[test]
+    fn what_the_table_cannot_answer_for_is_still_refused() {
+        assert_eq!(hid_to_virtual_key(0x00), None, "reserved");
+        assert_eq!(
+            hid_to_virtual_key(0x32),
+            None,
+            "non-US hash, whose virtual key depends on the keyboard type"
+        );
+        assert_eq!(
+            hid_to_virtual_key(0x64),
+            None,
+            "non-US backslash, the other half of that ambiguity"
+        );
+        assert_eq!(hid_to_virtual_key(0x66), None, "power is not an event");
+        assert_eq!(
+            hid_to_virtual_key(0x68),
+            None,
+            "F13, which print screen already claims"
+        );
+        assert_eq!(hid_to_virtual_key(0xFF), None, "beyond the table");
+    }
+
+    #[test]
+    fn releasing_everything_lets_go_of_every_key_that_was_held() {
+        let mut injector = match MacInjector::new() {
+            Ok(injector) => injector,
+            Err(InputError::PermissionDenied) => {
+                eprintln!("skipping: this process has no Accessibility permission");
+                return;
+            }
+            Err(err) => panic!("could not create an injector: {err}"),
+        };
+
+        // Modifiers and F13, which are the keys that change nothing on the machine running
+        // the test. Injecting a letter here would type it into whatever window has focus.
+        for usage in [0xE1u16, 0xE2, 0x46] {
+            injector
+                .inject(InputEvent::Key {
+                    usage,
+                    pressed: true,
+                })
+                .expect("a mapped key is always injectable");
+        }
+
+        assert_eq!(injector.held_keys().len(), 3, "three keys are down");
+
+        injector.release_all().expect("releasing is the same call");
+
+        assert!(
+            injector.held_keys().is_empty(),
+            "a key still held after a release is one stuck on the host for the session"
+        );
+        assert!(
+            injector.flags.is_empty(),
+            "and its modifier flag would ride on every event after it"
+        );
+    }
+
+    #[test]
+    fn releasing_nothing_is_not_an_error() {
+        let mut injector = match MacInjector::new() {
+            Ok(injector) => injector,
+            Err(InputError::PermissionDenied) => {
+                eprintln!("skipping: this process has no Accessibility permission");
+                return;
+            }
+            Err(err) => panic!("could not create an injector: {err}"),
+        };
+
+        assert_eq!(injector.release_all(), Ok(()));
+        assert!(injector.held_keys().is_empty());
+    }
+
+    #[test]
+    fn a_key_the_table_refuses_is_never_recorded_as_held() {
+        let mut injector = match MacInjector::new() {
+            Ok(injector) => injector,
+            Err(InputError::PermissionDenied) => {
+                eprintln!("skipping: this process has no Accessibility permission");
+                return;
+            }
+            Err(err) => panic!("could not create an injector: {err}"),
+        };
+
+        let refused = injector.inject(InputEvent::Key {
+            usage: 0x66,
+            pressed: true,
+        });
+
+        assert!(refused.is_err(), "power has no key on this machine");
+        assert!(
+            injector.held_keys().is_empty(),
+            "a key that was never pressed must not be released later"
+        );
+    }
 }

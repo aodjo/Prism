@@ -7,18 +7,25 @@
 //! stall it, in a process that can crash without taking the window with it, and the rule that a
 //! frame never reaches the shell holds by construction rather than by discipline.
 //!
-//! What crosses back is the child's own output, read a line at a time on threads of its own: a
-//! phase, the terms the two sides settled on, and a line of counters once a second. Nothing
-//! here is on the frame path, and the only thing this module and the stream share is a pipe.
+//! # It is a process, not a command
+//!
+//! For a while this shell built a command line for `prism-cli` and read its printed sentences
+//! back, watching for the words "session established" to decide somebody was looking at a
+//! screen. That made the shell's whole vocabulary the set of flags that happened to exist, and
+//! made every line of that program's output something neither end could reword. What crosses
+//! now is [`prism_stream::ipc`]: one message describing what to watch, and typed messages
+//! coming back. The prose that still arrives is a log for a person to read, and nothing is
+//! decided from it.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use prism_stream::ipc;
 use serde::Serialize;
 use tauri::State;
 
@@ -31,6 +38,16 @@ use crate::Held as Chosen;
 
 /// How many lines of the child's output to keep, which is what explains a failure.
 const LOG_LINES: usize = 40;
+
+/// How large the stream window opens.
+///
+/// Also the ceiling the session is negotiated against: a host sending more pixels than the
+/// window has is spending bitrate on pixels thrown away before anybody sees them. The window is
+/// resizable afterwards, and the person watching it decides what it ends up as.
+const WINDOW_WIDTH: u32 = 1280;
+
+/// How large the stream window opens.
+const WINDOW_HEIGHT: u32 = 720;
 
 /// How long the client waits without a packet before deciding the host has gone.
 ///
@@ -286,7 +303,7 @@ impl Held {
             return Err("set a rendezvous server, or give the host address directly".to_owned());
         }
 
-        let binary = find_client()?;
+        let binary = find_stream()?;
         let mut inner = self.locked()?;
 
         if inner.child.is_some() {
@@ -294,20 +311,31 @@ impl Held {
         }
 
         let mut child = Command::new(&binary)
-            .args(arguments(host, address, settings))
-            // Nothing is ever written to it, and a client that inherited this process's input
-            // would be reading the same terminal a developer is typing into.
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("could not start {}: {error}", binary.display()))?;
 
-        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let (Some(mut stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
             let _ = child.kill();
 
-            return Err("the stream started with no output to read it through".to_owned());
+            return Err("the stream started with nothing to talk to it through".to_owned());
         };
+
+        // Sent before anything else, because the process does nothing until it arrives. The
+        // pipe is dropped straight afterwards: there is no second message, and a stream whose
+        // input stayed open would be one waiting for a message that never comes.
+        let asked = ipc::write(&mut stdin, &wanted(host, address, settings));
+        drop(stdin);
+
+        if let Err(error) = asked {
+            let _ = child.kill();
+
+            return Err(format!("could not tell the stream what to watch: {error}"));
+        }
 
         inner.run = inner.run.wrapping_add(1);
         inner.phase = Phase::Connecting;
@@ -326,12 +354,12 @@ impl Held {
         let snapshot = inner.snapshot();
         drop(inner);
 
-        // Two threads because two pipes: the client writes its counters to one and whatever
-        // went wrong to the other, and a single thread reading them in turn would sit on the
-        // quiet one while the loud one filled its buffer.
+        // Two threads because two pipes carrying different things: messages on one, and on the
+        // other whatever the process wrote for a person — a panic, most usefully. A single
+        // thread reading them in turn would sit on the quiet one while the loud one filled.
         let readers = [
-            self.spawn_reader(run, stdout),
-            self.spawn_reader(run, stderr),
+            self.spawn_events(run, stdout),
+            self.spawn_lines(run, stderr),
         ];
 
         let shared = Arc::clone(&self.0);
@@ -382,25 +410,49 @@ impl Held {
             .map_err(|_| "the stream lock was poisoned".to_owned())
     }
 
-    /// Starts a thread that reads one of the client's pipes until it closes.
-    fn spawn_reader(&self, run: u64, source: impl Read + Send + 'static) -> JoinHandle<()> {
+    /// Starts a thread that reads the stream's messages until the pipe closes.
+    fn spawn_events(&self, run: u64, source: ChildStdout) -> JoinHandle<()> {
         let shared = Arc::clone(&self.0);
 
         std::thread::spawn(move || absorb(&shared, run, source))
     }
+
+    /// Starts a thread that keeps whatever the stream wrote for a person.
+    fn spawn_lines(&self, run: u64, source: impl Read + Send + 'static) -> JoinHandle<()> {
+        let shared = Arc::clone(&self.0);
+
+        std::thread::spawn(move || {
+            for line in BufReader::new(source).lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let Ok(mut inner) = shared.inner.lock() else {
+                    return;
+                };
+                if inner.run != run {
+                    return;
+                }
+
+                inner.remember(line);
+            }
+        })
+    }
 }
 
-/// Reads a pipe to its end, keeping the state up with what the client says.
+/// Reads messages to the end of the pipe, keeping the state up with what the stream says.
 ///
 /// Blocking reads on a thread of their own, which is the whole of what this needs: the control
 /// plane is allowed to wait, and a runtime here would buy nothing that a pipe and a thread do
 /// not already do.
-fn absorb(shared: &Arc<Shared>, run: u64, source: impl Read) {
-    for line in BufReader::new(source).lines().map_while(Result::ok) {
-        if line.trim().is_empty() {
-            continue;
-        }
+///
+/// A message that cannot be read ends the reading. Skipping it is not on offer: the length said
+/// where the next one starts, so a reader that got this far and failed no longer knows where in
+/// the pipe it is.
+fn absorb(shared: &Arc<Shared>, run: u64, source: ChildStdout) {
+    let mut source = BufReader::new(source);
 
+    while let Ok(Some(event)) = ipc::read::<ipc::Event>(&mut source) {
         let Ok(mut inner) = shared.inner.lock() else {
             return;
         };
@@ -411,27 +463,56 @@ fn absorb(shared: &Arc<Shared>, run: u64, source: impl Read) {
 
         let was = inner.phase;
 
-        // The client says this exactly once, when the handshake completes. Reading it is what
-        // turns "a process is running" into "a person is watching a screen".
-        if line.contains("session established") {
-            inner.phase = Phase::Streaming;
+        match event {
+            ipc::Event::Note { line } => inner.remember(line),
+            ipc::Event::Established { address } => {
+                inner.phase = Phase::Streaming;
 
-            if inner.started_at.is_none() {
-                inner.started_at = Some(now_ms());
+                if inner.started_at.is_none() {
+                    inner.started_at = Some(now_ms());
+                }
+
+                inner.remember(format!("established with {address}"));
+            }
+            ipc::Event::Terms {
+                codec,
+                width,
+                height,
+                fps,
+                ..
+            } => {
+                inner.terms = Some(Terms {
+                    codec,
+                    width,
+                    height,
+                    fps,
+                });
+            }
+            ipc::Event::Counters {
+                round_trip_us,
+                fps,
+                kbps,
+                frames,
+            } => {
+                let stats = Stats {
+                    rtt_ms: round_trip_us as f64 / 1000.0,
+                    fps,
+                    mbps: kbps / 1000.0,
+                    frames: u64::from(frames),
+                };
+
+                inner.rtt_sum += stats.rtt_ms;
+                inner.rtt_count = inner.rtt_count.saturating_add(1);
+                inner.stats = Some(stats);
+            }
+            // What it came to is settled by `conclude`, which waits for the process rather than
+            // for its pipes. Kept as a line, because a stream that failed said why here.
+            ipc::Event::Ended { error } => {
+                if let Some(error) = error {
+                    inner.remember(error);
+                }
             }
         }
-
-        if let Some(terms) = read_terms(&line) {
-            inner.terms = Some(terms);
-        }
-
-        if let Some(stats) = read_stats(&line) {
-            inner.rtt_sum += stats.rtt_ms;
-            inner.rtt_count = inner.rtt_count.saturating_add(1);
-            inner.stats = Some(stats);
-        }
-
-        inner.remember(line);
 
         if inner.phase == was && inner.reported.elapsed() < REPORT_EVERY {
             continue;
@@ -483,42 +564,29 @@ fn conclude(shared: &Arc<Shared>, run: u64) {
     }
 }
 
-/// Builds the command line that watches one host.
+/// Says what to watch and how.
 ///
-/// Every decision here is one the client would otherwise have to guess at: which machine to
+/// Every field here is a decision the stream would otherwise have to guess at: which machine to
 /// trust, how to reach it, and whether this end is watching or working.
-fn arguments(host: &str, address: &str, settings: &Settings) -> Vec<String> {
-    let mut args = vec![
-        "client".to_owned(),
-        "--display".to_owned(),
-        "--peer-key".to_owned(),
-        host.to_owned(),
-    ];
-
-    if address.is_empty() {
-        args.push("--rendezvous".to_owned());
-        args.push(settings.rendezvous.clone());
-    } else {
-        args.push("--host".to_owned());
-        args.push(address.to_owned());
+fn wanted(host: &str, address: &str, settings: &Settings) -> ipc::Start {
+    ipc::Start {
+        host: host.to_owned(),
+        // An address given by hand is one somebody has arranged to be reachable. Without one
+        // the rendezvous server is asked, which is what a host behind a router requires.
+        address: (!address.is_empty()).then(|| address.to_owned()),
+        rendezvous: address
+            .is_empty()
+            .then(|| settings.rendezvous.clone())
+            .filter(|name| !name.is_empty()),
+        control: settings.control,
+        smooth: settings.smooth,
+        idle_timeout_ms: IDLE_TIMEOUT_MS,
+        width: WINDOW_WIDTH,
+        height: WINDOW_HEIGHT,
     }
-
-    if !settings.control {
-        args.push("--no-input".to_owned());
-    }
-
-    if settings.smooth {
-        args.push("--mode".to_owned());
-        args.push("smooth".to_owned());
-    }
-
-    args.push("--idle-timeout-ms".to_owned());
-    args.push(IDLE_TIMEOUT_MS.to_string());
-
-    args
 }
 
-/// Finds the headless client.
+/// Finds the process that draws the stream.
 ///
 /// Four places, in the order they should win: an explicit override for somebody testing a
 /// build, the copy shipped beside the shell, the one a macOS bundle keeps in its resources, and
@@ -528,13 +596,13 @@ fn arguments(host: &str, address: &str, settings: &Settings) -> Vec<String> {
 ///
 /// # Errors
 ///
-/// Fails if none of them is there, naming everywhere it looked — a missing client is a
+/// Fails if none of them is there, naming everywhere it looked — a missing stream process is a
 /// packaging mistake, and the paths are what say which one.
-fn find_client() -> Result<PathBuf, String> {
-    let name = format!("prism-cli{}", std::env::consts::EXE_SUFFIX);
+fn find_stream() -> Result<PathBuf, String> {
+    let name = format!("prism-stream{}", std::env::consts::EXE_SUFFIX);
     let mut looked = Vec::new();
 
-    if let Some(named) = std::env::var_os("PRISM_CLI").filter(|path| !path.is_empty()) {
+    if let Some(named) = std::env::var_os("PRISM_STREAM").filter(|path| !path.is_empty()) {
         looked.push(PathBuf::from(named));
     }
 
@@ -543,9 +611,14 @@ fn find_client() -> Result<PathBuf, String> {
     {
         looked.push(beside.join(&name));
         // A macOS bundle runs from `Contents/MacOS` and keeps what it ships in
-        // `Contents/Resources`.
-        looked.push(beside.join("..").join("Resources").join(&name));
-        // A development run has the shell in one of the two profile directories and the client
+        // `Contents/Resources`, under the directory the bundle configuration names.
+        let resources = beside.join("..").join("Resources");
+        looked.push(resources.join("sidecar").join(&name));
+        looked.push(resources.join(&name));
+        // Everywhere else the same files sit beside the executable rather than above it.
+        looked.push(beside.join("resources").join("sidecar").join(&name));
+        looked.push(beside.join("resources").join(&name));
+        // A development run has the shell in one of the two profile directories and the stream
         // in either, since the two are built by separate commands and nothing makes them agree.
         looked.push(beside.join("..").join("release").join(&name));
         looked.push(beside.join("..").join("debug").join(&name));
@@ -564,53 +637,6 @@ fn find_client() -> Result<PathBuf, String> {
         "could not find {name}; looked in {}",
         paths.join(", ")
     ))
-}
-
-/// Reads the line the client prints once, naming what the two sides settled on.
-///
-/// Parsed from the client's own output rather than passed back some other way, because that is
-/// where the negotiation happens and the output is already being read. A line that does not
-/// match is not an error: most of them are something else.
-fn read_terms(line: &str) -> Option<Terms> {
-    let (_, rest) = line.split_once("client: terms ")?;
-
-    let width: u32 = field(rest, "width")?.parse().ok()?;
-    let height: u32 = field(rest, "height")?.parse().ok()?;
-
-    // A client that will take whatever the host's screen is says so with the largest number the
-    // field holds. That is not a size anybody wants shown to them.
-    let capped = width < 65_534 && height < 65_534;
-
-    Some(Terms {
-        codec: field(rest, "codec")?.to_owned(),
-        width: if capped { width } else { 0 },
-        height: if capped { height } else { 0 },
-        fps: field(rest, "fps")?.parse().ok()?,
-    })
-}
-
-/// Reads the line the client prints once a second while it is running.
-fn read_stats(line: &str) -> Option<Stats> {
-    let (_, rest) = line.split_once("client: stats ")?;
-
-    let rtt_us: f64 = field(rest, "rtt_us")?.parse().ok()?;
-    let kbps: f64 = field(rest, "kbps")?.parse().ok()?;
-
-    Some(Stats {
-        rtt_ms: rtt_us / 1000.0,
-        fps: field(rest, "fps")?.parse().ok()?,
-        mbps: kbps / 1000.0,
-        frames: field(rest, "frames")?.parse().ok()?,
-    })
-}
-
-/// Reads one `key=value` out of the machine-readable half of a line.
-///
-/// The client prints each of these lines twice, once for a person and once in this shape,
-/// precisely so that nothing has to match the wording of a sentence somebody may reword.
-fn field<'a>(rest: &'a str, key: &str) -> Option<&'a str> {
-    rest.split_ascii_whitespace()
-        .find_map(|token| token.strip_prefix(key)?.strip_prefix('='))
 }
 
 /// The current time in milliseconds since the epoch.
@@ -685,69 +711,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terms_are_read_out_of_the_line_written_for_a_program() {
-        let terms = read_terms("client: terms codec=H264 width=1920 height=1080 fps=60 audio=1")
-            .expect("the line names terms");
-
-        assert_eq!(terms.codec, "H264");
-        assert_eq!(terms.width, 1920);
-        assert_eq!(terms.height, 1080);
-        assert_eq!(terms.fps, 60);
-    }
-
-    #[test]
-    fn asking_for_whatever_the_host_has_is_not_a_size() {
-        let terms = read_terms("client: terms codec=H264 width=65535 height=65535 fps=60 audio=0")
-            .expect("the line names terms");
-
-        assert_eq!(terms.width, 0);
-        assert_eq!(terms.height, 0);
-    }
-
-    #[test]
-    fn the_sentence_written_for_a_person_is_not_parsed() {
-        assert!(
-            read_terms("client: agreed H264, 1920x1080, 60 fps, 24.0 Mbps, audio on").is_none()
-        );
-        assert!(read_stats("client: session established with 1.2.3.4:47200 (ab)").is_none());
-    }
-
-    #[test]
-    fn counters_come_back_in_the_units_a_window_shows() {
-        let stats = read_stats("client: stats rtt_us=8200 fps=59.9 kbps=18400 frames=1234")
-            .expect("the line names counters");
-
-        assert!((stats.rtt_ms - 8.2).abs() < 1e-9);
-        assert!((stats.fps - 59.9).abs() < 1e-9);
-        assert!((stats.mbps - 18.4).abs() < 1e-9);
-        assert_eq!(stats.frames, 1234);
-    }
-
-    #[test]
     fn an_address_is_used_instead_of_the_rendezvous_and_not_beside_it() {
+        // Both would be a stream that asks a server where a machine is after being told.
         let settings = Settings::default();
-        let args = arguments("ab12", "10.0.0.4:47200", &settings);
+        let asked = wanted("ab12", "10.0.0.4:47200", &settings);
 
-        assert!(args.contains(&"--host".to_owned()));
-        assert!(!args.contains(&"--rendezvous".to_owned()));
-        assert!(!args.contains(&"--no-input".to_owned()));
+        assert_eq!(asked.address.as_deref(), Some("10.0.0.4:47200"));
+        assert_eq!(asked.rendezvous, None);
+        assert_eq!(asked.host, "ab12");
+        assert!(asked.control);
     }
 
     #[test]
-    fn watching_without_typing_is_asked_for_by_name() {
+    fn without_an_address_the_rendezvous_server_is_asked() {
         let settings = Settings {
             control: false,
             smooth: true,
+            rendezvous: "rv.presm.kr:47300".to_owned(),
             ..Settings::default()
         };
-        let args = arguments("ab12", "", &settings);
+        let asked = wanted("ab12", "", &settings);
 
-        assert!(args.contains(&"--no-input".to_owned()));
-        assert_eq!(
-            args.iter().position(|arg| arg == "--mode").map(|at| at + 1),
-            args.iter().position(|arg| arg == "smooth")
-        );
-        assert!(args.contains(&"--rendezvous".to_owned()));
+        assert_eq!(asked.address, None);
+        assert_eq!(asked.rendezvous.as_deref(), Some("rv.presm.kr:47300"));
+        assert!(!asked.control);
+        assert!(asked.smooth);
+    }
+
+    #[test]
+    fn a_rendezvous_that_was_never_set_is_left_out_rather_than_sent_empty() {
+        // The stream refuses a request with neither, and that refusal is the sentence a person
+        // should see. An empty name would instead be a name lookup failing.
+        let settings = Settings {
+            rendezvous: String::new(),
+            ..Settings::default()
+        };
+
+        assert_eq!(wanted("ab12", "", &settings).rendezvous, None);
     }
 
     #[test]

@@ -1,24 +1,26 @@
 /**
- * The window's way of reaching the machine, when the shell is Tauri rather than Electron.
+ * The window's way of reaching the machine.
  *
- * Electron injects `window.prism` from a preload script that runs before the page. Tauri has no
- * preload: a command is called from the page itself. So this file installs the same object the
- * preload installs, backed by `invoke` instead of `ipcRenderer`, and the React code above it
- * cannot tell the difference — which is the whole point, because that code is three thousand
- * lines and none of it should have to care which shell is underneath.
+ * Every call the interface can make, in one object, installed before the bundle that reads it.
+ * The React above this is three thousand lines that know nothing about processes, sockets or
+ * keys — they ask this, and this asks the shell.
  *
- * Loaded by every page, under both shells. It stands aside when `window.prism` is already there,
- * so the Electron build behaves exactly as it did.
+ * It exists as a file of its own because it was the seam the migration off Electron ran along.
+ * Electron injected the same object from a preload script; this installs it from the page, and
+ * the markup between the two never knew which was underneath. Now there is only one, and the
+ * seam is just where the surface is written down.
  *
  * Two things do not survive the boundary unchanged and are repaired here rather than upstream.
  * JSON has no integer wider than a double, so counters cross as decimal text and are rebuilt as
  * `BigInt`. And the shell hands over the provisioning link rather than a picture of it, because
- * a main process drew that picture only for a renderer that could not — this one can.
+ * the process that used to draw that picture did so only for a renderer that could not.
  */
 
 import { toDataURL } from 'qrcode';
 
 import type {
+  Available,
+  Build,
   AccountEnrolmentView,
   AccountState,
   HostPermissions,
@@ -91,15 +93,6 @@ function listen<T>(event: string, listener: (payload: T) => void): void {
   void internals.invoke('plugin:event|listen', { event, target: { kind: 'Any' }, handler });
 }
 
-/**
- * Whether the page is running inside the Tauri shell.
- *
- * @returns {boolean} True when Tauri injected itself into this page.
- */
-export function inTauri(): boolean {
-  return window.__TAURI_INTERNALS__ !== undefined;
-}
-
 /** How often a window asks what the session it is handing out is doing. */
 const SHARING_POLL_MS = 200;
 
@@ -135,15 +128,11 @@ function revive(raw: RawSnapshot): HostSnapshot {
 }
 
 /**
- * Installs the bridge, unless a shell has already provided one.
+ * Installs the bridge.
  *
  * @returns {void}
  */
 export function installBridge(): void {
-  if (window.prism !== undefined || !inTauri()) {
-    return;
-  }
-
   const api: PrismApi = {
     identity: async (): Promise<Identity> => {
       const [version, wireFormat, publicKey, hosts] = await Promise.all([
@@ -164,6 +153,13 @@ export function installBridge(): void {
       call<Settings>('set_settings', {
         next: { ...(await call<Settings>('get_settings')), ...next },
       }),
+
+    buildInfo: (): Promise<Build> => call<Build>('build_info'),
+
+    checkForUpdate: (): Promise<Available | null> =>
+      call<Available | null>('check_for_update'),
+
+    installUpdate: (): Promise<string | null> => call<string | null>('install_update'),
 
     permissions: (): Promise<HostPermissions> => call<HostPermissions>('permissions'),
 
@@ -281,9 +277,39 @@ export function installBridge(): void {
   // `readonly` on the declaration is what stops a window reassigning the surface it talks to.
   // This is the one place that installs it, and the shell that does so is not the window.
   (window as { prism: PrismApi }).prism = api;
+
+  installReload();
+}
+
+/**
+ * Makes the platform's reload shortcut reload the window.
+ *
+ * A webview with no browser chrome has no reload, so the key that reloads every other window on
+ * the machine does nothing here — and a window that looks stuck offers nobody a way to find out
+ * whether it is. Bound because it is free to have and awkward to be without.
+ *
+ * @returns {void}
+ */
+function installReload(): void {
+  window.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key.toLowerCase() !== 'r' || event.altKey) {
+      return;
+    }
+
+    // Command on a Mac, Control everywhere else, matching what the rest of the system does
+    // rather than what this window would prefer.
+    const held = navigator.userAgent.includes('Mac') ? event.metaKey : event.ctrlKey;
+
+    if (!held) {
+      return;
+    }
+
+    event.preventDefault();
+    location.reload();
+  });
 }
 
 // Installed as a side effect, and loaded by the page as a classic script rather than a module,
 // because a module is deferred and the React bundle reads `window.prism` the moment it runs.
-// Ordering by hand is what makes the three thousand lines above this need no change at all.
+// Ordering by hand is what lets the markup treat it as something that was always there.
 installBridge();

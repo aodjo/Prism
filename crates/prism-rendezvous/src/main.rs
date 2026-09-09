@@ -306,7 +306,11 @@ fn handle(
             send(socket, reply, &message, from);
         }
 
-        Message::Prove { host, secret } => match registry.prove(from, &host, &secret, now) {
+        Message::Prove {
+            host,
+            secret,
+            local,
+        } => match registry.prove(from, &host, &secret, local, now) {
             Proved::Registered => {
                 send(socket, reply, &Message::Registered { observed: from }, from);
             }
@@ -327,7 +331,7 @@ fn handle(
                 return;
             }
 
-            let Some(address) = registry.lookup(&host, now) else {
+            let Some((address, local)) = registry.found(&host, now) else {
                 send(socket, reply, &Message::UnknownHost, from);
                 return;
             };
@@ -350,6 +354,7 @@ fn handle(
                 &Message::Found {
                     address,
                     observed: from,
+                    local,
                 },
                 from,
             );
