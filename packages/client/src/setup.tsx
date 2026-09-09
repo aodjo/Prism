@@ -1120,7 +1120,12 @@ function CodeBoxes({
           aria-label={`Character ${at + 1}`}
           value={character}
           onChange={(event) => {
-            const typed = event.target.value.toUpperCase().slice(0, 1);
+            // Digits, and nothing else. Both codes this row is used for are six digits, so
+            // anything else is a keystroke that was never going to be part of one — and on a
+            // keyboard that is composing another script it is worse than useless: the typeface
+            // is subset to latin, so what lands in the box is a character it cannot draw, and
+            // somebody sees an empty rectangle where their code should be.
+            const typed = event.target.value.replace(/\D/gu, '').slice(0, 1);
             const next = [...characters];
             next[at] = typed;
 
@@ -1141,7 +1146,7 @@ function CodeBoxes({
           onPaste={(event) => {
             event.preventDefault();
 
-            const pasted = event.clipboardData.getData('text').toUpperCase().replace(/\s/g, '');
+            const pasted = event.clipboardData.getData('text').replace(/\D/gu, '');
             const next = characters.map((_, index) => pasted[index] ?? '');
 
             boxes.current[Math.min(pasted.length, CODE_LENGTH - 1)]?.focus();
@@ -1156,7 +1161,10 @@ function CodeBoxes({
             opacity: full ? 0 : 1,
             animationDelay: `${at * 45}ms`,
           }}
-          className={`no-drag h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none transition-[transform,opacity,background-color,border-color,box-shadow] duration-[340ms] ease-[cubic-bezier(0.4,0,0.2,1)] focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)] ${
+          // The line box is the height of the box it is in, so the digit and the caret sit in
+          // the middle of it. Left to the type scale it inherits a line height of one and a
+          // half, which in a box this tall puts both of them near the top.
+          className={`no-drag h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit leading-[70px] font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none transition-[transform,opacity,background-color,border-color,box-shadow] duration-[340ms] ease-[cubic-bezier(0.4,0,0.2,1)] focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)] ${
             character === ''
               ? 'border-line-4 bg-wash-1 animate-[code-in_380ms_cubic-bezier(0.22,1.2,0.36,1)_both]'
               : 'border-[rgba(124,92,255,0.45)] bg-wash-4'
