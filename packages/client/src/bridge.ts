@@ -246,7 +246,11 @@ export function installBridge(): void {
     ): Promise<AccountState> =>
       call<AccountState>('account_sign_in', { email, password, code, label }),
 
-    accountSignOut: (): Promise<AccountState> => call<AccountState>('account_sign_out'),
+    // Not `account_sign_out`, which only ends the session. This also stops sharing, forgets the
+    // name that came from the account, and puts the window back at the beginning — because what
+    // setup asked for was an account, and without one there is nothing for the home window to
+    // draw.
+    accountSignOut: (): Promise<AccountState> => call<AccountState>('sign_out'),
 
     accountRename: (label: string): Promise<AccountState> =>
       call<AccountState>('account_rename', { label }),
@@ -254,14 +258,19 @@ export function installBridge(): void {
     accountForgetDevice: (publicKey: string): Promise<AccountState> =>
       call<AccountState>('account_forget_device', { publicKey }),
 
-    // ── Still the Electron shell's, and nothing here yet ─────────────────────────────────────
-    // Each is a window the Tauri shell does not open yet rather than a call that is missing:
-    // setup finishing, the settings window, and a window sizing itself to what is in it.
-    finishSetup: (): void => {},
+    // The three that move a window rather than fetch anything. None returns a value, so none is
+    // awaited: a page that asked to be resized has nothing to do with the answer.
+    finishSetup: (): void => {
+      void call('finish_setup');
+    },
 
-    openSettings: (): void => {},
+    openSettings: (): void => {
+      void call('open_settings');
+    },
 
-    fit: (): void => {},
+    fit: (height: number): void => {
+      void call('fit', { height });
+    },
 
     // Measured by asking every server a name resolves to, which the shell can do but does not
     // expose yet. An empty list is what a window draws when no server answered, which is the

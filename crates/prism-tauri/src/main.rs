@@ -20,12 +20,13 @@ mod sessions;
 mod settings;
 mod sharing;
 mod stream;
+mod windows;
 
 use std::sync::Mutex;
 
 use prism_core::identity;
 use settings::Settings;
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager};
 
 /// The settings as they stand, read once at launch and written when somebody changes something.
 struct Held(Mutex<Settings>);
@@ -129,6 +130,48 @@ fn set_settings(next: Settings, held: tauri::State<'_, Held>) -> Result<Settings
     Ok(settings.clone())
 }
 
+/// Ends the session and undoes what signing in set up.
+///
+/// Signing out is more than forgetting a token. What setup asked for was an account; without one
+/// there is nothing for the home window to draw, and the name this machine goes by came from the
+/// account it has just left. Leaving either behind is what makes a signed-out application look
+/// like a signed-in one with the names rubbed out.
+///
+/// Wrapped here rather than done in [`account`], because which windows exist is this file's
+/// business and not that module's.
+///
+/// # Errors
+///
+/// Fails if the account cannot be reached for long enough to say so, or the settings cannot be
+/// written. The token is gone from this machine either way.
+#[tauri::command(async)]
+fn sign_out(
+    app: tauri::AppHandle,
+    account: tauri::State<'_, account::Held>,
+    chosen: tauri::State<'_, Held>,
+    sharing: tauri::State<'_, sharing::Held>,
+) -> Result<account::AccountState, String> {
+    let state = account::account_sign_out(account, chosen.clone())?;
+
+    // Stopped rather than left running. A machine goes on offering its screen to whoever the
+    // account last said may watch it, and somebody who has signed out has said they are done.
+    sharing::stop_sharing(sharing, chosen.clone())?;
+
+    {
+        let mut settings = chosen
+            .0
+            .lock()
+            .map_err(|_| "the settings lock was poisoned".to_owned())?;
+
+        settings.nickname = String::new();
+        settings::save(&settings)?;
+    }
+
+    windows::open_setup(&app).map_err(|error| error.to_string())?;
+
+    Ok(state)
+}
+
 /// The page a launch opens.
 ///
 /// Being signed in is the answer to what setup asks, so it is the whole of the question here. A
@@ -139,14 +182,14 @@ fn set_settings(next: Settings, held: tauri::State<'_, Held>) -> Result<Settings
 ///
 /// The harness may override it, which is how a picture gets taken of a window this machine's own
 /// state would not otherwise show.
-fn opening_page() -> String {
-    harness::forced_page().unwrap_or_else(|| {
-        if account::signed_in_before() {
-            "home.html".to_owned()
-        } else {
-            "setup.html".to_owned()
-        }
-    })
+fn opening() -> (&'static str, &'static str) {
+    match harness::forced_page().as_deref() {
+        Some("setup.html") => ("setup", "setup.html"),
+        Some("index.html") => ("settings", "index.html"),
+        Some(_) => ("home", "home.html"),
+        None if account::signed_in_before() => ("home", "home.html"),
+        None => ("setup", "setup.html"),
+    }
 }
 
 fn main() {
@@ -177,20 +220,8 @@ fn main() {
                 }),
             ));
 
-            let window =
-                WebviewWindowBuilder::new(app, "home", WebviewUrl::App(opening_page().into()))
-                    .title("Prism")
-                    .inner_size(1280.0, 800.0)
-                    .min_inner_size(1040.0, 720.0)
-                    .center()
-                    // The design puts its own content where a title bar would be, and carries the
-                    // traffic lights over the top left of it.
-                    .title_bar_style(tauri::TitleBarStyle::Overlay)
-                    // The window is named in the markup, and a second name printed over it by the
-                    // system is the design's own header with a title bar drawn on top of it.
-                    .hidden_title(true)
-                    .background_color(tauri::window::Color(8, 8, 11, 255))
-                    .build()?;
+            let (label, page) = opening();
+            let window = windows::stage(app.handle(), label, page)?;
 
             // Whenever the window comes forward. That is the moment somebody is about to look at
             // the list of their machines, and the moment they are most likely to have just signed
@@ -243,9 +274,12 @@ fn main() {
             account::account_challenge,
             account::account_register,
             account::account_sign_in,
-            account::account_sign_out,
             account::account_rename,
             account::account_forget_device,
+            sign_out,
+            windows::finish_setup,
+            windows::open_settings,
+            windows::fit,
             harness::drive_result
         ])
         .run(tauri::generate_context!())
