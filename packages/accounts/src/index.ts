@@ -313,13 +313,48 @@ async function update(env: Env, path: string, channel: string): Promise<Response
     return new Response(null, { status: 204 });
   }
 
+  // The updater wants the signature itself, not somewhere to get it: it base64-decodes whatever
+  // this field holds and checks the download against it. A link here parses as a signature that
+  // does not verify, which is an update that downloads in full and then refuses to install —
+  // and says so nowhere a person can see.
+  const signature = await signatureOf(found.signatureUrl);
+
+  if (!signature) {
+    return new Response(null, { status: 204 });
+  }
+
   return json({
     version: newest.version,
     notes: newest.release.body ?? '',
     pub_date: newest.release.published_at,
     url: found.url,
-    signature: found.signature,
+    signature,
   });
+}
+
+/**
+ * Fetches the contents of a signature file.
+ *
+ * A few hundred bytes, cached for as long as the release list is, because the two change
+ * together: a signature belongs to one file in one release and neither is ever rewritten.
+ *
+ * @async
+ * @param {string} url - Where the `.sig` file is.
+ * @returns {Promise<string | null>} What it holds, or null if it could not be read.
+ */
+async function signatureOf(url: string): Promise<string | null> {
+  const answer = await fetch(url, {
+    headers: { 'user-agent': 'prism-accounts' },
+    cf: { cacheTtl: 300, cacheEverything: true },
+  }).catch(() => null);
+
+  if (!answer?.ok) {
+    return null;
+  }
+
+  const signature = (await answer.text().catch(() => '')).trim();
+
+  return signature.length > 0 ? signature : null;
 }
 
 /**
@@ -340,14 +375,17 @@ const PLATFORMS: Record<string, string> = {
 /**
  * Which extension carries an installable update on each platform.
  *
- * Not the one a person downloads. A `.dmg` is for double-clicking and cannot be applied to a
- * running application; what the updater wants is the archive beside it. Offering the wrong one
- * is an update that downloads and then does nothing.
+ * Not always the one a person downloads: a `.dmg` is for double-clicking and cannot be applied
+ * to a running application, so macOS updates from the archive beside it. Windows and Linux do
+ * update from the file somebody would have downloaded, because Tauri v2 signs the installer and
+ * the AppImage themselves rather than wrapping them — there is no `.nsis.zip` and no
+ * `.AppImage.tar.gz` to look for, and asking for one is how this answered nothing for two
+ * platforms while insisting the release was fine.
  */
 const UPDATABLE: Record<string, string> = {
   darwin: '.app.tar.gz',
-  windows: '.nsis.zip',
-  linux: '.AppImage.tar.gz',
+  windows: '.exe',
+  linux: '.AppImage',
 };
 
 /**
@@ -360,13 +398,13 @@ const UPDATABLE: Record<string, string> = {
  * @param {{name: string, browser_download_url: string}[]} assets - What the release carries.
  * @param {string} target - `darwin`, `windows` or `linux`.
  * @param {string} arch - `aarch64` or `x86_64`.
- * @returns {{url: string, signature: string} | null} The pair, or null.
+ * @returns {{url: string, signatureUrl: string} | null} Where each of the two is, or null.
  */
 function assetFor(
   assets: { name: string; browser_download_url: string }[],
   target: string,
   arch: string,
-): { url: string; signature: string } | null {
+): { url: string; signatureUrl: string } | null {
   const os = PLATFORMS[target];
   const machine = PLATFORMS[arch];
   const extension = UPDATABLE[target];
@@ -387,7 +425,7 @@ function assetFor(
   const signature = assets.find((asset) => asset.name === `${wanted.name}.sig`);
 
   return signature
-    ? { url: wanted.browser_download_url, signature: signature.browser_download_url }
+    ? { url: wanted.browser_download_url, signatureUrl: signature.browser_download_url }
     : null;
 }
 
