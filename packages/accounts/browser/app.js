@@ -19,6 +19,7 @@ import {
   el,
   icon,
   landSvg,
+  mark,
   particle,
   place,
   PLACES,
@@ -30,11 +31,6 @@ import {
 
 /** Where the whole page is drawn. */
 const root = document.getElementById('root');
-
-/** The Prism mark, in violet. */
-const MARK =
-  '<svg width="14" height="12" viewBox="0 0 14 12" fill="none" aria-hidden="true">' +
-  '<path d="M7 1L13 11H1L7 1Z" stroke="#7C5CFF" stroke-width="1.3" stroke-linejoin="round"/></svg>';
 
 /** The pages the rail offers, in the order it offers them. */
 const PAGES = [
@@ -176,7 +172,7 @@ function drawSignIn() {
       },
     },
   }, [
-    el('div.wordmark', { style: 'padding:0' }, [el('span', { html: MARK }), el('b', { text: 'PRISM' })]),
+    el('div.wordmark', { style: 'padding:0' }, [mark(15), el('b', { text: 'PRISM' })]),
     el('h1.heading', { text: '이 서버를 관리하려면 로그인하세요.', style: 'margin:26px 0 28px' }),
     el('div.field', {}, [el('div.field-cap', {}, [el('span', { text: '주소' })]), address]),
     el('div.field', {}, [
@@ -214,7 +210,7 @@ function drawNotOperator(email) {
     el('div.gate', {}, [
       el('div.gate-card.wide', {}, [
         el('div.wordmark', { style: 'padding:0' }, [
-          el('span', { html: MARK }),
+          mark(15),
           el('b', { text: 'PRISM' }),
         ]),
         el('h1.heading', { text: '이 계정은 접근할 수 없습니다.', style: 'margin:26px 0 10px' }),
@@ -280,7 +276,7 @@ function drawRail() {
 
   return el('nav.rail', {}, [
     el('div.wordmark', {}, [
-      el('span', { html: MARK }),
+      mark(15),
       el('b', { text: 'PRISM' }),
       overview && el('span.build', { text: overview.version }),
     ]),

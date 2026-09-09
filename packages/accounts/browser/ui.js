@@ -101,6 +101,33 @@ const ICONS = {
 };
 
 /**
+ * The Prism mark, as `crates/prism-tauri/icons/icon.svg` draws it.
+ *
+ * Copied from the application's own icon rather than approximated: the triangle is not
+ * equilateral and the stroke runs through the three colours a prism splits light into, and a
+ * hand-drawn stand-in got both wrong. The gradient is given an id of its own because two of
+ * these on one page would otherwise share one definition and the second would find nothing.
+ *
+ * @param {number} [size] - Its height in pixels; the width follows the shape.
+ * @returns {HTMLElement} A span holding the SVG.
+ */
+export function mark(size = 15) {
+  const id = `prism-mark-${Math.round(size * 100)}`;
+
+  return el('span.icon', {
+    html:
+      `<svg height="${size}" viewBox="0.5 0.7 10.6 9.3" fill="none" ` +
+      'xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      `<path d="M10.3574 9.25H1.26855L5.53809 1.48535L10.3574 9.25Z" stroke="url(#${id})" ` +
+      'stroke-width="1.5" stroke-linejoin="round"/>' +
+      `<defs><linearGradient id="${id}" x1="0.4" y1="5.4" x2="11.3" y2="5.4" ` +
+      'gradientUnits="userSpaceOnUse">' +
+      '<stop stop-color="#35D6FF"/><stop offset="0.5" stop-color="#7C5CFF"/>' +
+      '<stop offset="1" stop-color="#FF5CA8"/></linearGradient></defs></svg>',
+  });
+}
+
+/**
  * One icon, at the size asked for.
  *
  * @param {keyof ICONS} name - Which.
