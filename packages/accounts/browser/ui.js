@@ -488,5 +488,5 @@ const PLACES = {
   'New York': [40.71, -74.01],
 };
 
-export { el, ago, size, between, state, deriveAuth, call, landSvg, place, PLACES };
+export { el, ago, since, size, between, state, deriveAuth, call, landSvg, place, PLACES };
 
