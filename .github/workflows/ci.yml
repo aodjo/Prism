@@ -253,6 +253,24 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
 
+      # A pull request's bundle is a proof, not a release. The release job runs only on a push
+      # to `develop` or on a tag, so what is packaged here is built to show that it packages and
+      # is then thrown away — and thin LTO with a single codegen unit is most of the three and a
+      # half minutes it takes to throw away, spent making a binary nobody runs fast.
+      #
+      # Set as environment rather than written into `Cargo.toml`, so that what a release is built
+      # with is one profile in one file and not a thing assembled from two places. And set in a
+      # step of its own rather than as an expression on the one below, because an unset secret
+      # renders as an empty string and `CARGO_PROFILE_RELEASE_LTO=` is not a boolean.
+      - name: A pull request's bundle does not have to be fast
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          {
+            echo "CARGO_PROFILE_RELEASE_LTO=false"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+          } >> "$GITHUB_ENV"
+
       - name: Package the application
         run: pnpm package
         env:
@@ -432,12 +450,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: docker/setup-buildx-action@v4
+
       # The server is deployed as a container, so the thing that has to keep working is the
       # image rather than a `cargo build` of the same crate. It is also the one build that
       # proves the crate still links with no C toolchain at all: the image has no compiler in
       # it and the binary is statically linked against musl.
+      #
+      # Through buildx and the run cache rather than a plain `docker build`, which had none and
+      # so compiled the whole crate from nothing on every push — a hundred and nine seconds,
+      # most of them spent rebuilding dependencies that had not changed.
+      #
+      # The cache is also what the publishing job below reads. It builds the same file from the
+      # same context, and until this wrote a cache entry it was the second machine that day to
+      # compile the same code. Now the first one leaves it something to find.
       - name: Build the container
-        run: docker build -f deploy/rendezvous/Dockerfile -t prism-rendezvous .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/rendezvous/Dockerfile
+          platforms: linux/amd64
+          # Into this runner's own daemon, because the step below runs it.
+          load: true
+          tags: prism-rendezvous
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: It starts and binds its ports
         run: |
