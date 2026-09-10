@@ -110,17 +110,13 @@ jobs:
           # the Windows code is behind `cfg(target_os)` and none of it has ever been run on
           # arm64, so a build that could not also execute the tests would be a green tick over
           # an untested binary.
+          #
+          # This label switches to Visual Studio 2026 on 21 September 2026, replacing 2022, and
+          # the old image cannot be pinned after the 30th. Tried first on `windows-11-vs2026-arm`
+          # and everything passed — including SDL, which this crate builds from source through
+          # CMake and is where a whole-toolchain change would land if anywhere. Nothing to do.
           - name: windows-arm64
             os: windows-11-arm
-          # TEMPORARY — remove before merging.
-          #
-          # On 21 September 2026 the `windows-11-arm` label changes to Visual Studio 2026,
-          # replacing 2022, and after the 30th the old image cannot be pinned. This crate links
-          # with MSVC and builds SDL from source through CMake, which is where a whole-toolchain
-          # change is most likely to land. Running the new image now costs one job and turns a
-          # deadline into a known answer.
-          - name: windows-arm64-vs2026
-            os: windows-11-vs2026-arm
           - name: linux-x64
             os: ubuntu-latest
           # Same reasoning as Windows on arm64, one milestone early: the Linux backends are
