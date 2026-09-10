@@ -76,11 +76,11 @@ const FILE_PACE: Duration = Duration::from_micros(1_100);
 ///
 /// Paced rather than driven by the return path, and on a handle of its own so that a chunk
 /// waiting to go never sits behind a frame that is already being written.
-pub fn spawn_files(files: Arc<Mutex<Files>>, mut socket: SecureSender) {
+pub fn spawn_files(files: Arc<Mutex<Files>>, mut socket: SecureSender, alive: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let mut buf = [0u8; MAX_PLAINTEXT_SIZE];
 
-        loop {
+        while alive.load(Ordering::Relaxed) {
             let written = match files.lock() {
                 Ok(mut files) => files.step(&mut buf).unwrap_or(0),
                 // Another thread died holding it, which means this session's file state is
@@ -101,6 +101,19 @@ pub fn spawn_files(files: Arc<Mutex<Files>>, mut socket: SecureSender) {
             std::thread::sleep(FILE_PACE);
         }
     });
+}
+
+/// Ends the threads a session started, when the session that started them is over.
+///
+/// Sharing is a state rather than an attempt, so a machine offers itself again the moment a
+/// session ends — binding, registering and waiting afresh. That only works if the last session
+/// has actually let go: its return path and its file thread each hold a duplicate of its
+/// socket, and a duplicate of a socket bound to this host's port is that port still taken.
+impl Drop for SliceSender {
+    /// Tells this session's threads that it is over.
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
 }
 
 /// The shortest gap between two keyframes the host will produce because it was asked to.
@@ -270,6 +283,13 @@ pub struct SliceSender {
     buffer: [u8; MAX_PACKET_SIZE],
     packets: u64,
     bytes: u64,
+    /// Whether the session this belongs to is still going.
+    ///
+    /// The threads it starts — the return path, and the one that moves files — hold a copy and
+    /// stop when this does. Without it they outlive the session that made them and go on
+    /// holding duplicates of its socket, which on a host bound to a port of its own means the
+    /// next session binds a port the last one has not let go of and hears nothing on it.
+    alive: Arc<AtomicBool>,
     feedback: Arc<ReturnPath>,
     /// Drops a fraction of video packets on the way out, when a run is testing recovery.
     ///
@@ -342,6 +362,7 @@ impl SliceSender {
             buffer: [0; MAX_PACKET_SIZE],
             packets: 0,
             bytes: 0,
+            alive: Arc::new(AtomicBool::new(true)),
             feedback: Arc::new(ReturnPath::default()),
             loss: None,
             parity_loss: None,
@@ -829,9 +850,18 @@ impl SliceSender {
         // advanced then would run at the rate of the return path rather than at the rate the
         // wire has room for.
         if let Some(files) = files.as_ref() {
-            spawn_files(Arc::clone(files), self.sender.split()?);
+            spawn_files(
+                Arc::clone(files),
+                self.sender.split()?,
+                Arc::clone(&self.alive),
+            );
         }
 
+        // Long enough that a quiet session is a quiet thread, short enough that the socket is
+        // let go of promptly once the session it belongs to is over.
+        receiver.set_read_timeout(Some(Duration::from_millis(400)))?;
+
+        let alive = Arc::clone(&self.alive);
         let carrier = files;
         let feedback = Arc::clone(&self.feedback);
         let adaptive = self.adaptive;
@@ -853,9 +883,20 @@ impl SliceSender {
             let mut latency = LatencyRecorder::new(4096);
             let mut injected = 0u64;
 
-            loop {
+            while alive.load(Ordering::Relaxed) {
                 let bytes = match receiver.recv_into(&mut recv_buf) {
                     Ok(bytes) => bytes,
+                    // Nothing came within the timeout, which is what the timeout is for: the
+                    // loop goes round, looks at whether the session is still there, and waits
+                    // again if it is.
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
                     // A connected UDP socket reports the far machine having nothing listening
                     // as a refused connection, which is what an ordinary disconnection looks
                     // like from here. Ending quietly, because a line of error text after every

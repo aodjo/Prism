@@ -150,6 +150,20 @@ impl SecureReceiver {
         Self { transport, opener }
     }
 
+    /// Gives up on a read after this long, so a thread can look at something else.
+    ///
+    /// What that something else is, on the return path, is whether the session it belongs to
+    /// is still there: a thread parked in a blocking read cannot notice that it has outlived
+    /// the session, and a host that leaves one behind keeps that session's socket — and its
+    /// port — for as long as the process runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the socket will not take the option.
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.transport.set_read_timeout(timeout)
+    }
+
     /// Receives the next packet that opens, skipping any that do not.
     ///
     /// `buf` must be at least [`MAX_PACKET_SIZE`] bytes. The returned slice borrows the part

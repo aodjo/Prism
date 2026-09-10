@@ -21,7 +21,7 @@
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -369,6 +369,20 @@ pub struct ClientConfig {
     pub peer_key: [u8; KEY_LEN],
 }
 
+/// Says the session is over when it goes out of scope.
+///
+/// A session ends in more than one place — a frame budget reached, an idle socket, an error on
+/// the way through — and a thread it started has to hear about all of them. Held rather than
+/// cleared by hand, so a path added later cannot forget.
+struct Ending(Arc<AtomicBool>);
+
+impl Drop for Ending {
+    /// Tells whoever is watching that the session has finished.
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 /// A reassembled frame on its way from the receive thread to the decode thread.
 ///
 /// The buffer is recycled back to the receive thread after decoding, so a running
@@ -675,9 +689,13 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     // A file moves on a clock of its own, on a handle of its own. This loop is busy with the
     // picture and would otherwise only push a chunk when a frame arrived, which on a still
     // screen is twice a second.
+    // Ends with this function however it ends, which is what stops the file thread outliving
+    // the session and holding a duplicate of its socket.
+    let session = Ending(Arc::new(AtomicBool::new(true)));
+
     if let Some(files) = files.as_ref() {
         if let Ok(split) = sender.split() {
-            crate::net::sender::spawn_files(Arc::clone(files), split);
+            crate::net::sender::spawn_files(Arc::clone(files), split, Arc::clone(&session.0));
         }
     }
 
