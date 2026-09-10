@@ -7,6 +7,20 @@
 
 use prism_core::decode::{NAL_IDR, NAL_PPS, NAL_SPS, nal_type, nal_units};
 
+/// How long a test waits for a session to hand back what it was given.
+///
+/// Generous, because this is a test's patience and not a latency budget — what is being checked
+/// is that the picture survives the round trip, never that it survives it quickly. The
+/// pipeline's real deadlines are measured against a running session, not here.
+///
+/// Five seconds was enough while every machine running this had a hardware encoder. It is not
+/// enough on one that does not: the tests in this file run in parallel, and several concurrent
+/// software encodes of ninety frames each starve one another well past that. Measured on
+/// GitHub's Intel macOS runner, which is a virtual machine with no media engine — eight of the
+/// nine passed and the ninth timed out.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[test]
 fn nal_units_are_split_on_either_start_code_length() {
     let stream = [
@@ -45,7 +59,6 @@ fn trailing_start_codes_do_not_produce_empty_units() {
 
 #[cfg(target_os = "macos")]
 mod round_trip {
-    use std::time::Duration;
 
     use prism_core::decode::DecodeError;
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
@@ -144,9 +157,7 @@ mod round_trip {
                 .encode(source.pixel_buffer(), phase as u64 * 33_333, phase == 0)
                 .expect("frame encodes");
 
-            let encoded = encoder
-                .poll(Duration::from_secs(5))
-                .expect("frame comes back");
+            let encoded = encoder.poll(crate::PATIENCE).expect("frame comes back");
             let pts_us = encoded.pts_us;
             let bitstream = encoded.data.clone();
 
@@ -156,7 +167,7 @@ mod round_trip {
                 "parameter sets arrived with the first frame"
             );
 
-            let Some(picture) = decoder.poll(Duration::from_secs(5)) else {
+            let Some(picture) = decoder.poll(crate::PATIENCE) else {
                 continue;
             };
 
@@ -213,7 +224,6 @@ mod round_trip {
 
 #[cfg(target_os = "macos")]
 mod through_the_wire {
-    use std::time::Duration;
 
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
     use prism_core::encode::EncoderConfig;
@@ -263,7 +273,7 @@ mod through_the_wire {
                 .encode(source.pixel_buffer(), phase as u64 * 16_667, phase == 0)
                 .expect("frame encodes");
 
-            let Some(frame) = encoder.poll(Duration::from_secs(5)) else {
+            let Some(frame) = encoder.poll(crate::PATIENCE) else {
                 continue;
             };
 
@@ -307,8 +317,7 @@ mod through_the_wire {
             );
 
             submitted += 1;
-            if decoder.decode(&bitstream, pts_us).is_ok()
-                && decoder.poll(Duration::from_secs(2)).is_some()
+            if decoder.decode(&bitstream, pts_us).is_ok() && decoder.poll(crate::PATIENCE).is_some()
             {
                 decoded += 1;
             }
