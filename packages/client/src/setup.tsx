@@ -1040,6 +1040,39 @@ function Setup(): JSX.Element {
 }
 
 /**
+ * Puts the caret in a box once that box has stopped moving.
+ *
+ * The boxes arrive with a transform, and a box focused while that is still running keeps the
+ * caret where the box was rather than where it settles — it stays low in the box for as long
+ * as the screen is open. Clicking a box has never shown this, because by then nothing is
+ * moving; only the focus this screen gives itself lands early enough to catch it.
+ *
+ * @param {HTMLInputElement | null} [box] - The box to focus, if it is there.
+ * @returns {() => void} Undoes the wait, for a screen that leaves before the box settles.
+ */
+function focusOnceStill(box: HTMLInputElement | null | undefined): () => void {
+  if (!box) {
+    return () => {};
+  }
+
+  if (!box.getAnimations().some((animation) => animation.playState === 'running')) {
+    box.focus();
+
+    return () => {};
+  }
+
+  const settled = (): void => {
+    box.focus();
+  };
+
+  box.addEventListener('animationend', settled, { once: true });
+
+  return () => {
+    box.removeEventListener('animationend', settled);
+  };
+}
+
+/**
  * The six characters of a pairing code.
  *
  * One box per character, so that the code is read and typed as six things rather than as a
@@ -1077,9 +1110,9 @@ function CodeBoxes({
   const [handled, setHandled] = useState(refused);
   const boxes = useRef<(HTMLInputElement | null)[]>([]);
 
-  useEffect(() => {
-    boxes.current[0]?.focus();
-  }, []);
+  // Also after a refusal, which empties the row and animates the six boxes back in: the caret
+  // has to wait for them there for the same reason it waits for them on arrival.
+  useEffect(() => focusOnceStill(boxes.current[0]), [handled]);
 
   // A refusal empties the row and puts the caret back at the start, but not until the mark has
   // finished saying no. Clearing underneath the answer would take the answer away before it
@@ -1093,7 +1126,6 @@ function CodeBoxes({
     const settling = setTimeout(() => {
       setCharacters(Array<string>(CODE_LENGTH).fill(''));
       setHandled(refused);
-      boxes.current[0]?.focus();
     }, REFUSAL_HOLD_MS);
 
     return () => {
