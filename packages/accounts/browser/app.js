@@ -1855,6 +1855,85 @@ async function refresh() {
  */
 async function start() {
   await refresh();
+  await askAboutPublish();
+}
+
+/**
+ * Shows what a terminal is waiting to be allowed to do, when this page was opened to answer one.
+ *
+ * The link the terminal printed carries the short code; this asks the server what is behind it
+ * and puts the answer in front of whoever is signed in. Both screens show the same code, and the
+ * one thing somebody has to do is check they match — which is the whole of what makes this safe
+ * to leave open to anyone who can reach the address.
+ *
+ * @async
+ * @returns {Promise<void>}
+ */
+async function askAboutPublish() {
+  const wanted = new URLSearchParams(location.search).get('publish');
+
+  if (!wanted) {
+    return;
+  }
+
+  // Taken out of the address whatever happens next, so a reload is not a second approval and a
+  // bookmarked link is not one either.
+  history.replaceState(null, '', location.pathname);
+
+  let grant = null;
+
+  try {
+    grant = await call(`/v1/admin/publish/${encodeURIComponent(wanted)}`);
+  } catch (error) {
+    modal((close) =>
+      el('div.modal', {}, [
+        el('h2.heading', { text: '기다리는 요청이 없습니다' }),
+        el('p.note.muted', { style: 'margin:14px 0 0', text: error.message }),
+        el('div.modal-actions', { style: 'padding-top:24px' }, [
+          el('button.pill', { type: 'button', text: '닫기', on: { click: close } }),
+        ]),
+      ]),
+    );
+
+    return;
+  }
+
+  if (grant.email) {
+    return;
+  }
+
+  modal((close) => {
+    const allow = el('button.pill.primary', { type: 'button', text: '허용' });
+    const refuse = el('button.pill', { type: 'button', text: '거부' });
+
+    /**
+     * Answers the request and closes.
+     *
+     * @param {string} how - `POST` to allow it, `DELETE` to refuse it.
+     * @returns {void}
+     */
+    const answer = (how) => {
+      allow.disabled = true;
+      refuse.disabled = true;
+
+      void call(`/v1/admin/publish/${encodeURIComponent(grant.user_code)}`, { method: how })
+        .catch(() => {})
+        .then(close);
+    };
+
+    allow.addEventListener('click', () => answer('POST'));
+    refuse.addEventListener('click', () => answer('DELETE'));
+
+    return el('div.modal', {}, [
+      el('h2.heading', { text: '빌드를 올리려고 합니다' }),
+      el('p.note.muted', {
+        style: 'margin:14px 0 0',
+        text: `${grant.asked_for || '어떤 기계'}에서 요청했습니다. 터미널에 나온 코드와 아래가 같은지 확인하세요.`,
+      }),
+      el('p.publish-code', { text: grant.user_code }),
+      el('div.modal-actions', { style: 'padding-top:8px' }, [refuse, allow]),
+    ]);
+  });
 }
 
 /**

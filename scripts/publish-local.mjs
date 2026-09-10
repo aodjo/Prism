@@ -21,21 +21,19 @@
  *   `~/Documents/prism-keys/prism-update.key`. Without it the bundle has no signature and the
  *   updater refuses it after downloading in full, which is the worst of both.
  * - `PRISM_UPDATE_KEY_PASSWORD` if that key has one.
- * - `APPLE_SIGNING_IDENTITY` on macOS, so the build carries the same code identity as the
- *   released ones. Without it every rebuild is a different ad-hoc identity, which is a new
- *   keychain prompt each time and a screen recording grant that has to be given again.
- * - An operator session, which it asks for: the same address and password the dashboard takes.
+ * - A Developer ID on macOS, which it finds in the keychain. `APPLE_SIGNING_IDENTITY` names
+ *   another one where there is a choice. Without any, every rebuild carries a different
+ *   ad-hoc identity — a keychain prompt each time, and a screen recording grant to give again.
+ * - An operator to say yes in a browser, which it opens. Nothing is typed here.
  *
  * @module
  */
 
 import { execFileSync } from 'node:child_process';
-import { createInterface } from 'node:readline/promises';
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stdin, stdout } from 'node:process';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -66,6 +64,37 @@ function platform() {
       return { target: 'linux', arch, bundle: 'appimage/prism.AppImage' };
     default:
       throw new Error(`nothing is published for ${process.platform}`);
+  }
+}
+
+/**
+ * The Developer ID this machine can sign with, if it has one.
+ *
+ * Found rather than asked for. It is already in the keychain — that is what makes it usable at
+ * all — so requiring somebody to name it as well is asking them to type back something the
+ * machine could read, and getting it slightly wrong is a build signed ad-hoc with no sign that
+ * anything went differently.
+ *
+ * The first is taken when there are several. A machine with two Developer IDs is one whose
+ * certificate is being rotated, and either signs a build somebody is about to install on their
+ * own machines.
+ *
+ * @returns {string} The identity's name, or an empty string on a machine without one.
+ */
+function developerId() {
+  if (process.platform !== 'darwin') {
+    return '';
+  }
+
+  try {
+    const listed = execFileSync('security', ['find-identity', '-v', '-p', 'codesigning'], {
+      encoding: 'utf8',
+    });
+
+    return /"(Developer ID Application: [^"]+)"/u.exec(listed)?.[1] ?? '';
+  } catch {
+    // No keychain to ask, which is the same answer as no certificate in it.
+    return '';
   }
 }
 
@@ -117,97 +146,88 @@ function run(command, args, env = {}) {
 }
 
 /**
- * Asks for the operator's credentials and returns a session token.
+ * Asks a browser for permission to publish, and waits until somebody answers.
  *
- * The same three things the dashboard asks for. Read here rather than kept in a file, because a
- * token that publishes what every machine runs is not a thing to leave lying next to the code
- * it publishes.
+ * A password typed at a shell prompt is the one credential that decides what every machine runs,
+ * put somewhere with a history file and a scrollback buffer. This asks for nothing: it shows a
+ * code, opens the dashboard, and waits for whoever is already signed in there to confirm the
+ * code on their screen is the code on this one.
+ *
+ * Which is also why the two open endpoints behind it are open. Asking hands out a code that does
+ * nothing on its own, and waiting is useless without the secret half of it.
  *
  * @async
- * @returns {Promise<string>} The session token.
- * @throws {Error} If the server refuses.
+ * @param {string} what - What is asking, in the words shown to whoever approves it.
+ * @returns {Promise<string>} A session token, good for half an hour.
+ * @throws {Error} If it is refused, or nobody answers in time.
  */
-async function signIn() {
-  const ask = createInterface({ input: stdin, output: stdout });
-  const email = (await ask.question('operator address: ')).trim().toLowerCase();
-  const password = await ask.question('password: ');
-  const code = (await ask.question('six-digit code: ')).trim();
-
-  ask.close();
-
-  const salted = await fetch(`${SERVER}/v1/salt?email=${encodeURIComponent(email)}`);
-
-  if (!salted.ok) {
-    throw new Error('that address is not an account on this server');
-  }
-
-  const { salt } = await salted.json();
-  const auth = await deriveAuth(password, Uint8Array.from(salt.match(/../gu).map((pair) => parseInt(pair, 16))));
-
-  const opened = await fetch(`${SERVER}/v1/sessions`, {
+async function allowed(what) {
+  const asked = await fetch(`${SERVER}/v1/publish/request`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email, auth, code }),
+    body: JSON.stringify({ what }),
   });
 
-  const answer = await opened.json().catch(() => ({}));
-
-  if (!opened.ok) {
-    throw new Error(answer.error ?? 'the server refused that sign-in');
+  if (!asked.ok) {
+    throw new Error('the server would not take the request');
   }
 
-  if (!answer.operator) {
-    throw new Error('that account does not look after this server');
+  const { device_code: device, user_code: user, verify_url: where, expires_in: patience } =
+    await asked.json();
+
+  console.log(`\n  ${user}\n`);
+  console.log('Opening the dashboard. Check that code matches, then allow it.');
+  console.log(`If nothing opens: ${where}\n`);
+
+  open(where);
+
+  const until = Date.now() + patience * 1000;
+
+  while (Date.now() < until) {
+    await new Promise((wake) => setTimeout(wake, 2000));
+
+    const waited = await fetch(
+      `${SERVER}/v1/publish/wait?device_code=${encodeURIComponent(device)}`,
+    );
+
+    if (waited.status === 202) {
+      continue;
+    }
+
+    if (waited.status === 404) {
+      throw new Error('that request was refused');
+    }
+
+    if (!waited.ok) {
+      throw new Error('the server stopped answering');
+    }
+
+    const { token, email } = await waited.json();
+
+    console.log(`Allowed by ${email}.`);
+
+    return token;
   }
 
-  return answer.token;
+  throw new Error('nobody answered in time');
 }
 
 /**
- * Derives the authentication secret from a password, the way every other client does.
+ * Opens a link in whatever the system uses for one.
  *
- * The module the server itself serves, rather than an Argon2 from somewhere else configured to
- * match. There is one implementation of this on purpose — `prism-secret` says why — and a second
- * one here would show up as an account that signs in on the dashboard and not from a terminal,
- * or the other way round, which is a thing nobody would look for.
+ * A failure is not reported. The address was printed a moment ago, and a terminal that could not
+ * launch a browser has not stopped anybody from opening one.
  *
- * @async
- * @param {string} password - What was typed.
- * @param {Uint8Array} salt - The account's salt.
- * @returns {Promise<string>} The verifier, as hex.
- * @throws {Error} If the password is too short, or the module refuses it.
+ * @param {string} link - Where to go.
+ * @returns {void}
  */
-async function deriveAuth(password, salt) {
-  const fetched = await fetch(`${SERVER}/admin/argon2.wasm`);
-  const { instance } = await WebAssembly.instantiate(await fetched.arrayBuffer());
-  const { memory, prism_alloc: alloc, prism_free: free, prism_auth: auth } = instance.exports;
-
-  const typed = new TextEncoder().encode(password);
-  const passwordAt = alloc(typed.length);
-  const saltAt = alloc(salt.length);
-  const outAt = alloc(32);
+function open(link) {
+  const opener = { darwin: 'open', win32: 'start', linux: 'xdg-open' }[process.platform];
 
   try {
-    new Uint8Array(memory.buffer, passwordAt, typed.length).set(typed);
-    new Uint8Array(memory.buffer, saltAt, salt.length).set(salt);
-
-    const code = auth(passwordAt, typed.length, saltAt, outAt);
-
-    if (code === -1) {
-      throw new Error('a password is at least eight characters');
-    }
-
-    if (code !== 0) {
-      throw new Error('that password could not be processed');
-    }
-
-    return [...new Uint8Array(memory.buffer, outAt, 32)]
-      .map((byte) => byte.toString(16).padStart(2, '0'))
-      .join('');
-  } finally {
-    free(passwordAt, typed.length);
-    free(saltAt, salt.length);
-    free(outAt, 32);
+    execFileSync(opener, [link], { stdio: 'ignore' });
+  } catch {
+    // Printed above, which is the part that matters.
   }
 }
 
@@ -220,21 +240,24 @@ if (!existsSync(key)) {
   process.exit(2);
 }
 
-if (process.platform === 'darwin' && !process.env.APPLE_SIGNING_IDENTITY) {
+const identity = process.env.APPLE_SIGNING_IDENTITY ?? developerId();
+
+if (process.platform === 'darwin' && !identity) {
   console.error(
-    'APPLE_SIGNING_IDENTITY is not set, so this build would be signed ad-hoc — a different code\n' +
-      'identity from the released builds, which means a keychain prompt and a screen recording\n' +
-      'grant to give again. Set it to your Developer ID, which `security find-identity -v -p\n' +
-      'codesigning` lists.',
+    'This machine has no Developer ID to sign with, so the build would be signed ad-hoc — a\n' +
+      'different code identity from every other build, which means a keychain prompt on first\n' +
+      'run and a screen recording grant to give again. Install the certificate, or set\n' +
+      'APPLE_SIGNING_IDENTITY to name another one.',
   );
   process.exit(2);
 }
 
-const token = await signIn();
+const token = await allowed(`prism · ${target} · ${arch}`);
 
 console.log(`\nbuilding 1.0.0-local.${build} for ${target}/${arch}\n`);
 
 run('pnpm', ['package'], {
+  APPLE_SIGNING_IDENTITY: identity,
   PRISM_CHANNEL: 'local',
   PRISM_BUILD: String(build),
   TAURI_SIGNING_PRIVATE_KEY: readFileSync(key, 'utf8').trim(),

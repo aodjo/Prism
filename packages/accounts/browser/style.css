@@ -494,9 +494,12 @@ button:disabled {
   color: var(--on-light);
 }
 
+/* A token rather than white, because on a light ground this button is dark and hovering it to
+   white would be white text on white. `--ink` is the far end of the scale whichever way round
+   the page is, which is what "more of the same" means here. */
 .pill.primary:hover:not(:disabled) {
-  background: #fff;
-  border-color: #fff;
+  background: var(--ink);
+  border-color: var(--ink);
 }
 
 .pill.primary:disabled {
@@ -1622,4 +1625,17 @@ button:disabled {
 
 .operator .icon {
   color: var(--muted-2);
+}
+
+/* The code both screens show. Large and monospaced because its only job is to be compared with
+   another one across the desk, and two of these differing by a character have to look different
+   at a glance. */
+.publish-code {
+  margin: 20px 0 4px;
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: 4px;
+  text-align: center;
+  color: var(--ink);
 }

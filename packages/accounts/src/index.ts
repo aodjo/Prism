@@ -81,6 +81,22 @@ const CHALLENGE_SECONDS = 15 * 60;
 /** How many bytes a session token is made of. */
 const TOKEN_BYTES = 32;
 
+/**
+ * How long a terminal's request to publish stays answerable.
+ *
+ * Ten minutes, which is somebody walking to another window and reading a code. Longer would be a
+ * code left on a screen for an afternoon; shorter would expire while a build was still running.
+ */
+const PUBLISH_GRANT_SECONDS = 10 * 60;
+
+/**
+ * How long the session a publish grant opens is good for.
+ *
+ * Half an hour: enough to build and upload, and not enough to be worth keeping. It is an
+ * ordinary session, so it can also be ended from the dashboard like any other.
+ */
+const PUBLISH_SESSION_SECONDS = 30 * 60;
+
 /** How many bytes the second factor's shared secret is. */
 const TOTP_BYTES = 20;
 
@@ -1492,6 +1508,56 @@ export default {
         // What the strip along the top is: the few numbers an operator would otherwise open a
         // terminal for. Every one of them is measured here rather than remembered, so a stale
         // answer is not possible — only a slow one.
+        // What a terminal is waiting to be allowed to do, so the dashboard can show it.
+        if (path.startsWith('/v1/admin/publish/') && method === 'GET') {
+          const wanted = decodeURIComponent(path.slice('/v1/admin/publish/'.length));
+          const grant = await env.prism_accounts
+            .prepare(
+              'SELECT user_code, asked_for, expires_unix, email FROM publish_grants' +
+                ' WHERE user_code = ? AND expires_unix > ?',
+            )
+            .bind(wanted.toUpperCase(), nowUnix())
+            .first();
+
+          return grant ? json(grant) : fail(404, 'That request is no longer waiting.');
+        }
+
+        // Saying yes. Which account said so is written down rather than merely checked, because
+        // the session this opens belongs to them and every build published through it is theirs.
+        if (path.startsWith('/v1/admin/publish/') && method === 'POST') {
+          const wanted = decodeURIComponent(path.slice('/v1/admin/publish/'.length)).toUpperCase();
+          const done = await env.prism_accounts
+            .prepare(
+              'UPDATE publish_grants SET email = ? WHERE user_code = ? AND expires_unix > ?' +
+                " AND email = ''",
+            )
+            .bind(acting, wanted, nowUnix())
+            .run();
+
+          if (!done.meta.changes) {
+            return fail(404, 'That request is no longer waiting.');
+          }
+
+          await record(env, acting, 'publish.allow', wanted);
+
+          return json({ ok: true });
+        }
+
+        // Saying no, which is the grant ceasing to exist. The terminal's next poll finds nothing
+        // and says it was refused, which is what happened.
+        if (path.startsWith('/v1/admin/publish/') && method === 'DELETE') {
+          const wanted = decodeURIComponent(path.slice('/v1/admin/publish/'.length)).toUpperCase();
+
+          await env.prism_accounts
+            .prepare('DELETE FROM publish_grants WHERE user_code = ?')
+            .bind(wanted)
+            .run();
+
+          await record(env, acting, 'publish.refuse', wanted);
+
+          return json({ ok: true });
+        }
+
         // Everything on one line, newest first, wherever it came from.
         //
         // Both sources, because both are real: a machine following the development line is
@@ -1824,6 +1890,89 @@ export default {
       // on it rather than who was allowed to ask about it. Requiring an account here would
       // mean an application that cannot update until somebody signs in, which is exactly the
       // machine most in need of one.
+      // A terminal asking to publish, and the terminal waiting for an answer. Both are open,
+      // because neither is a credential: the first hands out a code that does nothing until an
+      // operator approves it in a browser, and the second is useless without the secret half of
+      // that code. What the pair replaces is a password typed at a shell prompt.
+      if (path === '/v1/publish/request' && method === 'POST') {
+        const sent = await body<{ what?: string }>();
+        const device = hex(randomBytes(TOKEN_BYTES));
+        // Two groups of four, from an alphabet with no character that is another one in a
+        // different font. This is read aloud off one screen and compared with another.
+        const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        const user = [...randomBytes(8)]
+          .map((byte) => alphabet[byte % alphabet.length])
+          .join('')
+          .replace(/^(....)/u, '$1-');
+
+        await env.prism_accounts
+          .prepare('DELETE FROM publish_grants WHERE expires_unix <= ?')
+          .bind(nowUnix())
+          .run();
+
+        await env.prism_accounts
+          .prepare(
+            'INSERT INTO publish_grants (device_hash, user_code, asked_for, expires_unix)' +
+              ' VALUES (?, ?, ?, ?)',
+          )
+          .bind(
+            hex(await sha256(device)),
+            user,
+            (sent?.what ?? '').slice(0, 120),
+            nowUnix() + PUBLISH_GRANT_SECONDS,
+          )
+          .run();
+
+        return json({
+          device_code: device,
+          user_code: user,
+          verify_url: `https://admin.presm.kr/?publish=${encodeURIComponent(user)}`,
+          expires_in: PUBLISH_GRANT_SECONDS,
+        });
+      }
+
+      if (path === '/v1/publish/wait' && method === 'GET') {
+        const device = url.searchParams.get('device_code') ?? '';
+
+        if (!device) {
+          return malformed('device_code');
+        }
+
+        const hash = hex(await sha256(device));
+        const grant = await env.prism_accounts
+          .prepare(
+            'SELECT email, expires_unix FROM publish_grants WHERE device_hash = ? AND' +
+              ' expires_unix > ?',
+          )
+          .bind(hash, nowUnix())
+          .first<{ email: string; expires_unix: number }>();
+
+        if (!grant) {
+          return fail(404, 'That request is no longer waiting.');
+        }
+
+        if (!grant.email) {
+          return new Response(null, { status: 202 });
+        }
+
+        // Minted here rather than when it was approved, so that a token exists only in the one
+        // answer that carries it. The grant goes at the same moment: it opens one session and
+        // is then a row nothing can use.
+        const token = hex(randomBytes(TOKEN_BYTES));
+
+        await env.prism_accounts
+          .prepare('INSERT INTO sessions (token_hash, email, expires_unix) VALUES (?, ?, ?)')
+          .bind(hex(await sha256(token)), grant.email, nowUnix() + PUBLISH_SESSION_SECONDS)
+          .run();
+
+        await env.prism_accounts
+          .prepare('DELETE FROM publish_grants WHERE device_hash = ?')
+          .bind(hash)
+          .run();
+
+        return json({ token, email: grant.email });
+      }
+
       if (path.startsWith('/v1/update/') && method === 'GET') {
         return update(env, path, request.headers.get('x-prism-channel') ?? 'production');
       }
