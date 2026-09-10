@@ -57,11 +57,14 @@ pub struct Settings {
     pub addresses: BTreeMap<String, String>,
     /// The machines somebody wants at the front of the list, by public key.
     pub pinned: Vec<String>,
-    /// Whether to look for a new version and install it without being asked.
+    /// Whether to look for a new version at all.
     ///
     /// On, because a remote desktop that is out of date on one of the two machines is a session
     /// that fails for a reason neither end can see, and because the person who would otherwise
     /// have to notice is the same person who would have to fix it.
+    ///
+    /// Finding one is where this stops. Installing is asked for, because replacing the bundle
+    /// under somebody in the middle of watching another machine is not a thing to do quietly.
     pub auto_update: bool,
     /// Which builds this machine is offered: `production` or `development`.
     ///
