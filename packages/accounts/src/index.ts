@@ -21,7 +21,7 @@
 // The dashboard, served from this Worker rather than deployed beside it: an operator's tool
 // that ships separately is one that drifts from the thing it operates, and the page and the
 // API would then be able to disagree about what an account is.
-import { APP, CSS, HTML, UI, WASM } from './dashboard.js';
+import { APP, CSS, HTML, THEME, UI, WASM } from './dashboard.js';
 import {
   base32,
   hex,
@@ -231,6 +231,7 @@ const DASHBOARD: Record<string, { body: string | ArrayBuffer; type: string }> = 
   '/admin/style.css': { body: CSS, type: 'text/css; charset=utf-8' },
   '/admin/app.js': { body: APP, type: 'text/javascript; charset=utf-8' },
   '/admin/ui.js': { body: UI, type: 'text/javascript; charset=utf-8' },
+  '/admin/theme.js': { body: THEME, type: 'text/javascript; charset=utf-8' },
   '/admin/argon2.wasm': { body: WASM, type: 'application/wasm' },
 };
 
@@ -423,6 +424,7 @@ async function releasedBuilds(prerelease: boolean): Promise<Record<string, unkno
         target,
         arch,
         notes: (release.body ?? '').split('\n')[0] ?? '',
+        filename: asset.filename,
         bytes: asset.bytes,
         uploaded_unix: Math.floor(new Date(release.published_at).getTime() / 1000),
         published_by: 'GitHub',
@@ -566,7 +568,7 @@ function assetFor(
   assets: { name: string; browser_download_url: string; size: number }[],
   target: string,
   arch: string,
-): { url: string; signatureUrl: string; bytes: number } | null {
+): { url: string; signatureUrl: string; bytes: number; filename: string } | null {
   const os = PLATFORMS[target];
   const machine = PLATFORMS[arch];
   const extension = UPDATABLE[target];
@@ -591,6 +593,7 @@ function assetFor(
         url: wanted.browser_download_url,
         signatureUrl: signature.browser_download_url,
         bytes: wanted.size,
+        filename: wanted.name,
       }
     : null;
 }
@@ -1506,8 +1509,8 @@ export default {
               ? (
                   await env.prism_accounts
                     .prepare(
-                      'SELECT version, target, arch, notes, bytes, uploaded_unix, published_by' +
-                        " FROM builds ORDER BY uploaded_unix DESC LIMIT 500",
+                      'SELECT version, target, arch, notes, filename, bytes, uploaded_unix,' +
+                        ' published_by FROM builds ORDER BY uploaded_unix DESC LIMIT 500',
                     )
                     .all()
                 ).results ?? []
@@ -1584,8 +1587,8 @@ export default {
           await env.prism_accounts
             .prepare(
               'INSERT OR REPLACE INTO builds' +
-                ' (version, target, arch, signature, notes, bytes, uploaded_unix, published_by)' +
-                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                ' (version, target, arch, signature, notes, filename, bytes, uploaded_unix,' +
+                ' published_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
             )
             .bind(
               version,
@@ -1593,6 +1596,7 @@ export default {
               arch,
               signature,
               (request.headers.get('x-prism-notes') ?? '').trim(),
+              (request.headers.get('x-prism-filename') ?? '').trim(),
               body.byteLength,
               nowUnix(),
               acting,

@@ -101,6 +101,14 @@ const ICONS = {
   folder:
     '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
   file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+  tag:
+    '<path d="M12.6 2.7a2.4 2.4 0 0 0-1.7-.7H4a2 2 0 0 0-2 2v6.9c0 .6.3 1.2.7 1.7l8.1 8.1a2.4 2.4 0 0 0 3.4 0l6.5-6.5a2.4 2.4 0 0 0 0-3.4Z"/>' +
+    '<circle cx="7.5" cy="7.5" r="1.5" fill="currentColor" stroke="none"/>',
+  sun:
+    '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.9 4.9 1.4 1.4"/>' +
+    '<path d="m17.7 17.7 1.4 1.4"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.3 17.7-1.4 1.4"/>' +
+    '<path d="m19.1 4.9-1.4 1.4"/>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/>',
   trash:
     '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>' +
@@ -455,7 +463,7 @@ function landSvg() {
 
   return (
     `<svg viewBox="0 0 ${MAP_COLUMNS * step} ${MAP_ROWS * step}" aria-hidden="true">` +
-    `<g fill="#32323b">${circles}</g></svg>`
+    `<g fill="currentColor">${circles}</g></svg>`
   );
 }
 

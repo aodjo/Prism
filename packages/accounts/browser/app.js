@@ -33,6 +33,15 @@ import {
 /** Where the whole page is drawn. */
 const root = document.getElementById('root');
 
+/**
+ * Which way round the page is drawn.
+ *
+ * Set up by `/admin/theme.js`, which runs in the head so that the first paint is already the
+ * right colour. The fallback is for a page opened with that file missing: dark, and a toggle
+ * that changes nothing rather than one that throws.
+ */
+const theme = window.prismTheme ?? { wear: () => {}, worn: () => 'dark' };
+
 /** The pages the rail offers, in the order it offers them. */
 const PAGES = [
   { id: 'accounts', label: '계정', glyph: 'users', group: null },
@@ -41,6 +50,7 @@ const PAGES = [
   { id: 'regions', label: '리전', glyph: 'globe', group: '서버' },
   { id: 'relay', label: '릴레이', glyph: 'radio', group: '서버' },
   { id: 'builds', label: '개발 빌드', glyph: 'package', group: '서버' },
+  { id: 'releases', label: '정식 빌드', glyph: 'tag', group: '서버' },
 ];
 
 /** Which page is showing, and which account is open on the accounts page. */
@@ -537,20 +547,36 @@ function drawStatusBar() {
         icon('refresh', 15),
       ]),
     ]),
-    el('button.operator', {
-      type: 'button',
-      title: '로그아웃',
-      on: {
-        click: async () => {
-          await call('/v1/session', { method: 'DELETE' }).catch(() => {});
-          remember('');
-          drawSignIn();
+    el('div.statusbar-right', {}, [
+      // Beside the operator's own chip rather than in the strip of readings to its left,
+      // because that strip is what this server is doing and this is about the screen it is
+      // being read on.
+      el('button.chrome-button', {
+        type: 'button',
+        title: theme.worn() === 'light' ? '어둡게' : '밝게',
+        'aria-label': theme.worn() === 'light' ? '어둡게' : '밝게',
+        on: {
+          click: () => {
+            theme.wear(theme.worn() === 'light' ? 'dark' : 'light');
+            void drawPage();
+          },
         },
-      },
-    }, [
-      el('span.avatar', { text: (session.email[0] ?? '?').toLowerCase() }),
-      el('span', { text: session.email }),
-      icon('chevronDown', 13, '#8a8a99'),
+      }, [icon(theme.worn() === 'light' ? 'moon' : 'sun', 15)]),
+      el('button.operator', {
+        type: 'button',
+        title: '로그아웃',
+        on: {
+          click: async () => {
+            await call('/v1/session', { method: 'DELETE' }).catch(() => {});
+            remember('');
+            drawSignIn();
+          },
+        },
+      }, [
+        el('span.avatar', { text: (session.email[0] ?? '?').toLowerCase() }),
+        el('span', { text: session.email }),
+        icon('chevronDown', 13),
+      ]),
     ]),
   ]);
 }
@@ -688,7 +714,7 @@ async function drawAccounts(column) {
       el('button.pill.danger', { type: 'button', text: '전부 로그아웃', on: { click: askSignOutEverybody } }),
     ]),
     el('div.toolbar', {}, [
-      el('div.search', {}, [icon('search', 15, '#8a8a99'), search]),
+      el('div.search', {}, [icon('search', 15), search]),
       el('span.note.muted', { text: '최신순' }),
     ]),
     el('div.page-body', { style: 'padding-top:22px' }, [
@@ -1140,8 +1166,6 @@ async function drawRelay(column) {
 /** Which version's files are open, kept across redraws so a refresh does not close it. */
 let openVersion = null;
 
-/** Which line is being looked at: `development` or `production`. */
-let openLine = 'development';
 
 /**
  * What a target and architecture are called where somebody reads them.
@@ -1172,7 +1196,11 @@ function platformName(target, arch) {
  * @returns {Promise<void>}
  */
 async function drawBuilds(column) {
-  const { builds } = await call(`/v1/admin/builds?channel=${openLine}`);
+  // Which of the two the rail is on. One function draws both, because they are one list read
+  // against two lines, and splitting it would be two copies of the same explorer kept in step
+  // by hand.
+  const line = view.page === 'releases' ? 'production' : 'development';
+  const { builds } = await call(`/v1/admin/builds?channel=${line}`);
 
   // Grouped in the order the rows arrived, which is newest first: the table is ordered by when
   // each was published and a version's folder belongs where its newest file puts it.
@@ -1207,12 +1235,12 @@ async function drawBuilds(column) {
         el('div.nothing', {}, [
           el('p.row-text.muted', {
             style: 'margin:0',
-            text: openLine === 'development' ? '개발 빌드가 없습니다.' : '릴리즈가 없습니다.',
+            text: line === 'development' ? '개발 빌드가 없습니다.' : '릴리즈가 없습니다.',
           }),
           el('p.note.dim', {
             style: 'margin:8px 0 0',
             text:
-              openLine === 'development'
+              line === 'development'
                 ? '저장소에서 pnpm publish-dev 를 실행하면 여기에 나타납니다.'
                 : 'release 브랜치를 main에 병합하고 v 태그를 붙이면 여기에 나타납니다.',
           }),
@@ -1235,10 +1263,16 @@ async function drawBuilds(column) {
       ]),
       ...folder.files.map((build) =>
         el('div.explorer-file', {}, [
-          el('span.explorer-glyph', {}, [icon('file', 15, '#8a8a99')]),
+          el('span.explorer-glyph', {}, [icon('file', 15)]),
           el('div.explorer-what', {}, [
-            el('span.row-text.ink-2', { text: platformName(build.target, build.arch) }),
-            el('span.note.muted', { text: build.notes || `${build.target}/${build.arch}` }),
+            // The name the file actually has, not one assembled from the columns beside it. A
+            // name built out of a version and a platform is a guess that happens to be right,
+            // and the moment the bundler renames something it is a guess that is wrong with
+            // nothing saying so.
+            el('span.explorer-file-name', {
+              text: build.filename || `${build.version}-${build.target}-${build.arch}`,
+            }),
+            el('span.note.muted', { text: build.notes || platformName(build.target, build.arch) }),
           ]),
           el('span.explorer-source', {
             class: build.source === 'github' ? 'is-github' : '',
@@ -1256,7 +1290,7 @@ async function drawBuilds(column) {
                   : `/v1/builds/${build.version}/${build.target}/${build.arch}`,
               title: '내려받기',
               download: '',
-            }, [icon('download', 15, '#8a8a99')]),
+            }, [icon('download', 15)]),
             // Only what this server is keeping. A release belongs to the repository that cut it
             // and a button here that appeared to delete one would be lying about what it does.
             build.source !== 'github' &&
@@ -1268,7 +1302,7 @@ async function drawBuilds(column) {
                     void withdraw(build);
                   },
                 },
-              }, [icon('trash', 15, '#ff8a96')]),
+              }, [icon('trash', 15)]),
           ]),
         ]),
       ),
@@ -1277,29 +1311,9 @@ async function drawBuilds(column) {
 
   showFiles();
 
-  /**
-   * Moves to the other line, keeping nothing from this one.
-   *
-   * The open version is cleared rather than carried over: the two lines share no versions, so a
-   * folder that was open on one names nothing on the other.
-   *
-   * @param {string} line - `development` or `production`.
-   * @returns {void}
-   */
-  const showLine = (line) => {
-    if (line === openLine) {
-      return;
-    }
-
-    openLine = line;
-    openVersion = null;
-
-    void drawPage();
-  };
-
   column.append(
     header(
-      '빌드',
+      line === 'development' ? '개발 빌드' : '정식 빌드',
       [
         el('span.note.muted', {
           text: folders.length
@@ -1309,26 +1323,12 @@ async function drawBuilds(column) {
       ],
     ),
     el('div.page-body', { style: 'padding-top:22px' }, [
-      el('div.tabs', {}, [
-        el('button', {
-          class: `tab${openLine === 'development' ? ' is-open' : ''}`,
-          type: 'button',
-          text: '개발',
-          on: { click: () => showLine('development') },
-        }),
-        el('button', {
-          class: `tab${openLine === 'production' ? ' is-open' : ''}`,
-          type: 'button',
-          text: '정식',
-          on: { click: () => showLine('production') },
-        }),
-      ]),
       // What this line is for, said once. Somebody who lands here having only ever cut releases
       // would otherwise be looking at an empty folder with no idea what fills it.
       el('p.note.muted', {
         style: 'margin:0 0 18px',
         text:
-          openLine === 'development'
+          line === 'development'
             ? '개발 채널을 따르는 기계가 받는 빌드입니다. 직접 올린 것과 CI가 만든 것이 함께 있고, 맨 위의 것이 지금 나가고 있습니다.'
             : '태그를 붙여 낸 릴리즈입니다. 기본 채널을 따르는 모든 기계가 이 중 맨 위의 것을 받습니다.',
       }),
@@ -1353,7 +1353,7 @@ async function drawBuilds(column) {
                   },
                   'data-version': folder.version,
                 }, [
-                  el('span.explorer-glyph.small', {}, [icon('folder', 14, '#8a8a99')]),
+                  el('span.explorer-glyph.small', {}, [icon('folder', 14)]),
                   el('span.explorer-folder-what', {}, [
                     el('span.explorer-name', { text: folder.version }),
                     el('span.fine.dim', {
@@ -1382,7 +1382,7 @@ async function drawBuilds(column) {
  */
 async function withdraw(build) {
   const yes = await confirmed(
-    `${build.version} · ${platformName(build.target, build.arch)}`,
+    build.filename || `${build.version} · ${platformName(build.target, build.arch)}`,
     '이 빌드를 내립니다. 이미 받은 기계는 그대로 두고, 앞으로 제안되지 않습니다.',
     '내리기',
   );
@@ -1799,6 +1799,7 @@ async function drawPage() {
     regions: drawRegions,
     relay: drawRelay,
     builds: drawBuilds,
+    releases: drawBuilds,
     audit: drawAudit,
   }[view.page];
 

@@ -182,6 +182,12 @@ CREATE TABLE IF NOT EXISTS builds (
   signature     TEXT NOT NULL,
   -- What this build is, in one line, shown in the window that offers it.
   notes         TEXT NOT NULL DEFAULT '',
+  -- What the file is called: `Prism.app.tar.gz`, `prism-macos-arm64-1.0.0-209.app.tar.gz`.
+  --
+  -- Kept rather than built back out of the columns beside it. A name assembled from a version
+  -- and a platform is a guess that happens to be right, and the moment the bundler renames
+  -- something it is a guess that is wrong with nothing saying so.
+  filename      TEXT NOT NULL DEFAULT '',
   -- How many bytes the object is, so a listing can be read without opening the bucket.
   bytes         INTEGER NOT NULL,
   -- When it was published, by this server's clock.

@@ -59,6 +59,50 @@
   color-scheme: dark;
 }
 
+/*
+ * The same page with the ground turned over.
+ *
+ * Only the tokens are redefined — nothing below this line knows which way round it is, which is
+ * what stops the two from drifting into two designs. `theme.js` stamps the attribute in the head
+ * from what was last chosen, or from the system when nothing was.
+ *
+ * The accents are not the same values. Mint at `#4de8b0` is a fine green on near-black and an
+ * illegible one on white, so each of the four is the colour that reads on this ground rather
+ * than the colour that was used on the other.
+ */
+:root[data-theme='light'] {
+  --base: #ffffff;
+  --sunk: #f7f7f9;
+
+  --wash-1: rgba(11, 11, 16, 0.028);
+  --wash-2: rgba(11, 11, 16, 0.04);
+  --wash-3: rgba(11, 11, 16, 0.052);
+  --wash-4: rgba(11, 11, 16, 0.075);
+
+  --line-1: rgba(11, 11, 16, 0.07);
+  --line-2: rgba(11, 11, 16, 0.09);
+  --line-4: rgba(11, 11, 16, 0.13);
+
+  --ink: #0b0b10;
+  --ink-2: #23232c;
+  --ink-3: #3a3a46;
+  --muted: #55555f;
+  --muted-2: #6c6c78;
+  --dim: #8a8a96;
+  --dim-2: #a6a6b0;
+
+  --violet: #5b3ce0;
+  --mint: #0f9a68;
+  --amber: #a76a09;
+  --danger: #d92d3f;
+  --danger-ink: #c02133;
+
+  --light: #16161c;
+  --on-light: #f6f6f8;
+
+  color-scheme: light;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1525,4 +1569,57 @@ button:disabled {
 .tab.is-open {
   background: var(--wash-4);
   color: var(--ink);
+}
+
+/* Icons take the colour of what holds them, so a theme change reaches them without any of these
+   call sites naming a value. */
+.explorer-glyph,
+.icon-button {
+  color: var(--muted-2);
+}
+
+.icon-button.is-danger {
+  color: var(--danger-ink);
+}
+
+/* The name a file actually has, which is the one thing on the row that is not prose. */
+.explorer-file-name {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+/* The dotted land behind the markers, which is a drawing rather than a photograph and so takes
+   the theme like everything else. */
+.map {
+  color: var(--line-4);
+}
+
+/* The controls that belong to the window rather than to what is in it. */
+.chrome-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+  color: var(--muted-2);
+}
+
+.chrome-button:hover {
+  background: var(--wash-2);
+  color: var(--ink-3);
+}
+
+.statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.operator .icon {
+  color: var(--muted-2);
 }
