@@ -57,6 +57,66 @@ const PAGES = [
 /** Which page is showing, and which account is open on the accounts page. */
 const view = { page: 'accounts', account: null, search: '' };
 
+/**
+ * Where the address bar says the page is.
+ *
+ * The dashboard answers at `/` and at `/admin`, because two names reach the same Worker. Both
+ * prefixes are stripped here so a page is one place with one name whichever door somebody came
+ * through, and an address that names no page is the first one.
+ *
+ * @param {string} path - `location.pathname`.
+ * @returns {{page: string, account: string | null}} What that address is showing.
+ *
+ * @example
+ * where('/admin/sessions'); // { page: 'sessions', account: null }
+ * where('/accounts/a@b.c'); // { page: 'accounts', account: 'a@b.c' }
+ */
+function where(path) {
+  const parts = path.replace(/^\/admin/, '').split('/').filter(Boolean);
+  const [first, second] = parts;
+  const page = PAGES.some((one) => one.id === first) ? first : 'accounts';
+
+  return {
+    page,
+    account: page === 'accounts' && second ? decodeURIComponent(second) : null,
+  };
+}
+
+/**
+ * The address a page and an open account are at.
+ *
+ * Under whichever prefix the page was opened at, so somebody who reached it through
+ * `accounts.presm.kr/admin` stays inside `/admin` as they move around it.
+ *
+ * @param {string} page - Which page the rail is on.
+ * @param {string | null} account - Which account is open, if one is.
+ * @returns {string} A path to put in the address bar.
+ *
+ * @example
+ * address('sessions', null); // '/sessions'
+ */
+function address(page, account) {
+  const prefix = location.pathname.startsWith('/admin') ? '/admin' : '';
+  const tail = account ? `/${encodeURIComponent(account)}` : '';
+
+  return `${prefix}/${page}${tail}`;
+}
+
+/**
+ * Moves to a page, putting it in the address bar and drawing it.
+ *
+ * @param {string} page - Which page to show.
+ * @param {string | null} [account] - Which account to open on it.
+ * @returns {void}
+ */
+function go(page, account = null) {
+  view.page = page;
+  view.account = account;
+  history.pushState(null, '', address(page, account));
+
+  void drawPage();
+}
+
 /** The last overview the server gave, so the strip does not blank on every navigation. */
 let overview = null;
 
@@ -278,9 +338,7 @@ function drawRail() {
         'aria-current': view.page === page.id ? 'page' : null,
         on: {
           click: () => {
-            view.page = page.id;
-            view.account = null;
-            drawPage();
+            go(page.id);
           },
         },
       }, [icon(page.glyph), el('span', { text: page.label })]),
@@ -671,8 +729,7 @@ async function drawAccounts(column) {
             return;
           }
 
-          view.account = account.email;
-          drawPage();
+          go('accounts', account.email);
         },
       },
     }, [
@@ -766,8 +823,7 @@ async function drawAccount(column) {
     type: 'button',
     on: {
       click: () => {
-        view.account = null;
-        drawPage();
+        go('accounts');
       },
     },
   }, [icon('arrowLeft', 14), el('span', { text: '계정' })]);
@@ -1578,7 +1634,11 @@ function askDelete(account) {
       try {
         await call(`/v1/admin/accounts/${encodeURIComponent(account.email)}`, { method: 'DELETE' });
         close();
+
+        // The address is the account that is no longer there, so it goes back to the list
+        // rather than staying at a page that would be empty on the next reload.
         view.account = null;
+        history.replaceState(null, '', address('accounts', null));
         await refresh();
       } catch (error) {
         confirm.disabled = false;
@@ -1858,6 +1918,20 @@ async function refresh() {
  * @returns {Promise<void>}
  */
 async function start() {
+  const at = where(location.pathname);
+  view.page = at.page;
+  view.account = at.account;
+
+  // The address bar and the rail have to agree, and the browser's own back button is the one
+  // control on this page nobody wrote. Following it is what makes a page a place.
+  window.addEventListener('popstate', () => {
+    const now = where(location.pathname);
+    view.page = now.page;
+    view.account = now.account;
+
+    void drawPage();
+  });
+
   await refresh();
   await askAboutPublish();
 }

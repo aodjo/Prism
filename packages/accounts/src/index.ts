@@ -256,6 +256,42 @@ const DASHBOARD: Record<string, { body: string | ArrayBuffer; type: string }> = 
 };
 
 /**
+ * The pages the dashboard's rail offers, by the name each one is at.
+ *
+ * Mirrors `PAGES` in `browser/app.js`, which is where they are named for a person. Only the
+ * identifiers are here, because what the Worker has to know is which addresses are a page and
+ * which are a mistake — a dashboard that answered its own HTML at every address would turn
+ * every typo into a page that quietly showed the first one.
+ */
+const PAGES = ['accounts', 'sessions', 'audit', 'regions', 'relay', 'local', 'builds', 'releases'];
+
+/**
+ * Returns whether an address is one of the dashboard's pages.
+ *
+ * Both prefixes, because the page answers at `/` and at `/admin`. An account opened on the
+ * accounts page carries its address after it, so that one takes a second segment.
+ *
+ * @param {string} path - What was asked for.
+ * @returns {boolean} Whether the dashboard should answer it.
+ *
+ * @example
+ * aPage('/sessions'); // true
+ * aPage('/admin/accounts/a@b.c'); // true
+ * aPage('/favicon.ico'); // false
+ */
+function aPage(path: string): boolean {
+  const parts = path.replace(/^\/admin/, '').split('/').filter(Boolean);
+
+  if (parts.length === 0 || parts.length > 2) {
+    return false;
+  }
+
+  const [page] = parts;
+
+  return PAGES.includes(page as string) && (parts.length === 1 || page === 'accounts');
+}
+
+/**
  * Serves one of the dashboard's files.
  *
  * @param {string} path - What was asked for.
@@ -286,7 +322,7 @@ async function dashboard(path: string, env: Env): Promise<Response> {
     });
   }
 
-  const file = DASHBOARD[path];
+  const file = DASHBOARD[path] ?? (aPage(path) ? DASHBOARD['/'] : undefined);
 
   if (!file) {
     return fail(404, 'There is nothing at that address.');
@@ -2132,8 +2168,10 @@ export default {
         return takeReport(env, request);
       }
 
-      // The dashboard itself, which is the same API with somewhere to click.
-      if (path === '/' || path === '/admin' || path.startsWith('/admin/')) {
+      // The dashboard itself, which is the same API with somewhere to click. Every page it
+      // offers is an address of its own, so a tab that was left open on the sessions page
+      // reopens on the sessions page and a link to one can be sent to somebody.
+      if (path === '/' || path === '/admin' || path.startsWith('/admin/') || aPage(path)) {
         return method === 'GET'
           ? dashboard(path, env)
           : fail(405, 'That is not a method for this.');
