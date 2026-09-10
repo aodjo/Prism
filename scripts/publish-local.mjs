@@ -1,5 +1,5 @@
 /**
- * Builds this machine's platform and publishes it to the development line.
+ * Builds this machine's platform and publishes it to the local line.
  *
  * What this is for: a one-line fix takes three minutes to build on the machine that made it and
  * ten to come back from a build farm that is making the same thing again on five runners. When
@@ -11,9 +11,9 @@
  *
  * Usage, from the repository root:
  *
- *   pnpm publish-dev
- *   pnpm publish-dev --notes "why the caret sat low"
- *   pnpm publish-dev --build 912
+ *   pnpm publish-local
+ *   pnpm publish-local --notes "why the caret sat low"
+ *   pnpm publish-local --build 912
  *
  * What it needs, and what it does not:
  *
@@ -232,16 +232,16 @@ if (process.platform === 'darwin' && !process.env.APPLE_SIGNING_IDENTITY) {
 
 const token = await signIn();
 
-console.log(`\nbuilding 1.0.0-dev.${build} for ${target}/${arch}\n`);
+console.log(`\nbuilding 1.0.0-local.${build} for ${target}/${arch}\n`);
 
 run('pnpm', ['package'], {
-  PRISM_CHANNEL: 'development',
+  PRISM_CHANNEL: 'local',
   PRISM_BUILD: String(build),
   TAURI_SIGNING_PRIVATE_KEY: readFileSync(key, 'utf8').trim(),
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: process.env.PRISM_UPDATE_KEY_PASSWORD ?? '',
 });
 
-const version = `1.0.0-dev.${build}`;
+const version = `1.0.0-local.${build}`;
 const made = join(ROOT, 'target/release/bundle', bundle);
 const signature = readFileSync(`${made}.sig`, 'utf8').trim();
 const body = readFileSync(made);
@@ -266,5 +266,5 @@ if (!put.ok) {
   process.exit(1);
 }
 
-console.log(`${version} is on the development line for ${target}/${arch}.`);
+console.log(`${version} is on the local line for ${target}/${arch}.`);
 console.log('Machines following it will be offered it within half an hour, or at their next launch.');

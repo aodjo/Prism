@@ -289,19 +289,20 @@ async function update(env: Env, path: string, channel: string): Promise<Response
     return malformed('update path');
   }
 
-  // The development line is served from here before GitHub is asked, because that is the whole
-  // point of it: a build published from the machine that made the change is available the moment
-  // it finishes, not when a build farm has made the same thing again on five runners.
+  // Three lines, and each is served from exactly one place.
   //
-  // GitHub still answers when nothing has been published — the two are one line, and a machine
-  // following it should get whichever of the two is newer rather than only the one it happened
-  // to be told about.
-  if (channel === 'development') {
-    const published = await publishedBuild(env, target, arch, running);
+  // `local` is this store and nothing else: what somebody built on the machine in front of them
+  // and put here, available the moment it finished rather than when a build farm has made the
+  // same thing again on five runners. Nothing follows it by default — a machine has to be asked
+  // to, which is the whole safety of it, because a build from a working tree may contain
+  // anything and was never compiled for the other four platforms.
+  //
+  // `development` and `production` are GitHub's: a release is a tag, a set of artifacts and a
+  // page somebody can read, and none of that is worth reimplementing.
+  if (channel === 'local') {
+    const built = await publishedBuild(env, target, arch, running);
 
-    if (published) {
-      return json(published);
-    }
+    return built ? json(built) : new Response(null, { status: 204 });
   }
 
   const releases = await published();
@@ -1502,28 +1503,24 @@ export default {
         // there and when — is here, and a listing that read the objects would have to guess all
         // of it back out of a key.
         if (path === '/v1/admin/builds' && method === 'GET') {
-          const line = url.searchParams.get('channel') === 'production' ? 'production' : 'development';
+          const asked = url.searchParams.get('channel') ?? 'development';
+          const line = asked === 'production' || asked === 'local' ? asked : 'development';
 
-          const mine =
-            line === 'development'
-              ? (
-                  await env.prism_accounts
-                    .prepare(
-                      'SELECT version, target, arch, notes, filename, bytes, uploaded_unix,' +
-                        ' published_by FROM builds ORDER BY uploaded_unix DESC LIMIT 500',
-                    )
-                    .all()
-                ).results ?? []
-              : [];
+          // Each line from where that line is actually served, so this page and a machine asking
+          // for an update are reading the same thing. A list assembled some other way would be a
+          // second answer to the question the updater already answers.
+          if (line === 'local') {
+            const { results } = await env.prism_accounts
+              .prepare(
+                'SELECT version, target, arch, notes, filename, bytes, uploaded_unix,' +
+                  ' published_by FROM builds ORDER BY uploaded_unix DESC LIMIT 500',
+              )
+              .all();
 
-          const theirs = await releasedBuilds(line === 'development');
+            return json({ builds: (results ?? []).map((row) => ({ ...row, source: 'server' })) });
+          }
 
-          return json({
-            builds: [
-              ...mine.map((row) => ({ ...row, source: 'server' })),
-              ...theirs,
-            ],
-          });
+          return json({ builds: await releasedBuilds(line === 'development') });
         }
 
         // Taking one off the line.

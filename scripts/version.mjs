@@ -50,8 +50,18 @@ const VERSION = '1.0.0';
 const channel = process.env.PRISM_CHANNEL ?? 'development';
 const build = Number(process.env.PRISM_BUILD ?? 0);
 
-if (channel !== 'production' && channel !== 'development') {
-  console.error(`PRISM_CHANNEL must be production or development, not ${channel}`);
+/**
+ * The three lines a build can be on.
+ *
+ * `production` is a tag. `development` is what CI makes of a push to `develop`. `local` is this
+ * machine, and it is a line rather than an unlabelled build because a machine can be asked to
+ * follow it: what somebody just fixed reaches the machine they are testing on without waiting
+ * for a build farm to make the same thing again.
+ */
+const CHANNELS = ['production', 'development', 'local'];
+
+if (!CHANNELS.includes(channel)) {
+  console.error(`PRISM_CHANNEL must be one of ${CHANNELS.join(', ')} — not ${channel}`);
   process.exit(2);
 }
 
@@ -60,23 +70,41 @@ if (!Number.isInteger(build) || build < 0) {
   process.exit(2);
 }
 
-const version = channel === 'production' ? VERSION : `${VERSION}-dev.${build}`;
+/**
+ * What this build calls itself.
+ *
+ * A release is the version. The other two are prereleases of the version being worked toward,
+ * under names of their own — `1.0.0-dev.211` and `1.0.0-local.100412` are different builds and
+ * a number they shared would make them one build to anything comparing versions.
+ *
+ * `local` sorts above `dev` because semver compares prerelease identifiers as text and `d` comes
+ * before `l`. Which is the right way round: somebody who has just built a fix and installed it
+ * should not be offered the build farm's older answer as an update five minutes later.
+ */
+const version =
+  channel === 'production' ? VERSION : `${VERSION}-${channel === 'local' ? 'local' : 'dev'}.${build}`;
 
 const config = JSON.parse(readFileSync(CONFIG, 'utf8'));
 config.version = version;
 
-// A development build says so on the dock and in the tab strip, before anybody opens it.
+// Which line a build is on says so on the dock and in the tab strip, before anybody opens it.
 //
-// The same drawing on a light ground rather than a badge or a different mark: what has to be
-// obvious is which of two icons is which, and that reads at sixteen pixels where a corner
-// ornament does not. It also survives being the only Prism somebody has open.
+// The same drawing on a different ground rather than a badge or a different mark: what has to be
+// obvious is which of three icons is which, and a ground colour reads at sixteen pixels where a
+// corner ornament does not. It also survives being the only Prism somebody has open.
 //
-// Worth having because both lines are installed on the same machines here, and a bug reported
-// against the wrong one costs an afternoon.
-config.bundle.icon =
-  channel === 'production'
-    ? ['icons/icon.png', 'icons/icon.ico', 'icons/icon.icns']
-    : ['icons/dev/icon.png', 'icons/dev/icon.ico', 'icons/dev/icon.icns'];
+// Worth having because all three end up installed on the same machines here, and a bug reported
+// against the wrong one costs an afternoon. Yellow for local because it is the one that came
+// from a working tree and may contain anything.
+const GROUNDS = {
+  production: 'icons',
+  development: 'icons/dev',
+  local: 'icons/local',
+};
+
+const ground = GROUNDS[channel];
+
+config.bundle.icon = [`${ground}/icon.png`, `${ground}/icon.ico`, `${ground}/icon.icns`];
 
 writeFileSync(CONFIG, `${JSON.stringify(config, null, 2)}\n`);
 

@@ -414,6 +414,11 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
             >
               <option value="production">Released</option>
               <option value="development">Every build</option>
+              {/* Builds made on somebody's own machine and published straight to this account's
+                  server. Offered because the machine being tested is usually not the machine the
+                  fix was written on, and carrying a bundle between them by hand stops working
+                  the moment there are three of them. */}
+              <option value="local">Built here</option>
             </select>
           </Row>
           <Row label="">

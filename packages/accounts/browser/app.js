@@ -49,8 +49,9 @@ const PAGES = [
   { id: 'audit', label: '감사 로그', glyph: 'history', group: null },
   { id: 'regions', label: '리전', glyph: 'globe', group: '서버' },
   { id: 'relay', label: '릴레이', glyph: 'radio', group: '서버' },
-  { id: 'builds', label: '개발 빌드', glyph: 'package', group: '서버' },
-  { id: 'releases', label: '정식 빌드', glyph: 'tag', group: '서버' },
+  { id: 'local', label: '로컬 빌드', glyph: 'laptop', group: '빌드' },
+  { id: 'builds', label: '개발 빌드', glyph: 'package', group: '빌드' },
+  { id: 'releases', label: '정식 빌드', glyph: 'tag', group: '빌드' },
 ];
 
 /** Which page is showing, and which account is open on the accounts page. */
@@ -1163,6 +1164,31 @@ async function drawRelay(column) {
 
 /* ── Builds ────────────────────────────────────────────────────────────────── */
 
+/**
+ * The three lines, and what each is.
+ *
+ * Written out rather than branched on at four call sites, because what differs between them is
+ * four sentences and a branch per sentence is where the third one gets forgotten.
+ */
+const LINES = {
+  local: {
+    name: '로컬 빌드',
+    about:
+      '이 저장소에서 직접 만들어 올린 빌드입니다. CI를 거치지 않으므로 만든 사람의 기계에서만 확인된 것이고, 로컬 채널로 옮긴 기계만 받습니다.',
+    empty: '저장소에서 pnpm publish-local 을 실행하면 여기에 나타납니다.',
+  },
+  development: {
+    name: '개발 빌드',
+    about: 'develop에 올라간 것을 CI가 만든 빌드입니다. 개발 채널을 따르는 기계가 맨 위의 것을 받습니다.',
+    empty: 'develop에 푸시하면 CI가 만들어 여기에 올립니다.',
+  },
+  production: {
+    name: '정식 빌드',
+    about: '태그를 붙여 낸 릴리즈입니다. 기본 채널을 따르는 모든 기계가 이 중 맨 위의 것을 받습니다.',
+    empty: 'release 브랜치를 main에 병합하고 v 태그를 붙이면 여기에 나타납니다.',
+  },
+};
+
 /** Which version's files are open, kept across redraws so a refresh does not close it. */
 let openVersion = null;
 
@@ -1199,7 +1225,7 @@ async function drawBuilds(column) {
   // Which of the two the rail is on. One function draws both, because they are one list read
   // against two lines, and splitting it would be two copies of the same explorer kept in step
   // by hand.
-  const line = view.page === 'releases' ? 'production' : 'development';
+  const line = { releases: 'production', local: 'local' }[view.page] ?? 'development';
   const { builds } = await call(`/v1/admin/builds?channel=${line}`);
 
   // Grouped in the order the rows arrived, which is newest first: the table is ordered by when
@@ -1233,17 +1259,8 @@ async function drawBuilds(column) {
     if (!folder) {
       files.replaceChildren(
         el('div.nothing', {}, [
-          el('p.row-text.muted', {
-            style: 'margin:0',
-            text: line === 'development' ? '개발 빌드가 없습니다.' : '릴리즈가 없습니다.',
-          }),
-          el('p.note.dim', {
-            style: 'margin:8px 0 0',
-            text:
-              line === 'development'
-                ? '저장소에서 pnpm publish-dev 를 실행하면 여기에 나타납니다.'
-                : 'release 브랜치를 main에 병합하고 v 태그를 붙이면 여기에 나타납니다.',
-          }),
+          el('p.row-text.muted', { style: 'margin:0', text: `${LINES[line].name}가 없습니다.` }),
+          el('p.note.dim', { style: 'margin:8px 0 0', text: LINES[line].empty }),
         ]),
       );
 
@@ -1313,7 +1330,7 @@ async function drawBuilds(column) {
 
   column.append(
     header(
-      line === 'development' ? '개발 빌드' : '정식 빌드',
+      LINES[line].name,
       [
         el('span.note.muted', {
           text: folders.length
@@ -1325,13 +1342,7 @@ async function drawBuilds(column) {
     el('div.page-body', { style: 'padding-top:22px' }, [
       // What this line is for, said once. Somebody who lands here having only ever cut releases
       // would otherwise be looking at an empty folder with no idea what fills it.
-      el('p.note.muted', {
-        style: 'margin:0 0 18px',
-        text:
-          line === 'development'
-            ? '개발 채널을 따르는 기계가 받는 빌드입니다. 직접 올린 것과 CI가 만든 것이 함께 있고, 맨 위의 것이 지금 나가고 있습니다.'
-            : '태그를 붙여 낸 릴리즈입니다. 기본 채널을 따르는 모든 기계가 이 중 맨 위의 것을 받습니다.',
-      }),
+      el('p.note.muted', { style: 'margin:0 0 18px', text: LINES[line].about }),
       el('div.explorer', {}, [
         el('div.explorer-tree', {}, [
           el('div.explorer-tree-head', {}, [el('span.label', { text: '버전' })]),
@@ -1798,6 +1809,7 @@ async function drawPage() {
     sessions: drawSessions,
     regions: drawRegions,
     relay: drawRelay,
+    local: drawBuilds,
     builds: drawBuilds,
     releases: drawBuilds,
     audit: drawAudit,
