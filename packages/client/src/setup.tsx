@@ -193,7 +193,10 @@ const RAYS = [
  */
 function PrismArt(): JSX.Element {
   return (
-    <div className="relative h-[276px] w-[360px]">
+    // Centred on the prism rather than on the drawing. The rays leave to one side only, so the
+    // box that holds them all has its middle 38.5px to the right of the prism's, and centring
+    // the box puts the prism off to one side of everything written under it.
+    <div className="relative h-[276px] w-[360px] -translate-x-[38.5px]">
       <div className="absolute left-9 top-[18px] h-[240px] w-[276px] mix-blend-screen">
         <img
           src="assets/prism-glow.svg"
