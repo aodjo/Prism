@@ -39,6 +39,12 @@ mod surface;
 #[cfg(target_os = "windows")]
 #[path = "display/d3d11.rs"]
 mod surface;
+#[cfg(target_os = "macos")]
+#[path = "display/toolbar.rs"]
+mod toolbar;
+#[cfg(not(target_os = "macos"))]
+#[path = "display/toolbar_none.rs"]
+mod toolbar;
 
 /// How many pictures may wait to be shown before the newest is dropped.
 const PICTURE_QUEUE_DEPTH: usize = 2;
@@ -301,6 +307,31 @@ fn resized(event: &Event) -> bool {
     )
 }
 
+/// Takes the pointer and keyboard for the machine being watched, or gives them back.
+///
+/// One place, because there are two ways to ask — the chord and the toolbar — and a state the
+/// window server holds, a flag the loop holds and a picture in the title bar that all have to
+/// agree afterwards.
+fn hold(
+    sdl: &sdl3::Sdl,
+    window: &sdl3::video::Window,
+    bar: Option<&toolbar::Toolbar>,
+    say: &Reporter,
+    on: bool,
+) {
+    sdl.mouse().set_relative_mouse_mode(window, on);
+
+    if let Some(bar) = bar {
+        bar.set_controlling(on);
+    }
+
+    say.note(if on {
+        "display: controlling this machine, control option to let go"
+    } else {
+        "display: watching only, click to control this machine"
+    });
+}
+
 /// Opens a window and shows the stream until it ends or the window is closed.
 ///
 /// Everything this would otherwise print goes to `say`, because the two callers want it in
@@ -325,11 +356,15 @@ pub fn run(
 ) -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
-    let window = video
+    let mut window = video
         .window("Prism", width, height)
         .position_centered()
         .resizable()
         .build()?;
+
+    // Installed before anything is drawn, because adding a toolbar moves the content view
+    // down: a surface built for the window as it was would be built one title bar too tall.
+    let bar = toolbar::Toolbar::install(&window);
 
     let (mut drawable_width, mut drawable_height) = window.size_in_pixels();
 
@@ -405,23 +440,50 @@ pub fn run(
     // escape from before they had seen the screen they came for.
     let mut grabbed = false;
 
+    // Whether the window is filling the screen, which SDL will not answer and this therefore
+    // has to remember.
+    let mut filling = false;
+
+    // How large the pictures arriving are, once one has. What the window is set to when
+    // somebody asks for the size the far machine is actually sending.
+    let mut picture: Option<(u32, u32)> = None;
+
     if capture_input {
         say.note("display: click to control this machine, control option to let go");
     }
 
     'main: loop {
+        while let Some(tool) = bar.as_ref().and_then(toolbar::Toolbar::pressed) {
+            match tool {
+                toolbar::Tool::Control if capture_input => {
+                    grabbed = !grabbed;
+                    hold(&sdl, &window, bar.as_ref(), say, grabbed);
+                }
+                // Asked for on a session that is only watching. Said rather than ignored,
+                // because a control that does nothing when pressed is a fault to look for.
+                toolbar::Tool::Control => {
+                    say.note("display: this session is watching only, so there is nothing to control");
+                }
+                toolbar::Tool::Fit => {
+                    if let Some((across, down)) = picture {
+                        let _ = window.set_size(across, down);
+                    }
+                }
+                toolbar::Tool::Fullscreen => {
+                    filling = !filling;
+                    let _ = window.set_fullscreen(filling);
+                }
+                toolbar::Tool::Disconnect => break 'main,
+            }
+        }
+
         for event in events.poll_iter() {
             if is_quit(&event) {
                 break 'main;
             }
             if capture_input && (is_grab_toggle(&event) || (!grabbed && is_click(&event))) {
                 grabbed = !grabbed;
-                sdl.mouse().set_relative_mouse_mode(&window, grabbed);
-                say.note(if grabbed {
-                    "display: controlling this machine, control option to let go"
-                } else {
-                    "display: watching only, click to control this machine"
-                });
+                hold(&sdl, &window, bar.as_ref(), say, grabbed);
                 continue;
             }
             if resized(&event) {
@@ -467,9 +529,11 @@ pub fn run(
         }
 
         match pictures_rx.recv_timeout(Duration::from_millis(16)) {
-            Ok(picture) => {
+            Ok(decoded) => {
+                picture = Some(surface::size_of(&decoded));
+
                 let clock_offset = offset.load(Ordering::Relaxed);
-                if let Some(age) = client::age_of(surface::pts_of(&picture), clock_offset) {
+                if let Some(age) = client::age_of(surface::pts_of(&decoded), clock_offset) {
                     latency.record(age);
                     let hold = pacer.hold_for(age);
                     if !hold.is_zero() {
@@ -493,7 +557,7 @@ pub fn run(
                 }
 
                 let target = (drawable_width as usize, drawable_height as usize);
-                if surface.present(&picture, cursor.normalised(), target)? {
+                if surface.present(&decoded, cursor.normalised(), target)? {
                     shown += 1;
                     hud_frames += 1;
                 } else {

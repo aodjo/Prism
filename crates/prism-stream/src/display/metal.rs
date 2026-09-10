@@ -27,6 +27,11 @@ pub fn pts_of(picture: &Picture) -> u64 {
     picture.pts_us
 }
 
+/// Returns how large a picture is, in pixels.
+pub fn size_of(picture: &Picture) -> (u32, u32) {
+    (picture.width, picture.height)
+}
+
 /// The window's drawing surface and everything drawn onto it.
 pub struct Surface {
     view: SDL_MetalView,
