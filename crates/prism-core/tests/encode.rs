@@ -8,6 +8,9 @@
 use prism_core::encode::{EncodedFrame, EncoderConfig};
 use prism_core::net::negotiate::Codec;
 
+#[cfg(target_os = "macos")]
+mod common;
+
 #[test]
 fn a_frame_byte_budget_is_one_frame_at_the_target_rate() {
     let config = EncoderConfig {
@@ -84,7 +87,6 @@ fn resetting_a_frame_keeps_its_buffers() {
 
 #[cfg(target_os = "macos")]
 mod videotoolbox {
-    use std::time::Duration;
 
     use prism_core::encode::videotoolbox::{Nv12Frame, VideoToolboxEncoder};
     use prism_core::encode::{EncoderConfig, START_CODE};
@@ -142,7 +144,7 @@ mod videotoolbox {
             .expect("first frame encodes");
 
         let first = encoder
-            .poll(Duration::from_secs(5))
+            .poll(crate::common::PATIENCE)
             .expect("first frame comes back");
         assert!(first.is_idr, "a forced keyframe must be reported as an IDR");
 
@@ -169,7 +171,7 @@ mod videotoolbox {
                 .expect("frame encodes");
 
             let frame = encoder
-                .poll(Duration::from_secs(5))
+                .poll(crate::common::PATIENCE)
                 .expect("frame comes back");
             assert!(!frame.is_idr, "frame {phase} should not be an IDR");
 
@@ -195,7 +197,7 @@ mod videotoolbox {
                 .expect("frame encodes");
 
             let frame = encoder
-                .poll(Duration::from_secs(5))
+                .poll(crate::common::PATIENCE)
                 .expect("frame comes back");
             assert!(
                 !frame.slices.is_empty(),
@@ -230,7 +232,7 @@ mod videotoolbox {
                 .encode(source.pixel_buffer(), phase as u64 * 33_333, phase == 0)
                 .expect("frame encodes");
             encoder
-                .poll(Duration::from_secs(5))
+                .poll(crate::common::PATIENCE)
                 .expect("frame comes back");
         }
 
@@ -240,7 +242,7 @@ mod videotoolbox {
             .expect("forced keyframe encodes");
 
         let frame = encoder
-            .poll(Duration::from_secs(5))
+            .poll(crate::common::PATIENCE)
             .expect("frame comes back");
         assert!(
             frame.is_idr,

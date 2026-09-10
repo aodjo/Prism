@@ -7,6 +7,9 @@
 
 use prism_core::decode::{NAL_IDR, NAL_PPS, NAL_SPS, nal_type, nal_units};
 
+#[cfg(target_os = "macos")]
+mod common;
+
 #[test]
 fn nal_units_are_split_on_either_start_code_length() {
     let stream = [
@@ -45,7 +48,6 @@ fn trailing_start_codes_do_not_produce_empty_units() {
 
 #[cfg(target_os = "macos")]
 mod round_trip {
-    use std::time::Duration;
 
     use prism_core::decode::DecodeError;
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
@@ -144,11 +146,24 @@ mod round_trip {
                 .encode(source.pixel_buffer(), phase as u64 * 33_333, phase == 0)
                 .expect("frame encodes");
 
-            let encoded = encoder
-                .poll(Duration::from_secs(5))
-                .expect("frame comes back");
+            // A frame not coming back is allowed, and this insisted otherwise. The session is
+            // configured `RealTime`, which is VideoToolbox being told it may drop a frame
+            // rather than fall behind — a hardware encoder never needs to, and a software one
+            // in a virtual machine does. What this test is actually for is the assertion at the
+            // bottom: three quarters of the frames must come back *and match*. That catches a
+            // broken encoder; demanding every single frame only caught a slow one.
+            let Some(encoded) = encoder.poll(crate::common::PATIENCE) else {
+                continue;
+            };
             let pts_us = encoded.pts_us;
             let bitstream = encoded.data.clone();
+
+            // Which frame this actually is, read off its timestamp rather than assumed from
+            // the loop. The two are the same only while the encoder hands back exactly what it
+            // was just given — which a `RealTime` session does not promise, and a software one
+            // does not do. Comparing a picture against the pattern for a frame it is not
+            // produced a mean luma error of 46 and looked exactly like a broken codec.
+            let painted = (pts_us / 33_333) as usize;
 
             decoder.decode(&bitstream, pts_us).expect("frame decodes");
             assert!(
@@ -156,7 +171,7 @@ mod round_trip {
                 "parameter sets arrived with the first frame"
             );
 
-            let Some(picture) = decoder.poll(Duration::from_secs(5)) else {
+            let Some(picture) = decoder.poll(crate::common::PATIENCE) else {
                 continue;
             };
 
@@ -172,10 +187,10 @@ mod round_trip {
                 .expect("the picture can be read back");
             assert_eq!(luma.len(), (WIDTH * HEIGHT) as usize);
 
-            let error = mean_absolute_error(&luma, phase);
+            let error = mean_absolute_error(&luma, painted);
             assert!(
                 error < 12.0,
-                "{codec:?} phase {phase} decoded to a different picture, mean luma error \
+                "{codec:?} phase {painted} decoded to a different picture, mean luma error \
                  {error:.1}"
             );
 
@@ -213,7 +228,6 @@ mod round_trip {
 
 #[cfg(target_os = "macos")]
 mod through_the_wire {
-    use std::time::Duration;
 
     use prism_core::decode::videotoolbox::VideoToolboxDecoder;
     use prism_core::encode::EncoderConfig;
@@ -263,7 +277,7 @@ mod through_the_wire {
                 .encode(source.pixel_buffer(), phase as u64 * 16_667, phase == 0)
                 .expect("frame encodes");
 
-            let Some(frame) = encoder.poll(Duration::from_secs(5)) else {
+            let Some(frame) = encoder.poll(crate::common::PATIENCE) else {
                 continue;
             };
 
@@ -308,7 +322,7 @@ mod through_the_wire {
 
             submitted += 1;
             if decoder.decode(&bitstream, pts_us).is_ok()
-                && decoder.poll(Duration::from_secs(2)).is_some()
+                && decoder.poll(crate::common::PATIENCE).is_some()
             {
                 decoded += 1;
             }

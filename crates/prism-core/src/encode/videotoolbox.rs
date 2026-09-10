@@ -75,7 +75,8 @@ const PARAMETER_SET_INTERVAL: u64 = 60;
 ///
 /// `kVTPropertyNotSupportedErr`. Apple Silicon's hardware H.264 encoder returns this for
 /// the slice size limit, so slicing has to be treated as a capability rather than a
-/// requirement.
+/// requirement — and an Intel Mac returns it for the speed-over-quality preference, so that
+/// is one too. Which encoder has which knob is a fact about the machine, not about this file.
 const PROPERTY_NOT_SUPPORTED: i32 = -12900;
 
 /// How many encoded frames may queue up before the encoder thread blocks.
@@ -500,7 +501,12 @@ impl VideoToolboxEncoder {
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 false,
             )?;
-            self.set_bool(
+            // A preference, not a requirement, and one that plenty of encoders do not have.
+            // An Intel Mac refuses it outright with `kVTPropertyNotSupportedErr`, and this was
+            // written as though every encoder had the knob — so on those machines the session
+            // could not be created at all and the machine could not be shared. What its absence
+            // costs is some encoding speed; what insisting on it cost was the whole feature.
+            self.set_bool_if_supported(
                 "PrioritizeEncodingSpeedOverQuality",
                 kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
                 true,
@@ -644,6 +650,31 @@ impl VideoToolboxEncoder {
         };
         // SAFETY: the caller guarantees `key` is a property that takes a boolean.
         unsafe { self.set_property(name, key, value) }
+    }
+
+    /// Sets a boolean session property, and shrugs if this encoder has never heard of it.
+    ///
+    /// For preferences rather than requirements: a knob that tunes how an encoder spends its
+    /// time, where not having the knob costs some of what it was set for and nothing else.
+    ///
+    /// Only [`PROPERTY_NOT_SUPPORTED`] is tolerated. A property that exists and was refused —
+    /// the wrong type, a dead session — is still an error, because that is a mistake in this
+    /// file rather than a fact about the machine.
+    ///
+    /// # Safety
+    ///
+    /// `key` must be a VideoToolbox property that takes a boolean.
+    unsafe fn set_bool_if_supported(
+        &self,
+        name: &'static str,
+        key: &CFString,
+        value: bool,
+    ) -> Result<(), EncodeError> {
+        // SAFETY: the caller guarantees `key` is a property that takes a boolean.
+        match unsafe { self.set_bool(name, key, value) } {
+            Err(EncodeError::Property { status, .. }) if status == PROPERTY_NOT_SUPPORTED => Ok(()),
+            other => other,
+        }
     }
 
     /// Sets a numeric session property.

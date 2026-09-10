@@ -90,6 +90,20 @@ jobs:
         include:
           - name: macos-arm64
             os: macos-latest
+          # No Intel Mac build, and that is a decision rather than an oversight. An arm64 binary
+          # does not run on one and cannot be made to — Rosetta translates Intel code for Apple
+          # Silicon, not the other way round — so an Intel Mac cannot install Prism at all.
+          #
+          # It was tried on `macos-15-intel` and taken out again. That runner is a virtual
+          # machine with no media engine, so VideoToolbox falls back to a software encoder two
+          # orders of magnitude slower, and the codec tests could not tell a slow machine from a
+          # broken codec. A real Intel Mac has Quick Sync and would very likely be fine; the
+          # runner is not one, and shipping a build whose codec path CI cannot exercise is worse
+          # than shipping none.
+          #
+          # What it is waiting for is somewhere to run those tests on real Intel hardware. The
+          # rest of the way is already built: the update endpoint has mapped `darwin/x86_64` to
+          # `macos-x64` since it was written, so the artifact is all that is missing.
           - name: windows-x64
             os: windows-latest
           # A runner of the architecture rather than a cross build from the x64 one: half of
@@ -414,10 +428,70 @@ jobs:
   # Separate from the job above because that one proves the image works and this one publishes
   # it. Both architectures, because the machines this runs on are not all the same one and an
   # image that only runs where it was built is not a deployable artifact.
+  # Whether this push touched the server the regions run.
+  #
+  # Cheap, and it decides whether the two jobs below run at all: a change to the window, the
+  # shell or the dashboard has nothing to do with five machines in five countries, and
+  # rebuilding an image and recreating every container to ship it is minutes spent on nothing.
+  touched:
+    name: what this push touched
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    outputs:
+      rendezvous: ${{ steps.look.outputs.rendezvous }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history, because this compares two commits and a shallow clone may not
+          # have the older one.
+          fetch-depth: 0
+
+      - id: look
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Listed one argument at a time rather than expanded from a string. Word splitting
+          # is a shell-by-shell behaviour — zsh does not do it — and a path list that quietly
+          # became one long argument would match nothing, answer "unchanged" every time, and
+          # leave five regions running whatever they were running the day it broke.
+          #
+          # `prism-core` and the manifests are here because the server is built from them: a
+          # change there changes the binary even though nothing under `crates/prism-rendezvous`
+          # moved.
+          look() {
+            git "$@" -- \
+              crates/prism-rendezvous \
+              crates/prism-core \
+              deploy/rendezvous \
+              Cargo.lock \
+              Cargo.toml
+          }
+
+          # A first push to a branch, or a force push, reports a parent of all zeroes. Nothing
+          # can be compared against that, so the answer is yes — deploying when it was not
+          # needed costs minutes, and not deploying when it was needed leaves a region running
+          # something nobody meant to ship.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE" 2>/dev/null; then
+            echo "no comparable parent; treating the server as changed"
+            echo "rendezvous=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if look diff --quiet "$BEFORE" "$SHA"; then
+            echo "the server is untouched; the image and the regions stay as they are"
+            echo "rendezvous=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "the server changed:"
+            look diff --name-only "$BEFORE" "$SHA" | sed 's/^/  /'
+            echo "rendezvous=true" >> "$GITHUB_OUTPUT"
+          fi
+
   image:
     name: publish the image
-    needs: rendezvous
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: [rendezvous, touched]
+    if: needs.touched.outputs.rendezvous == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -448,7 +522,14 @@ jobs:
         with:
           context: .
           file: deploy/rendezvous/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # What the regions actually run, and nothing else. Every one of the five is x86_64;
+          # the arm64 half was built under emulation for machines that do not exist, and it was
+          # seventeen of this job's nineteen minutes.
+          #
+          # An arm region is a `ubuntu-24.04-arm` runner building its half natively and a
+          # manifest joining the two — which is a change to make when there is one, not a
+          # standing cost paid on every push in case there ever is.
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.name.outputs.image }}
           cache-from: type=gha
@@ -523,9 +604,12 @@ jobs:
             \$SUDO install -d -m 700 /opt/prism
             \$SUDO mv /tmp/compose.yaml /opt/prism/compose.yaml
             echo '${{ secrets.GITHUB_TOKEN }}' | \$SUDO docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-            cd /opt/prism
+            # Named in full rather than reached by changing directory. The directory is root's
+            # and mode 700, so on the one region that connects as a sudoer rather than as root
+            # the \`cd\` failed before any of this ran — four regions updated and one did not.
             \$SUDO env PRISM_IMAGE='${{ needs.image.outputs.image }}' \
-              docker compose --env-file .env up -d --no-build --pull always
+              docker compose -f /opt/prism/compose.yaml --env-file /opt/prism/.env \
+              up -d --no-build --pull always
             \$SUDO docker image prune -f
           "
 
