@@ -23,6 +23,7 @@ import type {
 } from './api.js';
 import { ago, latency, span, when } from './format.js';
 import { Preferences, SharingTerms } from './preferences.js';
+import { speak, t } from './i18n.js';
 import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -213,6 +214,7 @@ function Home(): JSX.Element {
         prism.sessions(),
       ]);
 
+      speak(stored.language);
       setSettings(stored);
       setDevices(signedIn.devices);
       setAccount({ email: signedIn.email });
@@ -457,7 +459,7 @@ function Home(): JSX.Element {
               ref={search}
               type="text"
               spellCheck={false}
-              placeholder="Search devices, sessions, files"
+              placeholder={t('Search devices, sessions, files')}
               value={query}
               onChange={(event) => {
                 setQuery(event.target.value);
@@ -483,7 +485,7 @@ function Home(): JSX.Element {
 
         <div className="drag mt-[30px] flex h-9 flex-none items-center gap-3">
           <h1 className="m-0 text-[26px] leading-none font-semibold tracking-[-0.5px] text-ink">
-            Devices
+            {t('Devices')}
           </h1>
           <span
             hidden={alone}
@@ -521,7 +523,7 @@ function Home(): JSX.Element {
             className="no-drag inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
           >
             <span className="text-ui">+</span>
-            <span>Add device</span>
+            <span>{t('Add device')}</span>
           </button>
         </div>
 
@@ -560,7 +562,7 @@ function Home(): JSX.Element {
                     ? mine?.local === null
                       ? 'Opening'
                       : 'Shared'
-                    : 'Not shared'}
+                    : t('Not shared')}
               </span>
               <span
                 className={`truncate text-[12.5px] ${mine?.error ? 'text-danger-ink' : 'text-dim'}`}
@@ -582,7 +584,7 @@ function Home(): JSX.Element {
               <div className="flex items-center gap-2.5">
                 <button
                   type="button"
-                  aria-label="Sharing terms"
+                  aria-label={t('Sharing terms')}
                   aria-expanded={terms}
                   title="Frame rate, bitrate and where it listens"
                   className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 text-ink transition-colors ${
@@ -607,11 +609,11 @@ function Home(): JSX.Element {
 
               {shared ? (
                 <button type="button" className="btn-danger px-6 py-3.5 text-[15px]" onClick={flip}>
-                  Stop sharing
+                  {t('Stop sharing')}
                 </button>
               ) : (
                 <button type="button" className="btn-primary-md" onClick={flip}>
-                  Share this machine
+                  {t('Share this machine')}
                   <span className="btn-key">⌘↵</span>
                 </button>
               )}
@@ -635,11 +637,11 @@ function Home(): JSX.Element {
             <div className="max-h-full w-full max-w-[460px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               <div className="mb-2 flex items-center justify-between">
                 <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
-                  Sharing this machine
+                  {t('Sharing this machine')}
                 </h2>
                 <button
                   type="button"
-                  aria-label="Close sharing terms"
+                  aria-label={t('Close sharing terms')}
                   className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
                   onClick={() => {
                     setTerms(false);
@@ -774,7 +776,7 @@ function Home(): JSX.Element {
                 })();
               }}
             >
-              {needsScreen === 'restart' ? 'Restart PRISM' : 'Open System Settings'}
+              {needsScreen === 'restart' ? t('Restart PRISM') : t('Open System Settings')}
             </button>
           </div>
         )}
@@ -785,7 +787,7 @@ function Home(): JSX.Element {
              and a window that offered a button instead would be offering the wrong thing. */
           <div className="mt-12 flex-none">
             <h2 className="m-0 text-[19px] leading-none font-semibold tracking-[-0.3px] text-ink-2">
-              Nothing to watch yet
+              {t('Nothing to watch yet')}
             </h2>
             <p className="mt-3 mb-0 max-w-[46ch] text-note leading-relaxed text-muted-2">
               Install Prism on the machine you want to watch and sign in
@@ -803,7 +805,7 @@ function Home(): JSX.Element {
         ) : (
           <>
         <h2 className="mt-10 flex-none text-ui font-medium tracking-[0.2px] text-muted-2">
-          Other devices
+          {t('Other devices')}
         </h2>
 
         {/* Three across at the width the design was drawn at, two when the window is narrow
@@ -902,7 +904,7 @@ function Home(): JSX.Element {
 
         <div className="mt-10 flex flex-none items-center gap-2.5">
           <h2 className="m-0 text-ui font-medium tracking-[0.2px] text-muted-2">
-            Recent sessions
+            {t('Recent sessions')}
           </h2>
           <div className="flex-1" />
           {history.length > RECENT && (
@@ -982,7 +984,7 @@ function Home(): JSX.Element {
               </h2>
               <button
                 type="button"
-                aria-label="Close settings"
+                aria-label={t('Close settings')}
                 className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
                 onClick={() => {
                   setTuning(false);

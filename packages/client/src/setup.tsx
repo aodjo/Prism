@@ -21,6 +21,7 @@ import type {
   PrismApi,
   Settings,
 } from './api.js';
+import { speak, t } from './i18n.js';
 import { Backdrop, Primary, STEP_SKY, Trouble, WELCOME_SKY, Wordmark, reason, short } from './ui.js';
 
 declare global {
@@ -337,6 +338,7 @@ function Setup(): JSX.Element {
       ]);
 
       setVersion(identity.version);
+      speak(stored.language);
       setSettings(stored);
       setSignedIn(account.email);
       setArrivedSignedIn(account.email !== null);
@@ -572,12 +574,12 @@ function Setup(): JSX.Element {
       {which === 'welcome' && (
         <section className={cls}>
           <h1 className="max-w-[min(1040px,72.2vw)] text-hero font-semibold">
-            Your desktop.
+            {t('Your desktop.')}
             <br />
             Everywhere.
           </h1>
           <p className="mt-7 max-w-[min(700px,48.6vw)] text-lead text-muted">
-            Low-latency remote access for macOS, Windows, and Linux.
+            {t('Low-latency remote access for macOS, Windows, and Linux.')}
           </p>
           <div className="mt-7">
             <Primary
@@ -587,7 +589,7 @@ function Setup(): JSX.Element {
                 advance();
               }}
             >
-              Begin
+              {t('Begin')}
             </Primary>
           </div>
           {/* Somebody who already has an account signs in and their machines follow. It opens
@@ -605,7 +607,7 @@ function Setup(): JSX.Element {
                 advance();
               }}
             >
-              Already using PRISM? Sign in
+              {t('Already using PRISM? Sign in')}
             </button>
           )}
         </section>
@@ -615,7 +617,7 @@ function Setup(): JSX.Element {
         <section className={cls}>
           <PrismArt />
           <h2 className="mt-4 max-w-[min(640px,44.4vw)] text-display font-semibold">
-            One machine, every screen.
+            {t('One machine, every screen.')}
           </h2>
           <p className="mt-4 max-w-[min(520px,36.1vw)] text-body text-muted">
             PRISM streams your desktop to any other device you own — with latency low enough
@@ -701,7 +703,7 @@ function Setup(): JSX.Element {
                   setAskingCode(true);
                 }}
               >
-                I have it — test it
+                {t('I have it — test it')}
               </button>
             </div>
           ) : (
@@ -813,7 +815,7 @@ function Setup(): JSX.Element {
                 setAskingCode(false);
               }}
             >
-              Use a different email
+              {t('Use a different email')}
             </button>
           )}
 
@@ -836,12 +838,12 @@ function Setup(): JSX.Element {
       {which === 'permissions' && (
         <section className={cls}>
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-            A few permissions first
+            {t('A few permissions first')}
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
-            PRISM needs these to capture and control this machine.
+            {t('PRISM needs these to capture and control this machine.')}
             <br />
-            Nothing is sent outside your own network.
+            {t('Nothing is sent outside your own network.')}
           </p>
           <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
             {GRANTS.map((grant) => {
@@ -873,7 +875,7 @@ function Setup(): JSX.Element {
                   {has ? (
                     <span className="tag-granted">
                       <span className="text-fine">✓</span>
-                      <span>Granted</span>
+                      <span>{t('Granted')}</span>
                     </span>
                   ) : grant.id === 'screen' && asked.has(grant.id) ? (
                     // Screen recording only. It is the grant the system reads once for the
@@ -891,7 +893,7 @@ function Setup(): JSX.Element {
                         void prism.restart();
                       }}
                     >
-                      Restart PRISM
+                      {t('Restart PRISM')}
                     </button>
                   ) : (
                     <button
@@ -911,7 +913,7 @@ function Setup(): JSX.Element {
                         })();
                       }}
                     >
-                      Allow
+                      {t('Allow')}
                     </button>
                   )}
                 </div>
@@ -919,7 +921,7 @@ function Setup(): JSX.Element {
             })}
           </div>
           <p className="mt-4 text-note text-dim">
-            You can change these later in Settings → Privacy.
+            {t('You can change these later in Settings → Privacy.')}
           </p>
         </section>
       )}
@@ -949,7 +951,7 @@ function Setup(): JSX.Element {
               <span className="flex min-w-0 flex-1 flex-col gap-1">
                 <span className="text-body-2 font-medium">Add another machine</span>
                 <span className="text-note text-muted-2">
-                  Install PRISM on it and sign in to the same account. The two find each other.
+                  {t('Install PRISM on it and sign in to the same account. The two find each other.')}
                 </span>
               </span>
             </div>
@@ -960,7 +962,7 @@ function Setup(): JSX.Element {
               <span className="flex min-w-0 flex-1 flex-col gap-1">
                 <span className="text-body-2 font-medium">Share the one you want to watch</span>
                 <span className="text-note text-muted-2">
-                  Press Share on it, and it turns up on the home screen of the other.
+                  {t('Press Share on it, and it turns up on the home screen of the other.')}
                 </span>
               </span>
             </div>
@@ -968,7 +970,7 @@ function Setup(): JSX.Element {
 
           <div className="mt-[23px]">
             <Primary keys="⌘↵" onClick={finish}>
-              Enter PRISM
+              {t('Enter PRISM')}
             </Primary>
           </div>
         </section>
@@ -1092,7 +1094,7 @@ function Setup(): JSX.Element {
           )}
           {(HAS_NEXT.has(step) || (step === 'account' && greeted)) && (
             <Primary trailing="→" onClick={advance}>
-              Continue
+              {t('Continue')}
             </Primary>
           )}
         </div>

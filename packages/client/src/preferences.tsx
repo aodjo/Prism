@@ -17,6 +17,7 @@ import type {
   PrismApi,
   Settings,
 } from './api.js';
+import { speak, t } from './i18n.js';
 import { Trouble, reason, short } from './ui.js';
 
 declare global {
@@ -132,6 +133,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
         prism.buildInfo(),
       ]);
 
+      speak(stored.language);
       setAccount(known);
       setSettings(stored);
       setBuild(made);
@@ -219,8 +221,33 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
 
   return (
     <div ref={body}>
+        <Band title={t('General')}>
+          <Row label={t('Language')}>
+            <select
+              className="rounded-lg border border-line-2 bg-wash-1 px-2 py-1 text-note-2 text-ink-2"
+              value={settings?.language ?? ''}
+              onChange={(event) => {
+                void (async () => {
+                  await prism.setSettings({ language: event.target.value });
+                  speak(event.target.value);
+
+                  // Drawn again from the top, because every sentence already on screen was
+                  // built with the language before this one and React has no reason to ask for
+                  // any of them a second time. A window that is not this one keeps what it has
+                  // until it is opened again.
+                  location.reload();
+                })();
+              }}
+            >
+              <option value="">{t('Follow the system')}</option>
+              <option value="en">English</option>
+              <option value="ko">한국어</option>
+            </select>
+          </Row>
+        </Band>
+
         {configured && (
-          <Band title="Account">
+          <Band title={t('Account')}>
             {enrolment ? (
               <div className="text-center">
                 <p className="mx-auto mb-3 max-w-[42ch] text-tiny leading-normal text-dim">
@@ -387,13 +414,13 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
         {/* Version and build number are two answers, not one. A person reads the version to
             know what they have; they report the build number when something is wrong with it,
             and it is the only one of the two that moves between two builds of a release. */}
-        <Band title="Updates">
-          <Row label="Version">
+        <Band title={t('Updates')}>
+          <Row label={t('Version')}>
             <span className="text-note-2 text-ink-3">
               {build ? `${build.version} · build ${build.build}` : '—'}
             </span>
           </Row>
-          <Row label="Automatic">
+          <Row label={t('Automatic')}>
             <input
               type="checkbox"
               className={TOGGLE}
@@ -403,7 +430,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
               }}
             />
           </Row>
-          <Row label="Builds">
+          <Row label={t('Builds')}>
             <select
               className="rounded-lg border border-line-2 bg-wash-1 px-2 py-1 text-note-2 text-ink-2"
               value={settings?.updateChannel || build?.channel || 'production'}
@@ -412,17 +439,17 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                 setUpdate(null);
               }}
             >
-              <option value="production">Released</option>
-              <option value="development">Every build</option>
+              <option value="production">{t('Released')}</option>
+              <option value="development">{t('Every build')}</option>
             </select>
           </Row>
           <Row label="">
             <div className="flex items-center gap-3">
               <span className="text-note-2 text-muted">
                 {update === 'checking'
-                  ? 'Checking'
+                  ? t('Checking')
                   : update === 'current'
-                    ? 'Up to date'
+                    ? t('Up to date')
                     : update
                       ? `${update.version} is available`
                       : ''}
@@ -448,14 +475,14 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                   })();
                 }}
               >
-                {update && update !== 'checking' && update !== 'current' ? 'Install' : 'Check now'}
+                {update && update !== 'checking' && update !== 'current' ? t('Install') : t('Check now')}
               </button>
             </div>
           </Row>
         </Band>
 
-        <Band title="Watching">
-          <Row label="Send input">
+        <Band title={t('Watching')}>
+          <Row label={t('Send input')}>
             <input
               type="checkbox"
               className={TOGGLE}
@@ -465,7 +492,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
               }}
             />
           </Row>
-          <Row label="Smooth playback">
+          <Row label={t('Smooth playback')}>
             <input
               type="checkbox"
               className={TOGGLE}
@@ -549,7 +576,7 @@ export function SharingTerms(): JSX.Element {
 
   return (
     <div className="flex flex-col">
-      <Row label="Name">
+      <Row label={t('Name')}>
         <input
           type="text"
           spellCheck={false}
@@ -565,7 +592,7 @@ export function SharingTerms(): JSX.Element {
           onBlur={flush}
         />
       </Row>
-      <Row label="Frame rate">
+      <Row label={t('Frame rate')}>
         <input
           type="number"
           min={1}
@@ -578,7 +605,7 @@ export function SharingTerms(): JSX.Element {
           }}
         />
       </Row>
-      <Row label="Bitrate">
+      <Row label={t('Bitrate')}>
         <input
           type="number"
           min={1}
@@ -591,7 +618,7 @@ export function SharingTerms(): JSX.Element {
           }}
         />
       </Row>
-      <Row label="Listen on">
+      <Row label={t('Listen on')}>
         <input
           type="text"
           spellCheck={false}

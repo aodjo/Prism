@@ -72,6 +72,12 @@ pub struct Settings {
     /// somebody moves it. Setting it is how a machine joins or leaves the development line
     /// without being reinstalled.
     pub update_channel: String,
+    /// Which language the windows are in: `en`, `ko`, or empty to follow the machine.
+    ///
+    /// Empty by default, because the machine already knows what language its owner reads and
+    /// asking again is asking a question that has been answered.
+    #[serde(default)]
+    pub language: String,
     /// Whether somebody has been all the way through setup on this machine.
     ///
     /// Needed because the permissions step cannot be finished in one sitting: macOS only reads a
@@ -112,6 +118,7 @@ impl Default for Settings {
             pinned: Vec::new(),
             auto_update: true,
             update_channel: String::new(),
+            language: String::new(),
             setup_finished: false,
         }
     }

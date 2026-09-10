@@ -171,6 +171,12 @@ export interface Settings {
    * somebody moves it.
    */
   updateChannel: string;
+  /**
+   * Which language the windows are in: `en`, `ko`, or empty to follow the machine.
+   *
+   * Empty by default, because the machine already knows what language its owner reads.
+   */
+  language: string;
   /** Whether somebody has been all the way through setup on this machine. */
   setupFinished: boolean;
 }
