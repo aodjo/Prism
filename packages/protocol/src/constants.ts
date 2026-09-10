@@ -133,6 +133,7 @@ export enum Channel {
   Input = 3,
   Feedback = 4,
   Fec = 5,
+  File = 6,
 }
 
 /**
@@ -161,4 +162,61 @@ export enum ControlType {
   ClockPing = 0,
   ClockPong = 1,
   CursorPosition = 2,
+}
+
+/** Byte length of a file message header: the channel tag and the message type. */
+export const FILE_HEADER_LEN = 2;
+
+/**
+ * Byte length of a file chunk header, including the leading channel tag.
+ *
+ * The tag, the type, the transfer this belongs to and which chunk of it this is.
+ */
+export const FILE_CHUNK_HEADER_LEN = 10;
+
+/** Largest piece of a file that fits in one packet. */
+export const MAX_FILE_PAYLOAD = MAX_PLAINTEXT_SIZE - FILE_CHUNK_HEADER_LEN;
+
+/** Bytes of a file offer before the name. */
+export const FILE_OFFER_FIXED_LEN = 20;
+
+/** Exact byte length of an answer to an offer. */
+export const FILE_ANSWER_LEN = 8;
+
+/** Exact byte length of a receiver's report. */
+export const FILE_REPORT_LEN = 14;
+
+/** Bytes of a listing before its entries. */
+export const FILE_LISTING_FIXED_LEN = 5;
+
+/** Bytes of one listing entry before its name. */
+export const FILE_ENTRY_FIXED_LEN = 9;
+
+/** Bytes of a request for one file before the name. */
+export const FILE_ASK_FIXED_LEN = 3;
+
+/**
+ * Longest file name the wire carries, in bytes of UTF-8.
+ *
+ * An offer has to fit in one packet, and a name is the only part of it that varies.
+ */
+export const MAX_FILE_NAME = 255;
+
+/** Message type carried in the second byte of a file packet. */
+export enum FileType {
+  Offer = 0,
+  Answer = 1,
+  Chunk = 2,
+  Report = 3,
+  List = 4,
+  Listing = 5,
+  Ask = 6,
+}
+
+/** Why an offered file was not taken. */
+export enum FileRefusal {
+  Declined = 0,
+  TooLarge = 1,
+  BadName = 2,
+  NotWritable = 3,
 }

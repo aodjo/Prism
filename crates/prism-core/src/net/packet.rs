@@ -93,6 +93,30 @@ pub const AUDIO_HEADER_LEN: usize = 13;
 /// be reassembled, so a lost audio packet costs exactly one frame and nothing else.
 pub const MAX_AUDIO_PAYLOAD: usize = MAX_PLAINTEXT_SIZE - AUDIO_HEADER_LEN;
 
+/// Byte length of a file message header: the channel tag and the message type.
+pub const FILE_HEADER_LEN: usize = 2;
+
+/// Byte length of a file chunk header, including the leading channel tag.
+///
+/// The tag, the type, the transfer this belongs to and which chunk of it this is.
+pub const FILE_CHUNK_HEADER_LEN: usize = 10;
+
+/// Largest piece of a file that fits in one packet.
+pub const MAX_FILE_PAYLOAD: usize = MAX_PLAINTEXT_SIZE - FILE_CHUNK_HEADER_LEN;
+
+/// Exact byte length of an answer to an offer.
+pub const FILE_ANSWER_LEN: usize = 8;
+
+/// Exact byte length of a receiver's report.
+pub const FILE_REPORT_LEN: usize = 14;
+
+/// Longest file name the wire carries, in bytes of UTF-8.
+///
+/// An offer has to fit in one packet, and a name is the only part of it that varies. This is
+/// also longer than any file system here will accept, so a name that does not fit was never
+/// going to be written down anyway.
+pub const MAX_FILE_NAME: usize = 255;
+
 /// Most shards a Reed-Solomon block may hold, data and parity together.
 ///
 /// GF(2^8) has 256 elements, and Prism stops one short so a block's shard count fits a
@@ -137,6 +161,13 @@ pub enum Channel {
     /// reassembler's ordinary path, and a receiver that does not understand it has to be
     /// able to ignore it wholesale rather than mistake it for missing picture data.
     Fec = 5,
+    /// Files moving between the two machines, in either direction.
+    ///
+    /// Its own channel rather than a control message, because a transfer is a conversation
+    /// that lasts — an offer, an answer, a run of chunks and the reports that repair them —
+    /// and because a receiver has to be able to drop the whole of it without understanding
+    /// any of it. Nothing on this channel is on the frame path.
+    File = 6,
 }
 
 impl TryFrom<u8> for Channel {
@@ -158,6 +189,7 @@ impl TryFrom<u8> for Channel {
             3 => Ok(Channel::Input),
             4 => Ok(Channel::Feedback),
             5 => Ok(Channel::Fec),
+            6 => Ok(Channel::File),
             other => Err(ProtocolError::UnknownChannel(other)),
         }
     }
@@ -212,6 +244,34 @@ pub enum ProtocolError {
     /// Control message type was not one this build knows.
     #[error("unknown control type {0}")]
     UnknownControlType(u8),
+
+    /// File message type was not one this build knows.
+    #[error("unknown file message type {0}")]
+    UnknownFileType(u8),
+
+    /// Reason for refusing a file was not one this build knows.
+    #[error("unknown file refusal {0}")]
+    UnknownFileRefusal(u8),
+
+    /// File message was routed to a decoder for a different one of them.
+    #[error("expected file message {expected:?}, got {got:?}")]
+    WrongFileType {
+        /// Message the decoder handles.
+        expected: FileType,
+        /// Message actually found in the packet.
+        got: FileType,
+    },
+
+    /// File name was not one that could be written down.
+    ///
+    /// A name arriving over a network becomes a path on this machine, so a separator or a
+    /// relative directory in it is refused at the wire rather than sanitised: a name that has
+    /// to be repaired before it is safe is a name nobody meant to send.
+    #[error("{name} is not a file name")]
+    BadFileName {
+        /// What was sent, or a note saying it was not even text.
+        name: String,
+    },
 
     /// Input event kind was not one this build knows.
     #[error("unknown input kind {0}")]
@@ -1020,6 +1080,803 @@ impl CursorPosition {
     }
 }
 
+/// Message type carried in the second byte of a file packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FileType {
+    /// A file is on its way, if the other side will have it.
+    Offer = 0,
+    /// Whether it will, or why it will not.
+    Answer = 1,
+    /// One piece of a file that was accepted.
+    Chunk = 2,
+    /// What the receiver has, so the sender knows what to send again.
+    Report = 3,
+    /// What is in the shared folder, please.
+    List = 4,
+    /// What is in it.
+    Listing = 5,
+    /// Send me that one.
+    Ask = 6,
+}
+
+impl TryFrom<u8> for FileType {
+    type Error = ProtocolError;
+
+    /// Converts a raw type byte into a [`FileType`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::UnknownFileType`] for a type this build does not know, which
+    /// is how a message added in a future revision is refused rather than misread.
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        match tag {
+            0 => Ok(FileType::Offer),
+            1 => Ok(FileType::Answer),
+            2 => Ok(FileType::Chunk),
+            3 => Ok(FileType::Report),
+            4 => Ok(FileType::List),
+            5 => Ok(FileType::Listing),
+            6 => Ok(FileType::Ask),
+            other => Err(ProtocolError::UnknownFileType(other)),
+        }
+    }
+}
+
+/// Why an offered file was not taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FileRefusal {
+    /// Somebody said no, or the session ended while the file was in the air.
+    Declined = 0,
+    /// More bytes than this machine will accept in one file.
+    TooLarge = 1,
+    /// A name that is not a name: empty, a path, or one of the two dots.
+    BadName = 2,
+    /// The file could not be created or written.
+    NotWritable = 3,
+}
+
+impl TryFrom<u8> for FileRefusal {
+    type Error = ProtocolError;
+
+    /// Converts a raw reason byte into a [`FileRefusal`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::UnknownFileRefusal`] for a reason this build does not know.
+    /// A refusal is still a refusal, but the sender says why it happened and inventing a
+    /// reason it was not given would be worse than reporting that it does not know.
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        match tag {
+            0 => Ok(FileRefusal::Declined),
+            1 => Ok(FileRefusal::TooLarge),
+            2 => Ok(FileRefusal::BadName),
+            3 => Ok(FileRefusal::NotWritable),
+            other => Err(ProtocolError::UnknownFileRefusal(other)),
+        }
+    }
+}
+
+/// Reads the message type from a file packet.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::Empty`] for a zero-length input,
+/// [`ProtocolError::WrongChannel`] if the tag is not [`Channel::File`],
+/// [`ProtocolError::TooShort`] if the type byte is missing, and
+/// [`ProtocolError::UnknownFileType`] for a type this build does not know.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::net::packet::{FileType, file_type_of};
+/// assert_eq!(file_type_of(&[6, 0]).unwrap(), FileType::Offer);
+/// ```
+pub fn file_type_of(bytes: &[u8]) -> Result<FileType, ProtocolError> {
+    expect_file(bytes, FILE_HEADER_LEN)?;
+
+    FileType::try_from(bytes[1])
+}
+
+/// Checks that a packet is on the file channel and long enough to read.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::Empty`], [`ProtocolError::WrongChannel`] or
+/// [`ProtocolError::TooShort`].
+fn expect_file(bytes: &[u8], needed: usize) -> Result<(), ProtocolError> {
+    let channel = channel_of(bytes)?;
+
+    if channel != Channel::File {
+        return Err(ProtocolError::WrongChannel {
+            expected: Channel::File,
+            got: bytes[0],
+        });
+    }
+
+    if bytes.len() < needed {
+        return Err(ProtocolError::TooShort {
+            actual: bytes.len(),
+            needed,
+        });
+    }
+
+    Ok(())
+}
+
+/// Checks a packet is a file message of one particular type.
+///
+/// # Errors
+///
+/// As [`expect_file`], plus [`ProtocolError::UnknownFileType`] and
+/// [`ProtocolError::WrongFileType`].
+fn expect_file_type(
+    bytes: &[u8],
+    expected: FileType,
+    needed: usize,
+) -> Result<(), ProtocolError> {
+    expect_file(bytes, needed.max(FILE_HEADER_LEN))?;
+
+    let got = FileType::try_from(bytes[1])?;
+
+    if got != expected {
+        return Err(ProtocolError::WrongFileType { expected, got });
+    }
+
+    Ok(())
+}
+
+/// Returns whether a name is one this side is willing to write down.
+///
+/// A file arriving over a network names the file it becomes, so this is the one place where
+/// refusing is the whole job: anything with a separator in it, anything that is one of the two
+/// relative directories, anything empty, and anything longer than the wire carries.
+///
+/// # Examples
+///
+/// ```
+/// # use prism_core::net::packet::plain_file_name;
+/// assert!(plain_file_name("notes.txt"));
+/// assert!(!plain_file_name("../etc/passwd"));
+/// assert!(!plain_file_name("a/b"));
+/// ```
+#[must_use]
+pub fn plain_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_FILE_NAME
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', '\0'])
+}
+
+/// An offer to send one file, as carried on [`Channel::File`].
+///
+/// Nothing moves until the far side answers. The size is what it will cost and the chunk count
+/// is what the receiver reports against, so both are settled before a byte of the file is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOffer {
+    /// Which transfer this is, chosen by the sender and unique within a session.
+    pub id: u32,
+    /// How many bytes the file holds.
+    pub size: u64,
+    /// How many chunks it was cut into.
+    pub chunks: u32,
+    /// What to call it where it lands.
+    pub name: String,
+}
+
+impl FileOffer {
+    /// Returns the number of bytes [`Self::encode_into`] will write.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        FILE_OFFER_FIXED_LEN + self.name.len()
+    }
+
+    /// Writes the offer into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` cannot hold it, and
+    /// [`ProtocolError::BadFileName`] if the name is not one that could be written down.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::FileOffer;
+    /// let offer = FileOffer { id: 1, size: 9, chunks: 1, name: "notes.txt".to_owned() };
+    /// let mut buf = vec![0u8; offer.encoded_len()];
+    /// assert_eq!(offer.encode_into(&mut buf).unwrap(), buf.len());
+    /// ```
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        let needed = self.encoded_len();
+
+        if buf.len() < needed {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed,
+            });
+        }
+
+        if !plain_file_name(&self.name) {
+            return Err(ProtocolError::BadFileName {
+                name: self.name.clone(),
+            });
+        }
+
+        buf[0] = Channel::File as u8;
+        buf[1] = FileType::Offer as u8;
+        buf[2..6].copy_from_slice(&self.id.to_le_bytes());
+        buf[6..14].copy_from_slice(&self.size.to_le_bytes());
+        buf[14..18].copy_from_slice(&self.chunks.to_le_bytes());
+        buf[18..20].copy_from_slice(&(self.name.len() as u16).to_le_bytes());
+        buf[FILE_OFFER_FIXED_LEN..needed].copy_from_slice(self.name.as_bytes());
+
+        Ok(needed)
+    }
+
+    /// Parses an offer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::WrongFileType`],
+    /// [`ProtocolError::TooShort`], or [`ProtocolError::BadFileName`] if the name is not
+    /// UTF-8 or is not a name this side would write down.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::FileOffer;
+    /// let offer = FileOffer { id: 1, size: 9, chunks: 1, name: "notes.txt".to_owned() };
+    /// let mut buf = vec![0u8; offer.encoded_len()];
+    /// offer.encode_into(&mut buf).unwrap();
+    /// assert_eq!(FileOffer::decode(&buf).unwrap(), offer);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_file_type(bytes, FileType::Offer, FILE_OFFER_FIXED_LEN)?;
+
+        let length = read_u16(bytes, 18) as usize;
+        let needed = FILE_OFFER_FIXED_LEN + length;
+
+        if bytes.len() < needed {
+            return Err(ProtocolError::TooShort {
+                actual: bytes.len(),
+                needed,
+            });
+        }
+
+        let name = core::str::from_utf8(&bytes[FILE_OFFER_FIXED_LEN..needed])
+            .map_err(|_| ProtocolError::BadFileName {
+                name: "not utf-8".to_owned(),
+            })?
+            .to_owned();
+
+        if !plain_file_name(&name) {
+            return Err(ProtocolError::BadFileName { name });
+        }
+
+        Ok(Self {
+            id: read_u32(bytes, 2),
+            size: read_u64(bytes, 6),
+            chunks: read_u32(bytes, 14),
+            name,
+        })
+    }
+}
+
+/// Bytes of a [`FileOffer`] before the name.
+pub const FILE_OFFER_FIXED_LEN: usize = 20;
+
+/// Whether an offered file will be taken, as carried on [`Channel::File`].
+///
+/// Also what ends a transfer early: a receiver that has run out of disk, or a person who
+/// changed their mind, sends one of these with `accepted` false and the sender stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileAnswer {
+    /// Which transfer this answers.
+    pub id: u32,
+    /// Whether the file is wanted.
+    pub accepted: bool,
+    /// Why it is not, meaningless when it is.
+    pub refusal: FileRefusal,
+}
+
+impl FileAnswer {
+    /// Writes the answer into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than
+    /// [`FILE_ANSWER_LEN`].
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < FILE_ANSWER_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: FILE_ANSWER_LEN,
+            });
+        }
+
+        buf[0] = Channel::File as u8;
+        buf[1] = FileType::Answer as u8;
+        buf[2..6].copy_from_slice(&self.id.to_le_bytes());
+        buf[6] = u8::from(self.accepted);
+        buf[7] = self.refusal as u8;
+
+        Ok(FILE_ANSWER_LEN)
+    }
+
+    /// Parses an answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::WrongFileType`],
+    /// [`ProtocolError::TooShort`], or [`ProtocolError::UnknownFileRefusal`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{FILE_ANSWER_LEN, FileAnswer, FileRefusal};
+    /// let answer = FileAnswer { id: 7, accepted: true, refusal: FileRefusal::Declined };
+    /// let mut buf = [0u8; FILE_ANSWER_LEN];
+    /// answer.encode_into(&mut buf).unwrap();
+    /// assert_eq!(FileAnswer::decode(&buf).unwrap(), answer);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_file_type(bytes, FileType::Answer, FILE_ANSWER_LEN)?;
+
+        Ok(Self {
+            id: read_u32(bytes, 2),
+            accepted: bytes[6] != 0,
+            refusal: FileRefusal::try_from(bytes[7])?,
+        })
+    }
+}
+
+/// One piece of a file that was accepted, as carried on [`Channel::File`].
+///
+/// The payload borrows from the buffer it was decoded out of, so a decoded chunk cannot
+/// outlive the datagram that owns its bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChunk<'a> {
+    /// Which transfer this belongs to.
+    pub id: u32,
+    /// Which piece of it this is, counted from zero.
+    pub index: u32,
+    /// The bytes themselves.
+    pub payload: &'a [u8],
+}
+
+impl<'a> FileChunk<'a> {
+    /// Returns the number of bytes [`Self::encode_into`] will write.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        FILE_CHUNK_HEADER_LEN + self.payload.len()
+    }
+
+    /// Writes the chunk into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::PayloadTooLarge`] if the payload exceeds
+    /// [`MAX_FILE_PAYLOAD`], and [`ProtocolError::BufferTooSmall`] if `buf` cannot hold it.
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if self.payload.len() > MAX_FILE_PAYLOAD {
+            return Err(ProtocolError::PayloadTooLarge {
+                actual: self.payload.len(),
+            });
+        }
+
+        let needed = self.encoded_len();
+
+        if buf.len() < needed {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed,
+            });
+        }
+
+        buf[0] = Channel::File as u8;
+        buf[1] = FileType::Chunk as u8;
+        buf[2..6].copy_from_slice(&self.id.to_le_bytes());
+        buf[6..10].copy_from_slice(&self.index.to_le_bytes());
+        buf[FILE_CHUNK_HEADER_LEN..needed].copy_from_slice(self.payload);
+
+        Ok(needed)
+    }
+
+    /// Parses a chunk, borrowing its payload from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::WrongFileType`],
+    /// [`ProtocolError::TooShort`], or [`ProtocolError::PayloadTooLarge`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::FileChunk;
+    /// let chunk = FileChunk { id: 1, index: 2, payload: &[7, 8, 9] };
+    /// let mut buf = vec![0u8; chunk.encoded_len()];
+    /// chunk.encode_into(&mut buf).unwrap();
+    /// assert_eq!(FileChunk::decode(&buf).unwrap(), chunk);
+    /// ```
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, ProtocolError> {
+        expect_file_type(bytes, FileType::Chunk, FILE_CHUNK_HEADER_LEN)?;
+
+        let payload = &bytes[FILE_CHUNK_HEADER_LEN..];
+
+        if payload.len() > MAX_FILE_PAYLOAD {
+            return Err(ProtocolError::PayloadTooLarge {
+                actual: payload.len(),
+            });
+        }
+
+        Ok(Self {
+            id: read_u32(bytes, 2),
+            index: read_u32(bytes, 6),
+            payload,
+        })
+    }
+}
+
+/// What the receiver has, as carried on [`Channel::File`].
+///
+/// Two numbers do the whole of the repair. `have` is how many chunks have arrived in an
+/// unbroken run from the start, so everything below it is settled and the sender can forget
+/// it. `arrived` covers the thirty-two chunks after that: bit *i* set means chunk `have + i`
+/// is already here, so the sender resends the ones whose bits are clear and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileReport {
+    /// Which transfer this reports on.
+    pub id: u32,
+    /// How many chunks have arrived in an unbroken run from the start.
+    pub have: u32,
+    /// Which of the next thirty-two chunks have arrived out of order.
+    pub arrived: u32,
+}
+
+impl FileReport {
+    /// Writes the report into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than
+    /// [`FILE_REPORT_LEN`].
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < FILE_REPORT_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: FILE_REPORT_LEN,
+            });
+        }
+
+        buf[0] = Channel::File as u8;
+        buf[1] = FileType::Report as u8;
+        buf[2..6].copy_from_slice(&self.id.to_le_bytes());
+        buf[6..10].copy_from_slice(&self.have.to_le_bytes());
+        buf[10..14].copy_from_slice(&self.arrived.to_le_bytes());
+
+        Ok(FILE_REPORT_LEN)
+    }
+
+    /// Parses a report.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::WrongFileType`], or
+    /// [`ProtocolError::TooShort`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{FILE_REPORT_LEN, FileReport};
+    /// let report = FileReport { id: 1, have: 4, arrived: 0b101 };
+    /// let mut buf = [0u8; FILE_REPORT_LEN];
+    /// report.encode_into(&mut buf).unwrap();
+    /// assert_eq!(FileReport::decode(&buf).unwrap(), report);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_file_type(bytes, FileType::Report, FILE_REPORT_LEN)?;
+
+        Ok(Self {
+            id: read_u32(bytes, 2),
+            have: read_u32(bytes, 6),
+            arrived: read_u32(bytes, 10),
+        })
+    }
+}
+
+/// A request for what the far machine is offering, as carried on [`Channel::File`].
+///
+/// Carries nothing. What comes back is a [`FileListing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileList;
+
+impl FileList {
+    /// Writes the request into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than
+    /// [`FILE_HEADER_LEN`].
+    pub fn encode_into(buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < FILE_HEADER_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: FILE_HEADER_LEN,
+            });
+        }
+
+        buf[0] = Channel::File as u8;
+        buf[1] = FileType::List as u8;
+
+        Ok(FILE_HEADER_LEN)
+    }
+
+    /// Parses a request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::WrongFileType`], or
+    /// [`ProtocolError::TooShort`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{FILE_HEADER_LEN, FileList};
+    /// let mut buf = [0u8; FILE_HEADER_LEN];
+    /// FileList::encode_into(&mut buf).unwrap();
+    /// assert_eq!(FileList::decode(&buf).unwrap(), FileList);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_file_type(bytes, FileType::List, FILE_HEADER_LEN)?;
+
+        Ok(Self)
+    }
+}
+
+/// One file the far machine is offering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEntry {
+    /// How many bytes it holds.
+    pub size: u64,
+    /// What it is called.
+    pub name: String,
+}
+
+/// What the far machine is offering, as carried on [`Channel::File`].
+///
+/// One packet. A folder with more files in it than fit says so with `more` rather than paging,
+/// because this describes a place two machines drop things for each other and not a file
+/// system: the entries are newest first, so what does not fit is what nobody just put there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileListing {
+    /// Whether the folder holds files this listing had no room for.
+    pub more: bool,
+    /// What it holds, newest first.
+    pub files: Vec<FileEntry>,
+}
+
+impl FileListing {
+    /// Returns the number of bytes [`Self::encode_into`] will write.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        FILE_LISTING_FIXED_LEN
+            + self
+                .files
+                .iter()
+                .map(|file| FILE_ENTRY_FIXED_LEN + file.name.len())
+                .sum::<usize>()
+    }
+
+    /// Writes the listing into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` cannot hold it, and
+    /// [`ProtocolError::BadFileName`] for an entry named something that could not be written
+    /// down — which a sender should have left out rather than offered.
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        let needed = self.encoded_len();
+
+        if buf.len() < needed {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed,
+            });
+        }
+
+        buf[0] = Channel::File as u8;
+        buf[1] = FileType::Listing as u8;
+        buf[2] = u8::from(self.more);
+        buf[3..5].copy_from_slice(&(self.files.len() as u16).to_le_bytes());
+
+        let mut at = FILE_LISTING_FIXED_LEN;
+
+        for file in &self.files {
+            if !plain_file_name(&file.name) {
+                return Err(ProtocolError::BadFileName {
+                    name: file.name.clone(),
+                });
+            }
+
+            buf[at..at + 8].copy_from_slice(&file.size.to_le_bytes());
+            buf[at + 8] = file.name.len() as u8;
+            at += FILE_ENTRY_FIXED_LEN;
+            buf[at..at + file.name.len()].copy_from_slice(file.name.as_bytes());
+            at += file.name.len();
+        }
+
+        Ok(needed)
+    }
+
+    /// Parses a listing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::WrongFileType`],
+    /// [`ProtocolError::TooShort`] if it ends inside an entry, or
+    /// [`ProtocolError::BadFileName`] for an entry that names nothing writable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{FileEntry, FileListing};
+    /// let listing = FileListing {
+    ///     more: false,
+    ///     files: vec![FileEntry { size: 3, name: "a.txt".to_owned() }],
+    /// };
+    /// let mut buf = vec![0u8; listing.encoded_len()];
+    /// listing.encode_into(&mut buf).unwrap();
+    /// assert_eq!(FileListing::decode(&buf).unwrap(), listing);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_file_type(bytes, FileType::Listing, FILE_LISTING_FIXED_LEN)?;
+
+        let count = read_u16(bytes, 3) as usize;
+        let mut files = Vec::with_capacity(count.min(64));
+        let mut at = FILE_LISTING_FIXED_LEN;
+
+        for _ in 0..count {
+            if bytes.len() < at + FILE_ENTRY_FIXED_LEN {
+                return Err(ProtocolError::TooShort {
+                    actual: bytes.len(),
+                    needed: at + FILE_ENTRY_FIXED_LEN,
+                });
+            }
+
+            let size = read_u64(bytes, at);
+            let length = bytes[at + 8] as usize;
+            at += FILE_ENTRY_FIXED_LEN;
+
+            if bytes.len() < at + length {
+                return Err(ProtocolError::TooShort {
+                    actual: bytes.len(),
+                    needed: at + length,
+                });
+            }
+
+            let name = core::str::from_utf8(&bytes[at..at + length])
+                .map_err(|_| ProtocolError::BadFileName {
+                    name: "not utf-8".to_owned(),
+                })?
+                .to_owned();
+
+            if !plain_file_name(&name) {
+                return Err(ProtocolError::BadFileName { name });
+            }
+
+            at += length;
+            files.push(FileEntry { size, name });
+        }
+
+        Ok(Self {
+            more: bytes[2] != 0,
+            files,
+        })
+    }
+}
+
+/// Bytes of a [`FileListing`] before its entries.
+pub const FILE_LISTING_FIXED_LEN: usize = 5;
+
+/// Bytes of one listing entry before its name.
+pub const FILE_ENTRY_FIXED_LEN: usize = 9;
+
+/// A request for one of the files the far machine offered, as carried on [`Channel::File`].
+///
+/// What comes back is a [`FileOffer`] for it, which is the same conversation a file sent the
+/// other way starts with — so a file only ever moves one way through this protocol, and asking
+/// is how the machine that has it is made the sender.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileAsk {
+    /// Which of the offered files is wanted.
+    pub name: String,
+}
+
+impl FileAsk {
+    /// Returns the number of bytes [`Self::encode_into`] will write.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        FILE_ASK_FIXED_LEN + self.name.len()
+    }
+
+    /// Writes the request into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` cannot hold it, and
+    /// [`ProtocolError::BadFileName`] if the name is not one that could be written down.
+    pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        let needed = self.encoded_len();
+
+        if buf.len() < needed {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed,
+            });
+        }
+
+        if !plain_file_name(&self.name) {
+            return Err(ProtocolError::BadFileName {
+                name: self.name.clone(),
+            });
+        }
+
+        buf[0] = Channel::File as u8;
+        buf[1] = FileType::Ask as u8;
+        buf[2] = self.name.len() as u8;
+        buf[FILE_ASK_FIXED_LEN..needed].copy_from_slice(self.name.as_bytes());
+
+        Ok(needed)
+    }
+
+    /// Parses a request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::WrongFileType`],
+    /// [`ProtocolError::TooShort`], or [`ProtocolError::BadFileName`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::FileAsk;
+    /// let ask = FileAsk { name: "a.txt".to_owned() };
+    /// let mut buf = vec![0u8; ask.encoded_len()];
+    /// ask.encode_into(&mut buf).unwrap();
+    /// assert_eq!(FileAsk::decode(&buf).unwrap(), ask);
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_file_type(bytes, FileType::Ask, FILE_ASK_FIXED_LEN)?;
+
+        let length = bytes[2] as usize;
+        let needed = FILE_ASK_FIXED_LEN + length;
+
+        if bytes.len() < needed {
+            return Err(ProtocolError::TooShort {
+                actual: bytes.len(),
+                needed,
+            });
+        }
+
+        let name = core::str::from_utf8(&bytes[FILE_ASK_FIXED_LEN..needed])
+            .map_err(|_| ProtocolError::BadFileName {
+                name: "not utf-8".to_owned(),
+            })?
+            .to_owned();
+
+        if !plain_file_name(&name) {
+            return Err(ProtocolError::BadFileName { name });
+        }
+
+        Ok(Self { name })
+    }
+}
+
+/// Bytes of a [`FileAsk`] before the name.
+pub const FILE_ASK_FIXED_LEN: usize = 3;
+
 /// Reads the control message type from a control packet.
 ///
 /// # Errors
@@ -1085,6 +1942,19 @@ fn expect_control(bytes: &[u8], expected: ControlType, length: usize) -> Result<
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(
         bytes[offset..offset + 8]
+            .try_into()
+            .expect("length was validated"),
+    )
+}
+
+/// Reads a little-endian `u32` at `offset`.
+///
+/// # Panics
+///
+/// Panics if `bytes` is shorter than `offset + 4`; callers validate the length first.
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        bytes[offset..offset + 4]
             .try_into()
             .expect("length was validated"),
     )

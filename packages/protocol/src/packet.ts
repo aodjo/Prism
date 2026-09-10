@@ -19,6 +19,18 @@ import {
   MAX_VIDEO_PAYLOAD,
   VIDEO_FLAGS_RESERVED_MASK,
   VIDEO_HEADER_LEN,
+  FILE_ANSWER_LEN,
+  FILE_ASK_FIXED_LEN,
+  FILE_CHUNK_HEADER_LEN,
+  FILE_ENTRY_FIXED_LEN,
+  FILE_HEADER_LEN,
+  FILE_LISTING_FIXED_LEN,
+  FILE_OFFER_FIXED_LEN,
+  FILE_REPORT_LEN,
+  FileRefusal,
+  FileType,
+  MAX_FILE_NAME,
+  MAX_FILE_PAYLOAD,
 } from './constants.js';
 import { PrismProtocolError } from './errors.js';
 
@@ -86,7 +98,7 @@ export function channelOf(bytes: Uint8Array): Channel {
     throw new PrismProtocolError('packet is empty, no channel tag');
   }
 
-  if (tag > Channel.Fec) {
+  if (tag > Channel.File) {
     throw new PrismProtocolError(`unknown channel tag ${tag}`);
   }
 
@@ -1031,4 +1043,570 @@ export function decodeAudioPacket(bytes: Uint8Array): AudioPacket {
     captureTsUs: view.getBigUint64(5, true),
     payload: bytes.slice(AUDIO_HEADER_LEN),
   };
+}
+
+/**
+ * Throws unless a packet is on the file channel and long enough to read.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @param {number} needed - Bytes the layout requires.
+ * @returns {void} Nothing; the function is used purely for its throwing behaviour.
+ * @throws {PrismProtocolError} If the channel is wrong or the packet is short.
+ *
+ * @example
+ * expectFile(bytes, FILE_HEADER_LEN);
+ */
+function expectFile(bytes: Uint8Array, needed: number): void {
+  const channel = channelOf(bytes);
+  if (channel !== Channel.File) {
+    throw new PrismProtocolError(`expected channel ${Channel.File}, got tag ${bytes[0]}`);
+  }
+
+  if (bytes.length < needed) {
+    throw new PrismProtocolError(
+      `file packet is ${bytes.length} bytes, needs at least ${needed}`,
+    );
+  }
+}
+
+/**
+ * Reads the message type from a file packet.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {FileType} The message type in the second byte.
+ * @throws {PrismProtocolError} If the packet is not a file packet or the type is unknown.
+ *
+ * @example
+ * fileTypeOf(new Uint8Array([6, 0])); // FileType.Offer
+ */
+export function fileTypeOf(bytes: Uint8Array): FileType {
+  expectFile(bytes, FILE_HEADER_LEN);
+
+  const tag = bytes[1] as number;
+  if (!(tag in FileType)) {
+    throw new PrismProtocolError(`unknown file message type ${tag}`);
+  }
+
+  return tag as FileType;
+}
+
+/**
+ * Throws unless a file packet is one particular message, long enough to read.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @param {FileType} expected - Message the caller decodes.
+ * @param {number} needed - Bytes that message requires.
+ * @returns {void} Nothing; the function is used purely for its throwing behaviour.
+ * @throws {PrismProtocolError} If the type is wrong or the packet is short.
+ *
+ * @example
+ * expectFileType(bytes, FileType.Report, FILE_REPORT_LEN);
+ */
+function expectFileType(bytes: Uint8Array, expected: FileType, needed: number): void {
+  const got = fileTypeOf(bytes);
+  if (got !== expected) {
+    throw new PrismProtocolError(`expected file message ${expected}, got ${got}`);
+  }
+
+  if (bytes.length < needed) {
+    throw new PrismProtocolError(
+      `file packet is ${bytes.length} bytes, needs at least ${needed}`,
+    );
+  }
+}
+
+/**
+ * Returns whether a name is one the far side would be willing to write down.
+ *
+ * A file arriving over a network names the file it becomes, so refusing is the whole job:
+ * anything with a separator in it, either of the two relative directories, anything empty,
+ * and anything longer than the wire carries.
+ *
+ * @param {string} name - Name as it appeared on the wire.
+ * @returns {boolean} Whether it names a file and nothing else.
+ *
+ * @example
+ * plainFileName('notes.txt'); // true
+ * plainFileName('../etc/passwd'); // false
+ */
+export function plainFileName(name: string): boolean {
+  const bytes = new TextEncoder().encode(name).length;
+
+  return (
+    name.length > 0 &&
+    bytes <= MAX_FILE_NAME &&
+    name !== '.' &&
+    name !== '..' &&
+    !/[/\\\0]/.test(name)
+  );
+}
+
+/**
+ * An offer to send one file, as carried on {@link Channel.File}.
+ *
+ * Nothing moves until the far side answers. The size is what it will cost and the chunk
+ * count is what the receiver reports against, so both are settled before a byte is sent.
+ */
+export interface FileOffer {
+  id: number;
+  size: bigint;
+  chunks: number;
+  name: string;
+}
+
+/**
+ * Serialises an offer to send one file.
+ *
+ * @param {FileOffer} offer - Offer fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer holding the offer.
+ * @throws {PrismProtocolError} If a field is out of range or the name is not a file name.
+ *
+ * @example
+ * encodeFileOffer({ id: 1, size: 9n, chunks: 1, name: 'notes.txt' }).length; // 29
+ */
+export function encodeFileOffer(offer: FileOffer): Uint8Array {
+  if (!plainFileName(offer.name)) {
+    throw new PrismProtocolError(`${offer.name} is not a file name`);
+  }
+
+  const name = new TextEncoder().encode(offer.name);
+  const bytes = new Uint8Array(FILE_OFFER_FIXED_LEN + name.length);
+  const view = new DataView(bytes.buffer);
+
+  bytes[0] = Channel.File;
+  bytes[1] = FileType.Offer;
+  view.setUint32(2, offer.id, true);
+  view.setBigUint64(6, offer.size, true);
+  view.setUint32(14, offer.chunks, true);
+  view.setUint16(18, name.length, true);
+  bytes.set(name, FILE_OFFER_FIXED_LEN);
+
+  return bytes;
+}
+
+/**
+ * Parses an offer to send one file.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {FileOffer} The decoded offer.
+ * @throws {PrismProtocolError} If the packet is malformed or names nothing writable.
+ *
+ * @example
+ * decodeFileOffer(encodeFileOffer(offer)).name; // 'notes.txt'
+ */
+export function decodeFileOffer(bytes: Uint8Array): FileOffer {
+  expectFileType(bytes, FileType.Offer, FILE_OFFER_FIXED_LEN);
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const length = view.getUint16(18, true);
+  const needed = FILE_OFFER_FIXED_LEN + length;
+
+  if (bytes.length < needed) {
+    throw new PrismProtocolError(`file packet is ${bytes.length} bytes, needs ${needed}`);
+  }
+
+  const name = decodeName(bytes.subarray(FILE_OFFER_FIXED_LEN, needed));
+
+  return {
+    id: view.getUint32(2, true),
+    size: view.getBigUint64(6, true),
+    chunks: view.getUint32(14, true),
+    name,
+  };
+}
+
+/**
+ * Whether an offered file will be taken, as carried on {@link Channel.File}.
+ *
+ * Also what ends a transfer early: a receiver that has run out of disk, or a person who
+ * changed their mind, sends one of these with `accepted` false and the sender stops.
+ */
+export interface FileAnswer {
+  id: number;
+  accepted: boolean;
+  refusal: FileRefusal;
+}
+
+/**
+ * Serialises an answer to an offer.
+ *
+ * @param {FileAnswer} answer - Answer fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer of exactly `FILE_ANSWER_LEN` bytes.
+ *
+ * @example
+ * encodeFileAnswer({ id: 7, accepted: true, refusal: FileRefusal.Declined }).length; // 8
+ */
+export function encodeFileAnswer(answer: FileAnswer): Uint8Array {
+  const bytes = new Uint8Array(FILE_ANSWER_LEN);
+  const view = new DataView(bytes.buffer);
+
+  bytes[0] = Channel.File;
+  bytes[1] = FileType.Answer;
+  view.setUint32(2, answer.id, true);
+  bytes[6] = answer.accepted ? 1 : 0;
+  bytes[7] = answer.refusal;
+
+  return bytes;
+}
+
+/**
+ * Parses an answer to an offer.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {FileAnswer} The decoded answer.
+ * @throws {PrismProtocolError} If the packet is malformed or the refusal is unknown.
+ *
+ * @example
+ * decodeFileAnswer(encodeFileAnswer(answer)).accepted; // true
+ */
+export function decodeFileAnswer(bytes: Uint8Array): FileAnswer {
+  expectFileType(bytes, FileType.Answer, FILE_ANSWER_LEN);
+
+  const refusal = bytes[7] as number;
+  if (!(refusal in FileRefusal)) {
+    throw new PrismProtocolError(`unknown file refusal ${refusal}`);
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  return {
+    id: view.getUint32(2, true),
+    accepted: bytes[6] !== 0,
+    refusal: refusal as FileRefusal,
+  };
+}
+
+/** One piece of a file that was accepted, as carried on {@link Channel.File}. */
+export interface FileChunk {
+  id: number;
+  index: number;
+  payload: Uint8Array;
+}
+
+/**
+ * Serialises one piece of a file.
+ *
+ * @param {FileChunk} chunk - Chunk fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer holding header and payload.
+ * @throws {PrismProtocolError} If the payload exceeds `MAX_FILE_PAYLOAD`.
+ *
+ * @example
+ * encodeFileChunk({ id: 1, index: 2, payload: new Uint8Array([7, 8, 9]) }).length; // 13
+ */
+export function encodeFileChunk(chunk: FileChunk): Uint8Array {
+  if (chunk.payload.length > MAX_FILE_PAYLOAD) {
+    throw new PrismProtocolError(
+      `payload is ${chunk.payload.length} bytes, exceeds MAX_FILE_PAYLOAD of ${MAX_FILE_PAYLOAD}`,
+    );
+  }
+
+  const bytes = new Uint8Array(FILE_CHUNK_HEADER_LEN + chunk.payload.length);
+  const view = new DataView(bytes.buffer);
+
+  bytes[0] = Channel.File;
+  bytes[1] = FileType.Chunk;
+  view.setUint32(2, chunk.id, true);
+  view.setUint32(6, chunk.index, true);
+  bytes.set(chunk.payload, FILE_CHUNK_HEADER_LEN);
+
+  return bytes;
+}
+
+/**
+ * Parses one piece of a file.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {FileChunk} The decoded chunk, its payload copied out.
+ * @throws {PrismProtocolError} If the packet is malformed or oversized.
+ *
+ * @example
+ * decodeFileChunk(encodeFileChunk(chunk)).index; // 2
+ */
+export function decodeFileChunk(bytes: Uint8Array): FileChunk {
+  expectFileType(bytes, FileType.Chunk, FILE_CHUNK_HEADER_LEN);
+
+  const payload = bytes.slice(FILE_CHUNK_HEADER_LEN);
+  if (payload.length > MAX_FILE_PAYLOAD) {
+    throw new PrismProtocolError(
+      `payload is ${payload.length} bytes, exceeds MAX_FILE_PAYLOAD of ${MAX_FILE_PAYLOAD}`,
+    );
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  return {
+    id: view.getUint32(2, true),
+    index: view.getUint32(6, true),
+    payload,
+  };
+}
+
+/**
+ * What the receiver has, as carried on {@link Channel.File}.
+ *
+ * Two numbers do the whole of the repair. `have` is how many chunks arrived in an unbroken
+ * run from the start, so everything below it is settled. `arrived` covers the thirty-two
+ * chunks after that: bit *i* set means chunk `have + i` is already here.
+ */
+export interface FileReport {
+  id: number;
+  have: number;
+  arrived: number;
+}
+
+/**
+ * Serialises a receiver's report.
+ *
+ * @param {FileReport} report - Report fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer of exactly `FILE_REPORT_LEN` bytes.
+ *
+ * @example
+ * encodeFileReport({ id: 1, have: 4, arrived: 0b101 }).length; // 14
+ */
+export function encodeFileReport(report: FileReport): Uint8Array {
+  const bytes = new Uint8Array(FILE_REPORT_LEN);
+  const view = new DataView(bytes.buffer);
+
+  bytes[0] = Channel.File;
+  bytes[1] = FileType.Report;
+  view.setUint32(2, report.id, true);
+  view.setUint32(6, report.have, true);
+  view.setUint32(10, report.arrived, true);
+
+  return bytes;
+}
+
+/**
+ * Parses a receiver's report.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {FileReport} The decoded report.
+ * @throws {PrismProtocolError} If the packet is malformed.
+ *
+ * @example
+ * decodeFileReport(encodeFileReport(report)).have; // 4
+ */
+export function decodeFileReport(bytes: Uint8Array): FileReport {
+  expectFileType(bytes, FileType.Report, FILE_REPORT_LEN);
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  return {
+    id: view.getUint32(2, true),
+    have: view.getUint32(6, true),
+    arrived: view.getUint32(10, true),
+  };
+}
+
+/**
+ * Serialises a request for what the far machine is offering.
+ *
+ * @returns {Uint8Array} A freshly allocated buffer of exactly `FILE_HEADER_LEN` bytes.
+ *
+ * @example
+ * encodeFileList().length; // 2
+ */
+export function encodeFileList(): Uint8Array {
+  return new Uint8Array([Channel.File, FileType.List]);
+}
+
+/**
+ * Parses a request for what the far machine is offering.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {void} Nothing; the message carries no fields.
+ * @throws {PrismProtocolError} If the packet is not a request.
+ *
+ * @example
+ * decodeFileList(encodeFileList());
+ */
+export function decodeFileList(bytes: Uint8Array): void {
+  expectFileType(bytes, FileType.List, FILE_HEADER_LEN);
+}
+
+/** One file the far machine is offering. */
+export interface FileEntry {
+  size: bigint;
+  name: string;
+}
+
+/**
+ * What the far machine is offering, as carried on {@link Channel.File}.
+ *
+ * One packet. A folder with more files in it than fit says so with `more` rather than
+ * paging: the entries are newest first, so what does not fit is what nobody just put there.
+ */
+export interface FileListing {
+  more: boolean;
+  files: FileEntry[];
+}
+
+/**
+ * Serialises a listing of what this machine is offering.
+ *
+ * @param {FileListing} listing - Listing fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer holding the listing.
+ * @throws {PrismProtocolError} If an entry names something that is not a file name.
+ *
+ * @example
+ * encodeFileListing({ more: false, files: [{ size: 3n, name: 'a.txt' }] }).length; // 19
+ */
+export function encodeFileListing(listing: FileListing): Uint8Array {
+  const encoder = new TextEncoder();
+  const names = listing.files.map((file) => {
+    if (!plainFileName(file.name)) {
+      throw new PrismProtocolError(`${file.name} is not a file name`);
+    }
+
+    return encoder.encode(file.name);
+  });
+
+  const length =
+    FILE_LISTING_FIXED_LEN +
+    names.reduce((total, name) => total + FILE_ENTRY_FIXED_LEN + name.length, 0);
+  const bytes = new Uint8Array(length);
+  const view = new DataView(bytes.buffer);
+
+  bytes[0] = Channel.File;
+  bytes[1] = FileType.Listing;
+  bytes[2] = listing.more ? 1 : 0;
+  view.setUint16(3, listing.files.length, true);
+
+  let at = FILE_LISTING_FIXED_LEN;
+  for (const [index, name] of names.entries()) {
+    view.setBigUint64(at, (listing.files[index] as FileEntry).size, true);
+    bytes[at + 8] = name.length;
+    at += FILE_ENTRY_FIXED_LEN;
+    bytes.set(name, at);
+    at += name.length;
+  }
+
+  return bytes;
+}
+
+/**
+ * Parses a listing of what the far machine is offering.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {FileListing} The decoded listing.
+ * @throws {PrismProtocolError} If the packet ends inside an entry or names nothing writable.
+ *
+ * @example
+ * decodeFileListing(encodeFileListing(listing)).files.length; // 1
+ */
+export function decodeFileListing(bytes: Uint8Array): FileListing {
+  expectFileType(bytes, FileType.Listing, FILE_LISTING_FIXED_LEN);
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const count = view.getUint16(3, true);
+  const files: FileEntry[] = [];
+  let at = FILE_LISTING_FIXED_LEN;
+
+  for (let index = 0; index < count; index += 1) {
+    if (bytes.length < at + FILE_ENTRY_FIXED_LEN) {
+      throw new PrismProtocolError(
+        `file packet is ${bytes.length} bytes, needs ${at + FILE_ENTRY_FIXED_LEN}`,
+      );
+    }
+
+    const size = view.getBigUint64(at, true);
+    const length = bytes[at + 8] as number;
+    at += FILE_ENTRY_FIXED_LEN;
+
+    if (bytes.length < at + length) {
+      throw new PrismProtocolError(
+        `file packet is ${bytes.length} bytes, needs ${at + length}`,
+      );
+    }
+
+    files.push({ size, name: decodeName(bytes.subarray(at, at + length)) });
+    at += length;
+  }
+
+  return { more: bytes[2] !== 0, files };
+}
+
+/**
+ * A request for one of the files the far machine offered.
+ *
+ * What comes back is an offer for it, which is the same conversation a file sent the other
+ * way starts with — so a file only ever moves one way through this protocol.
+ */
+export interface FileAsk {
+  name: string;
+}
+
+/**
+ * Serialises a request for one offered file.
+ *
+ * @param {FileAsk} ask - Request fields to encode.
+ * @returns {Uint8Array} A freshly allocated buffer holding the request.
+ * @throws {PrismProtocolError} If the name is not a file name.
+ *
+ * @example
+ * encodeFileAsk({ name: 'a.txt' }).length; // 8
+ */
+export function encodeFileAsk(ask: FileAsk): Uint8Array {
+  if (!plainFileName(ask.name)) {
+    throw new PrismProtocolError(`${ask.name} is not a file name`);
+  }
+
+  const name = new TextEncoder().encode(ask.name);
+  const bytes = new Uint8Array(FILE_ASK_FIXED_LEN + name.length);
+
+  bytes[0] = Channel.File;
+  bytes[1] = FileType.Ask;
+  bytes[2] = name.length;
+  bytes.set(name, FILE_ASK_FIXED_LEN);
+
+  return bytes;
+}
+
+/**
+ * Parses a request for one offered file.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {FileAsk} The decoded request.
+ * @throws {PrismProtocolError} If the packet is malformed or names nothing writable.
+ *
+ * @example
+ * decodeFileAsk(encodeFileAsk({ name: 'a.txt' })).name; // 'a.txt'
+ */
+export function decodeFileAsk(bytes: Uint8Array): FileAsk {
+  expectFileType(bytes, FileType.Ask, FILE_ASK_FIXED_LEN);
+
+  const length = bytes[2] as number;
+  const needed = FILE_ASK_FIXED_LEN + length;
+
+  if (bytes.length < needed) {
+    throw new PrismProtocolError(`file packet is ${bytes.length} bytes, needs ${needed}`);
+  }
+
+  return { name: decodeName(bytes.subarray(FILE_ASK_FIXED_LEN, needed)) };
+}
+
+/**
+ * Reads a file name out of the bytes that carried it.
+ *
+ * @param {Uint8Array} bytes - The name's UTF-8 bytes.
+ * @returns {string} The name.
+ * @throws {PrismProtocolError} If it is not UTF-8 or is not a name a file could be given.
+ *
+ * @example
+ * decodeName(new TextEncoder().encode('a.txt')); // 'a.txt'
+ */
+function decodeName(bytes: Uint8Array): string {
+  let name: string;
+
+  try {
+    name = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new PrismProtocolError('not utf-8 is not a file name');
+  }
+
+  if (!plainFileName(name)) {
+    throw new PrismProtocolError(`${name} is not a file name`);
+  }
+
+  return name;
 }
