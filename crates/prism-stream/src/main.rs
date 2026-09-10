@@ -15,10 +15,25 @@ use std::sync::{Arc, Mutex};
 use prism_core::control::client::{Report, Reporter};
 use prism_stream::ipc;
 
+/// What a run came to, and whether the shell heard why on the channel it reads messages on.
+///
+/// The distinction exists because the shell keeps both channels in one log. A reason sent as an
+/// [`ipc::Event::Ended`] and printed to standard error as well arrives twice, and somebody
+/// looking at a failed stream reads the same sentence under itself.
+enum Outcome {
+    /// It ran and ended.
+    Fine,
+    /// It failed, and the message carrying the reason was written.
+    Told,
+    /// It failed with nowhere to say so but standard error.
+    Untold(String),
+}
+
 fn main() -> ExitCode {
     match serve() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
+        Outcome::Fine => ExitCode::SUCCESS,
+        Outcome::Told => ExitCode::FAILURE,
+        Outcome::Untold(error) => {
             // Standard output carries messages, so this cannot go there. The shell keeps what
             // arrives here as the log that explains a failure.
             let _ = writeln!(io::stderr(), "{error}");
@@ -29,10 +44,12 @@ fn main() -> ExitCode {
 }
 
 /// Reads the one message that says what to do, and does it.
-fn serve() -> Result<(), String> {
-    let start: ipc::Start = ipc::read(&mut io::stdin().lock())
-        .map_err(|err| format!("could not read what to stream: {err}"))?
-        .ok_or_else(|| "nothing said what to stream".to_owned())?;
+fn serve() -> Outcome {
+    let start: ipc::Start = match ipc::read(&mut io::stdin().lock()) {
+        Ok(Some(start)) => start,
+        Ok(None) => return Outcome::Untold("nothing said what to stream".to_owned()),
+        Err(err) => return Outcome::Untold(format!("could not read what to stream: {err}")),
+    };
 
     // Behind a lock because the receive thread, the decode thread and this one all report, and
     // a message half-written by one and half by another is a message neither side can read.
@@ -49,16 +66,22 @@ fn serve() -> Result<(), String> {
 
     let outcome = watch(&start, &say);
 
-    if let Ok(mut out) = out.lock() {
-        let _ = ipc::write(
+    let told = match out.lock() {
+        Ok(mut out) => ipc::write(
             &mut *out,
             &ipc::Event::Ended {
                 error: outcome.as_ref().err().cloned(),
             },
-        );
-    }
+        )
+        .is_ok(),
+        Err(_) => false,
+    };
 
-    outcome
+    match outcome {
+        Ok(()) => Outcome::Fine,
+        Err(_) if told => Outcome::Told,
+        Err(error) => Outcome::Untold(error),
+    }
 }
 
 /// Opens the window and shows the host until the stream ends.
