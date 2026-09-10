@@ -1307,7 +1307,9 @@ async function drawBuilds(column) {
                   : `/v1/builds/${build.version}/${build.target}/${build.arch}` +
                     (build.kind === 'installer' ? '/installer' : ''),
               title: '내려받기',
-              download: '',
+              // The name it is filed under, so a browser that ignores the header still saves
+              // something openable rather than the last segment of a path.
+              download: build.filename || '',
             }, [icon('download', 15)]),
             // Only what this server is keeping. A release belongs to the repository that cut it
             // and a button here that appeared to delete one would be lying about what it does.

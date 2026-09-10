@@ -483,6 +483,42 @@ async function releasedBuilds(prerelease: boolean): Promise<Record<string, unkno
 }
 
 /**
+ * What a build file is, and what to call it, for a browser being handed one.
+ *
+ * Worked out when it is stored rather than when it is served, and kept on the object: the name
+ * is what the bundler called it and the type follows from that name, and neither is knowable
+ * from the key it is filed under.
+ *
+ * Without this a disk image goes out labelled as a gzip, and a browser saves what it is told —
+ * so an installer arrives as `installer.gz` and does not open.
+ *
+ * @param {string} filename - What the bundler called it.
+ * @returns {{contentType: string, contentDisposition: string}} What to store on the object.
+ */
+function fileMetadata(filename: string): {
+  contentType: string;
+  contentDisposition: string;
+} {
+  const types: Record<string, string> = {
+    '.dmg': 'application/x-apple-diskimage',
+    '.tar.gz': 'application/gzip',
+    '.exe': 'application/vnd.microsoft.portable-executable',
+    '.appimage': 'application/octet-stream',
+    '.zip': 'application/zip',
+  };
+
+  const lower = filename.toLowerCase();
+  const found = Object.keys(types).find((end) => lower.endsWith(end));
+
+  return {
+    contentType: found ? (types[found] as string) : 'application/octet-stream',
+    // Quoted, and only ever a name this server wrote down. A header built out of something a
+    // caller chose is a header a caller can put a newline in.
+    contentDisposition: `attachment; filename="${filename.replace(/[^\w.\-+]/gu, '_')}"`,
+  };
+}
+
+/**
  * Where a build's bundle lives in the bucket.
  *
  * Named for what it is rather than given an opaque key, so that a listing of the bucket reads
@@ -1687,20 +1723,18 @@ export default {
           // It carries no signature because nothing checks one: what checks a `.dmg` is
           // Gatekeeper, against the Developer ID it was signed with before it got here.
           if (kind === 'installer') {
-            await env.prism_builds.put(`${buildKey(version, target, arch)}.installer`, body);
+            const named = (request.headers.get('x-prism-filename') ?? '').trim();
+
+            await env.prism_builds.put(`${buildKey(version, target, arch)}.installer`, body, {
+              httpMetadata: fileMetadata(named),
+            });
 
             await env.prism_accounts
               .prepare(
                 'UPDATE builds SET installer_filename = ?, installer_bytes = ?' +
                   ' WHERE version = ? AND target = ? AND arch = ?',
               )
-              .bind(
-                (request.headers.get('x-prism-filename') ?? '').trim(),
-                body.byteLength,
-                version,
-                target,
-                arch,
-              )
+              .bind(named, body.byteLength, version, target, arch)
               .run();
 
             return json({ version, target, arch, bytes: body.byteLength });
@@ -1715,7 +1749,9 @@ export default {
           // The object first. A row pointing at a bundle that is not there is an update every
           // machine is offered and none can download; a bundle nothing points at is a few
           // megabytes nobody reads.
-          await env.prism_builds.put(buildKey(version, target, arch), body);
+          await env.prism_builds.put(buildKey(version, target, arch), body, {
+            httpMetadata: fileMetadata((request.headers.get('x-prism-filename') ?? '').trim()),
+          });
 
           await env.prism_accounts
             .prepare(
@@ -2071,15 +2107,23 @@ export default {
           return fail(404, 'There is no such build.');
         }
 
-        return new Response(object.body, {
-          headers: {
-            'content-type': 'application/gzip',
-            'content-length': String(object.size),
-            // Immutable because it is: a version is published once and the object under it is
-            // never rewritten. Publishing again means publishing a different version.
-            'cache-control': 'public, max-age=31536000, immutable',
-          },
+        const headers = new Headers({
+          'content-length': String(object.size),
+          // Immutable because it is: a version is published once and the object under it is
+          // never rewritten. Publishing again means publishing a different version.
+          'cache-control': 'public, max-age=31536000, immutable',
         });
+
+        // What was written down when it was stored: the type it actually is, and the name the
+        // bundler gave it. A browser saves what it is told, and told nothing it invents a name
+        // out of the last part of the path.
+        object.writeHttpMetadata(headers);
+
+        if (!headers.has('content-type')) {
+          headers.set('content-type', 'application/octet-stream');
+        }
+
+        return new Response(object.body, { headers });
       }
 
       // A signalling region saying what it is doing. It sends; nothing asks it — which is what
