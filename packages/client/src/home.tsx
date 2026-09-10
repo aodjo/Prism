@@ -145,6 +145,14 @@ function Home(): JSX.Element {
   const [which, setWhich] = useState<Which>('all');
   const [everything, setEverything] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
+  /**
+   * What this machine still needs before it can be shared, and how far along asking has got.
+   *
+   * `ask` while there is a settings pane to open, `restart` once it has been opened — screen
+   * recording is read once for the life of a process, so a grant given now is one this run goes
+   * on calling missing. Null when nothing is in the way.
+   */
+  const [needsScreen, setNeedsScreen] = useState<'ask' | 'restart' | null>(null);
   /** Whether the settings are open over the window. */
   const [tuning, setTuning] = useState(false);
   /** Whether the terms this machine is shared on are open beside the switch. */
@@ -290,14 +298,57 @@ function Home(): JSX.Element {
   const flip = useCallback((): void => {
     void (async () => {
       setTrouble(null);
+      setNeedsScreen(null);
 
       try {
         setMine(shared ? await prism.stopSharing() : await prism.startSharing());
       } catch (error) {
         setTrouble(reason(error));
+
+        // A refusal that names a permission is one somebody can act on, so the window offers
+        // the way there rather than the name of a settings pane to go and find. Asked of the
+        // system rather than read out of the message, which is text and would tie this to its
+        // wording.
+        try {
+          const held = await prism.permissions();
+
+          setNeedsScreen(held.screen ? null : 'ask');
+        } catch {
+          setNeedsScreen(null);
+        }
       }
     })();
   }, [shared]);
+
+  // Allowing happens in System Settings, which is to say while this window is not the one being
+  // looked at. Read again when it comes back, so a machine that may now record its screen stops
+  // saying it may not.
+  useEffect(() => {
+    if (!needsScreen) {
+      return;
+    }
+
+    const again = (): void => {
+      void (async () => {
+        try {
+          const held = await prism.permissions();
+
+          if (held.screen) {
+            setNeedsScreen(null);
+            setTrouble(null);
+          }
+        } catch {
+          // Nothing to say. The answer is the one it already had.
+        }
+      })();
+    };
+
+    window.addEventListener('focus', again);
+
+    return () => {
+      window.removeEventListener('focus', again);
+    };
+  }, [needsScreen]);
 
   /** Adds a machine to the front of the list, or takes it back out. */
   const pin = (key: string): void => {
@@ -691,6 +742,42 @@ function Home(): JSX.Element {
           }
           className="mt-3 flex-none"
         />
+
+        {/* Naming the pane and leaving somebody to find it is most of the work still to do, so
+            the window does that part. What it cannot do is the last step: screen recording is
+            read once for the life of a process, and a grant given to a running Prism is one it
+            goes on calling missing until it starts again. */}
+        {needsScreen && (
+          <div className="mt-3 flex flex-none items-center gap-3">
+            <button
+              type="button"
+              className="btn-secondary no-drag"
+              onClick={() => {
+                void (async () => {
+                  if (needsScreen === 'restart') {
+                    await prism.restart();
+
+                    return;
+                  }
+
+                  try {
+                    const held = await prism.requestPermission('screen');
+
+                    setNeedsScreen(held.screen ? null : 'restart');
+
+                    if (held.screen) {
+                      setTrouble(null);
+                    }
+                  } catch (error) {
+                    setTrouble(reason(error));
+                  }
+                })();
+              }}
+            >
+              {needsScreen === 'restart' ? 'Restart PRISM' : 'Open System Settings'}
+            </button>
+          </div>
+        )}
 
         {alone ? (
           /* The one thing left to do, said once. Every other machine on the account turns up
