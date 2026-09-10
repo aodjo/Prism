@@ -601,9 +601,12 @@ jobs:
             \$SUDO install -d -m 700 /opt/prism
             \$SUDO mv /tmp/compose.yaml /opt/prism/compose.yaml
             echo '${{ secrets.GITHUB_TOKEN }}' | \$SUDO docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-            cd /opt/prism
+            # Named in full rather than reached by changing directory. The directory is root's
+            # and mode 700, so on the one region that connects as a sudoer rather than as root
+            # the \`cd\` failed before any of this ran — four regions updated and one did not.
             \$SUDO env PRISM_IMAGE='${{ needs.image.outputs.image }}' \
-              docker compose --env-file .env up -d --no-build --pull always
+              docker compose -f /opt/prism/compose.yaml --env-file /opt/prism/.env \
+              up -d --no-build --pull always
             \$SUDO docker image prune -f
           "
 
