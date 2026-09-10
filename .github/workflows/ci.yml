@@ -407,6 +407,12 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.name.outputs.version) }}
+          # The commit this was actually built from. Without it the tag is created against the
+          # repository's default branch, which is what the GitHub API does when nobody says
+          # otherwise — so every release so far was tagged at `main`'s tip and none of them
+          # pointed at the code in the binaries beside it. Checking one out gave source four
+          # days older than the build, and the releases page dated them all to that commit.
+          target_commitish: ${{ github.sha }}
           name: ${{ steps.name.outputs.version }}
           # A development build is a prerelease in GitHub's sense as well as in semver's, which
           # is what keeps it out of the production line's answers.
