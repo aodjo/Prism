@@ -73,6 +73,9 @@ pub const INPUT_PACKET_LEN: usize = 15;
 /// Exact byte length of a cursor position message.
 pub const CURSOR_POSITION_LEN: usize = 18;
 
+/// Exact byte length of a goodbye: the header and nothing after it.
+pub const GOODBYE_LEN: usize = CONTROL_HEADER_LEN;
+
 /// Byte length of a parity packet header, including the leading channel tag.
 ///
 /// Deliberately the same as [`VIDEO_HEADER_LEN`]. A parity shard has to be exactly as long
@@ -205,6 +208,11 @@ pub enum ControlType {
     ClockPong = 1,
     /// Where the host's pointer is, so the client can draw the cursor itself.
     CursorPosition = 2,
+    /// The host is ending the session: sharing was stopped, or Prism is quitting.
+    ///
+    /// Without it a client learns the host has gone only by hearing nothing for its whole idle
+    /// timeout, and shows the last picture it had for all of that time.
+    Goodbye = 3,
 }
 
 impl TryFrom<u8> for ControlType {
@@ -221,6 +229,7 @@ impl TryFrom<u8> for ControlType {
             0 => Ok(ControlType::ClockPing),
             1 => Ok(ControlType::ClockPong),
             2 => Ok(ControlType::CursorPosition),
+            3 => Ok(ControlType::Goodbye),
             other => Err(ProtocolError::UnknownControlType(other)),
         }
     }
@@ -1077,6 +1086,63 @@ impl CursorPosition {
             screen_width,
             screen_height,
         })
+    }
+}
+
+/// The host saying it is ending the session, as carried on [`Channel::Control`].
+///
+/// Nothing but the header. What it means is all there is to say: the machine being watched has
+/// stopped sharing, and the window showing it should close rather than wait to be sure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Goodbye;
+
+impl Goodbye {
+    /// Serialises a goodbye into `buf` and returns how many bytes were written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BufferTooSmall`] if `buf` is shorter than [`GOODBYE_LEN`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::{GOODBYE_LEN, Goodbye};
+    /// let mut buf = [0u8; GOODBYE_LEN];
+    /// assert_eq!(Goodbye.encode_into(&mut buf).unwrap(), GOODBYE_LEN);
+    /// assert_eq!(buf, [0, 3]);
+    /// ```
+    pub fn encode_into(self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        if buf.len() < GOODBYE_LEN {
+            return Err(ProtocolError::BufferTooSmall {
+                actual: buf.len(),
+                needed: GOODBYE_LEN,
+            });
+        }
+
+        buf[0] = Channel::Control as u8;
+        buf[1] = ControlType::Goodbye as u8;
+
+        Ok(GOODBYE_LEN)
+    }
+
+    /// Parses a goodbye, requiring an exact length match.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::WrongChannel`], [`ProtocolError::UnknownControlType`], or
+    /// [`ProtocolError::WrongLength`] as appropriate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use prism_core::net::packet::Goodbye;
+    /// assert_eq!(Goodbye::decode(&[0, 3]).unwrap(), Goodbye);
+    /// assert!(Goodbye::decode(&[0, 3, 0]).is_err());
+    /// ```
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        expect_control(bytes, ControlType::Goodbye, GOODBYE_LEN)?;
+
+        Ok(Self)
     }
 }
 

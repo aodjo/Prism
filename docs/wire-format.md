@@ -149,8 +149,9 @@ offset  size  field           type   notes
 | `ClockPing` | 0 | client → host | start a clock synchronisation exchange |
 | `ClockPong` | 1 | host → client | answer with the host's send and receive times |
 | `CursorPosition` | 2 | host → client | where the host's pointer is |
+| `Goodbye` | 3 | host → client | the host is ending the session |
 
-Types 3 and above are reserved. A decoder that sees one rejects the packet.
+Types 4 and above are reserved. A decoder that sees one rejects the packet.
 
 ### Clock synchronisation
 
@@ -221,6 +222,19 @@ longer exists.
 
 A screen of no pixels is refused at both ends. The client divides by these to place the
 cursor, so a zero would either crash it or put the cursor nowhere.
+
+### Goodbye
+
+**Goodbye** (control type 3), 2 bytes: the header and nothing after it.
+
+The host sends it when the session ends on its side — sharing was stopped, or Prism is
+quitting — and the client closes its window when it arrives. Without it the client only
+learns the host has gone by hearing nothing for its whole idle timeout, and goes on showing
+the last picture for all of that time.
+
+It is sent three times, because it travels over UDP like everything else and nothing
+answers it. A client that misses all three still ends at its idle timeout, as it would have
+before the message existed.
 
 ## Input packets (channel 3)
 

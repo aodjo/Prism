@@ -11,6 +11,7 @@ import {
   CONTROL_HEADER_LEN,
   CURSOR_POSITION_LEN,
   FEC_HEADER_LEN,
+  GOODBYE_LEN,
   MAX_FEC_PAYLOAD,
   MAX_PLAINTEXT_SIZE,
   SEAL_OVERHEAD,
@@ -33,12 +34,14 @@ import {
   decodeCursorPosition,
   decodeFecPacket,
   decodeFeedbackPacket,
+  decodeGoodbye,
   decodeInputPacket,
   decodeVideoPacket,
   encodeClockPing,
   encodeClockPong,
   encodeCursorPosition,
   encodeFecPacket,
+  encodeGoodbye,
   sliceLenOf,
   encodeFeedbackPacket,
   encodeInputPacket,
@@ -128,7 +131,18 @@ describe('constants match the shared vectors', () => {
     expect(ControlType.ClockPong).toBe(vectors.controlTypes.clockPong);
     expect(CURSOR_POSITION_LEN).toBe(vectors.constants.cursorPositionLen);
     expect(ControlType.CursorPosition).toBe(vectors.controlTypes.cursorPosition);
+    expect(GOODBYE_LEN).toBe(vectors.constants.goodbyeLen);
+    expect(ControlType.Goodbye).toBe(vectors.controlTypes.goodbye);
   });
+});
+
+describe('goodbyes', () => {
+  for (const vector of vectors.goodbyes) {
+    it(`round-trips ${vector.name}`, () => {
+      expect(bytesToHex(encodeGoodbye())).toBe(vector.hex);
+      expect(() => decodeGoodbye(hexToBytes(vector.hex))).not.toThrow();
+    });
+  }
 });
 
 describe('input packets', () => {
@@ -407,6 +421,7 @@ function decodeByChannel(bytes: Uint8Array): void {
       const type = controlTypeOf(bytes);
       if (type === ControlType.ClockPing) decodeClockPing(bytes);
       else if (type === ControlType.CursorPosition) decodeCursorPosition(bytes);
+      else if (type === ControlType.Goodbye) decodeGoodbye(bytes);
       else decodeClockPong(bytes);
       return;
     }

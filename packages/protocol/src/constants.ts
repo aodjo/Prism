@@ -66,6 +66,9 @@ export const INPUT_PACKET_LEN = 15;
 /** Exact byte length of a cursor position message. */
 export const CURSOR_POSITION_LEN = 18;
 
+/** Exact byte length of a goodbye: the header and nothing after it. */
+export const GOODBYE_LEN = CONTROL_HEADER_LEN;
+
 /**
  * Byte length of a parity packet header, including the leading channel tag.
  *
@@ -156,13 +159,14 @@ export const VIDEO_FLAGS_RESERVED_MASK = 0xf8;
 /**
  * Message type carried in the second byte of a control packet.
  *
- * Values from two upward are reserved; a decoder that sees one rejects the packet rather
+ * Values from four upward are reserved; a decoder that sees one rejects the packet rather
  * than guessing at a future revision.
  */
 export enum ControlType {
   ClockPing = 0,
   ClockPong = 1,
   CursorPosition = 2,
+  Goodbye = 3,
 }
 
 /** Byte length of a file message header: the channel tag and the message type. */

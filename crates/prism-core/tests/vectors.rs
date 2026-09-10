@@ -11,10 +11,10 @@ use prism_core::net::packet::{
     FILE_CHUNK_HEADER_LEN, FILE_ENTRY_FIXED_LEN, FILE_HEADER_LEN, FILE_LISTING_FIXED_LEN,
     FILE_OFFER_FIXED_LEN, FILE_REPORT_LEN, FORMAT_VERSION, FecPacket, FeedbackPacket, FileAnswer,
     FileAsk, FileChunk, FileEntry, FileList, FileListing, FileOffer, FileRefusal, FileReport,
-    FileType, INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket, MAX_AUDIO_PAYLOAD,
-    MAX_FILE_NAME, MAX_FILE_PAYLOAD, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD,
-    MouseButton, SEAL_OVERHEAD, VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN, VideoPacket,
-    channel_of, control_type_of, file_type_of,
+    FileType, GOODBYE_LEN, Goodbye, INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket,
+    MAX_AUDIO_PAYLOAD, MAX_FILE_NAME, MAX_FILE_PAYLOAD, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE,
+    MAX_VIDEO_PAYLOAD, MouseButton, SEAL_OVERHEAD, VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN,
+    VideoPacket, channel_of, control_type_of, file_type_of,
 };
 use serde_json::Value;
 
@@ -361,6 +361,34 @@ fn cursor_positions_round_trip_through_the_vectors() {
 }
 
 #[test]
+fn goodbyes_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    assert_eq!(
+        GOODBYE_LEN as u64,
+        v["constants"]["goodbyeLen"].as_u64().unwrap()
+    );
+    assert_eq!(
+        ControlType::Goodbye as u64,
+        v["controlTypes"]["goodbye"].as_u64().unwrap()
+    );
+
+    for vector in v["goodbyes"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+
+        let mut buf = [0u8; GOODBYE_LEN];
+        let written = Goodbye.encode_into(&mut buf).unwrap();
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            Goodbye::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            Goodbye,
+            "decode {name}"
+        );
+    }
+}
+
+#[test]
 fn video_packets_round_trip_through_the_vectors() {
     let v = vectors();
 
@@ -661,6 +689,7 @@ fn malformed_packets_are_rejected() {
                 Ok(ControlType::ClockPing) => ClockPing::decode(&bytes).is_err(),
                 Ok(ControlType::ClockPong) => ClockPong::decode(&bytes).is_err(),
                 Ok(ControlType::CursorPosition) => CursorPosition::decode(&bytes).is_err(),
+                Ok(ControlType::Goodbye) => Goodbye::decode(&bytes).is_err(),
             },
             Ok(Channel::Input) => InputPacket::decode(&bytes).is_err(),
             Ok(Channel::Fec) => FecPacket::decode(&bytes).is_err(),

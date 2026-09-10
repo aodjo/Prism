@@ -10,6 +10,7 @@
     "clockPongLen": 26,
     "inputPacketLen": 15,
     "cursorPositionLen": 18,
+    "goodbyeLen": 2,
     "fecHeaderLen": 20,
     "maxFecPayload": 1156,
     "sealOverhead": 24,
@@ -232,6 +233,11 @@
       "reason": "cursor position with a screen of no height"
     },
     {
+      "name": "goodbye-with-a-tail",
+      "hex": "000300",
+      "reason": "a goodbye carries nothing after its type"
+    },
+    {
       "name": "fec-truncated-header",
       "hex": "05070000000100080200f40140420f00000000",
       "reason": "fec packet shorter than FEC_HEADER_LEN"
@@ -280,7 +286,8 @@
   "controlTypes": {
     "clockPing": 0,
     "clockPong": 1,
-    "cursorPosition": 2
+    "cursorPosition": 2,
+    "goodbye": 3
   },
   "clockPings": [
     {
@@ -415,6 +422,12 @@
         "screenHeight": 65535
       },
       "hex": "0002ffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "goodbyes": [
+    {
+      "name": "canonical",
+      "hex": "0003"
     }
   ],
   "fecPackets": [

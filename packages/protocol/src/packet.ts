@@ -8,6 +8,7 @@ import {
   CURSOR_POSITION_LEN,
   AUDIO_HEADER_LEN,
   FEC_HEADER_LEN,
+  GOODBYE_LEN,
   MAX_AUDIO_PAYLOAD,
   MAX_FEC_PAYLOAD,
   MAX_FIELD_SHARDS,
@@ -424,7 +425,8 @@ export function controlTypeOf(bytes: Uint8Array): ControlType {
   if (
     type !== ControlType.ClockPing &&
     type !== ControlType.ClockPong &&
-    type !== ControlType.CursorPosition
+    type !== ControlType.CursorPosition &&
+    type !== ControlType.Goodbye
   ) {
     throw new PrismProtocolError(`unknown control type ${type}`);
   }
@@ -775,6 +777,35 @@ export function decodeCursorPosition(bytes: Uint8Array): CursorPosition {
     screenWidth,
     screenHeight,
   };
+}
+
+/**
+ * Serialises the host's goodbye, which is the control header and nothing after it.
+ *
+ * Sent when the host ends the session on purpose, so the window watching it closes at once
+ * rather than showing the last picture until its idle timeout runs out.
+ *
+ * @returns {Uint8Array} A freshly allocated buffer of exactly `GOODBYE_LEN` bytes.
+ *
+ * @example
+ * encodeGoodbye(); // Uint8Array [0, 3]
+ */
+export function encodeGoodbye(): Uint8Array {
+  return new Uint8Array([Channel.Control, ControlType.Goodbye]);
+}
+
+/**
+ * Checks that a packet is a goodbye.
+ *
+ * @param {Uint8Array} bytes - Raw packet, already decrypted.
+ * @returns {void} Nothing; there is nothing in a goodbye to return.
+ * @throws {PrismProtocolError} If the packet is not a goodbye or is not exactly `GOODBYE_LEN` bytes.
+ *
+ * @example
+ * decodeGoodbye(new Uint8Array([0, 3])); // passes
+ */
+export function decodeGoodbye(bytes: Uint8Array): void {
+  expectControl(bytes, ControlType.Goodbye, GOODBYE_LEN);
 }
 
 /**
