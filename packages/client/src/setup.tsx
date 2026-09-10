@@ -576,7 +576,7 @@ function Setup(): JSX.Element {
           <h1 className="max-w-[min(1040px,72.2vw)] text-hero font-semibold">
             {t('Your desktop.')}
             <br />
-            Everywhere.
+            {t('Everywhere.')}
           </h1>
           <p className="mt-7 max-w-[min(700px,48.6vw)] text-lead text-muted">
             {t('Low-latency remote access for macOS, Windows, and Linux.')}
@@ -680,8 +680,7 @@ function Setup(): JSX.Element {
           ) : enrolment ? (
             <div className="card mt-9 w-[min(440px,30.6vw)] p-6">
               <p className="mx-auto max-w-[36ch] text-note leading-normal text-dim">
-                Scan this with an authenticator app. It is shown once — the server keeps only
-                enough to check codes, which is not enough to show it again.
+            {t('Scan this with an authenticator app. It is shown once — the server keeps only enough to check codes, which is not enough to show it again.')}
               </p>
               <img
                 src={enrolment.qr}
@@ -709,7 +708,7 @@ function Setup(): JSX.Element {
           ) : (
             <div className="card mt-9 flex w-[min(440px,30.6vw)] flex-col gap-3 p-6 text-left">
               <label className="flex flex-col gap-1.5">
-                <span className="text-fine-2 text-dim">Email</span>
+                <span className="text-fine-2 text-dim">{t('Email')}</span>
                 <input
                   type="email"
                   autoComplete="username"
@@ -761,7 +760,7 @@ function Setup(): JSX.Element {
               >
                 <div className="overflow-hidden">
                   <label className="flex flex-col gap-1.5">
-                    <span className="text-fine-2 text-dim">Password again</span>
+                    <span className="text-fine-2 text-dim">{t('Password again')}</span>
                     <input
                       type="password"
                       autoComplete="new-password"
@@ -929,7 +928,7 @@ function Setup(): JSX.Element {
       {which === 'ready' && (
         <section className={cls}>
           <h2 className="max-w-[min(760px,52.8vw)] text-triumph font-semibold">
-            You&rsquo;re all set.
+            {t('You’re all set.')}
           </h2>
           <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
             {signedIn === null
@@ -949,7 +948,7 @@ function Setup(): JSX.Element {
                 1
               </span>
               <span className="flex min-w-0 flex-1 flex-col gap-1">
-                <span className="text-body-2 font-medium">Add another machine</span>
+                <span className="text-body-2 font-medium">{t('Add another machine')}</span>
                 <span className="text-note text-muted-2">
                   {t('Install PRISM on it and sign in to the same account. The two find each other.')}
                 </span>
@@ -960,7 +959,7 @@ function Setup(): JSX.Element {
                 2
               </span>
               <span className="flex min-w-0 flex-1 flex-col gap-1">
-                <span className="text-body-2 font-medium">Share the one you want to watch</span>
+                <span className="text-body-2 font-medium">{t('Share the one you want to watch')}</span>
                 <span className="text-note text-muted-2">
                   {t('Press Share on it, and it turns up on the home screen of the other.')}
                 </span>

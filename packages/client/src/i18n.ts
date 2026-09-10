@@ -19,6 +19,7 @@
 const KO: Record<string, string> = {
   /* ── Setup ─────────────────────────────────────────────────────────────── */
   'Your desktop.': '내 컴퓨터를',
+  'Everywhere.': '어디서나.',
   Everywhere: '어디서나',
   'Low-latency remote access for macOS, Windows, and Linux.':
     'macOS · Windows · Linux를 지연 없이 원격으로 씁니다.',
@@ -100,6 +101,9 @@ const KO: Record<string, string> = {
   'Emailed code': '메일로 받은 코드',
   'Or type': '또는 직접 입력',
   Updates: '업데이트',
+  '{count} machines on this account': '이 계정의 기기 {count}대',
+  'build {build} · {channel}': '빌드 {build} · {channel}',
+  '{version} is available': '{version} 있음',
   Version: '버전',
   Automatic: '자동 확인',
   Builds: '받을 빌드',

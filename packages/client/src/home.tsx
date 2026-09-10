@@ -586,7 +586,7 @@ function Home(): JSX.Element {
                   type="button"
                   aria-label={t('Sharing terms')}
                   aria-expanded={terms}
-                  title="Frame rate, bitrate and where it listens"
+                  title={t('Frame rate, bitrate and where it listens')}
                   className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 text-ink transition-colors ${
                     terms ? 'bg-[rgba(255,255,255,0.12)]' : ''
                   }`}
@@ -663,7 +663,7 @@ function Home(): JSX.Element {
                     setTerms(false);
                   }}
                 >
-                  Done
+                  {t('Done')}
                 </button>
               </div>
             </div>
@@ -923,7 +923,7 @@ function Home(): JSX.Element {
         <div className="mt-2.5 flex flex-none flex-col gap-2">
           {listed.length === 0 ? (
             <p className="m-0 py-3 text-note-2 text-dim">
-              Every session you end is listed here, with what it came to.
+              {t('Every session you end is listed here, with what it came to.')}
             </p>
           ) : (
             listed.map((one) => (
@@ -1004,7 +1004,7 @@ function Home(): JSX.Element {
                   setTuning(false);
                 }}
               >
-                Done
+                {t('Done')}
               </button>
             </div>
           </div>
