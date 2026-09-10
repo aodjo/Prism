@@ -253,24 +253,15 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
 
-      # A pull request's bundle is a proof, not a release. The release job runs only on a push
-      # to `develop` or on a tag, so what is packaged here is built to show that it packages and
-      # is then thrown away — and thin LTO with a single codegen unit is most of the three and a
-      # half minutes it takes to throw away, spent making a binary nobody runs fast.
+      # Packaged with the profile in `Cargo.toml` on every event, including a pull request whose
+      # bundles are thrown away. Relaxing it there was tried and measured, and it made every
+      # platform slower: `CARGO_PROFILE_RELEASE_*` changes the fingerprint of every crate in the
+      # release profile, so the whole dependency graph compiles again from nothing — 218s to
+      # 390s on the slowest runner, 154s to 201s on the fastest.
       #
-      # Set as environment rather than written into `Cargo.toml`, so that what a release is built
-      # with is one profile in one file and not a thing assembled from two places. And set in a
-      # step of its own rather than as an expression on the one below, because an unset secret
-      # renders as an empty string and `CARGO_PROFILE_RELEASE_LTO=` is not a boolean.
-      - name: A pull request's bundle does not have to be fast
-        if: github.event_name == 'pull_request'
-        shell: bash
-        run: |
-          {
-            echo "CARGO_PROFILE_RELEASE_LTO=false"
-            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
-          } >> "$GITHUB_ENV"
-
+      # And not once. The cache key holds the lockfile and the compiler version, not the profile,
+      # so pull requests and pushes to `develop` would take turns writing a cache the other one
+      # cannot use. The bill is every run, not the first.
       - name: Package the application
         run: pnpm package
         env:
