@@ -90,17 +90,20 @@ jobs:
         include:
           - name: macos-arm64
             os: macos-latest
-          # Intel Macs, which had no build at all until this line. An arm64 binary does not run
-          # on one and cannot be made to: Rosetta translates Intel code for Apple Silicon, not
-          # the other way round — so every release so far was uninstallable on half the Macs
-          # people own.
+          # No Intel Mac build, and that is a decision rather than an oversight. An arm64 binary
+          # does not run on one and cannot be made to — Rosetta translates Intel code for Apple
+          # Silicon, not the other way round — so an Intel Mac cannot install Prism at all.
           #
-          # A separate artifact rather than a universal binary, because the updater already
-          # keys on architecture: the endpoint maps `darwin/x86_64` to `macos-x64` and has done
-          # since it was written. And this job runs beside the others instead of doubling the
-          # length of one.
-          - name: macos-x64
-            os: macos-15-intel
+          # It was tried on `macos-15-intel` and taken out again. That runner is a virtual
+          # machine with no media engine, so VideoToolbox falls back to a software encoder two
+          # orders of magnitude slower, and the codec tests could not tell a slow machine from a
+          # broken codec. A real Intel Mac has Quick Sync and would very likely be fine; the
+          # runner is not one, and shipping a build whose codec path CI cannot exercise is worse
+          # than shipping none.
+          #
+          # What it is waiting for is somewhere to run those tests on real Intel hardware. The
+          # rest of the way is already built: the update endpoint has mapped `darwin/x86_64` to
+          # `macos-x64` since it was written, so the artifact is all that is missing.
           - name: windows-x64
             os: windows-latest
           # A runner of the architecture rather than a cross build from the x64 one: half of
