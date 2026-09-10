@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use prism_core::control::client::{Report, Reporter};
+use prism_core::control::client::{Departure, Report, Reporter};
 use prism_stream::ipc;
 
 /// What a run came to, and whether the shell heard why on the channel it reads messages on.
@@ -185,6 +185,12 @@ fn translate(report: Report) -> ipc::Event {
             fps: counters.fps,
             kbps: counters.kbps,
             frames: counters.frames,
+        },
+        Report::Gone(how) => ipc::Event::Gone {
+            how: match how {
+                Departure::Left => ipc::Departure::Left,
+                Departure::Silent => ipc::Departure::Silent,
+            },
         },
     }
 }

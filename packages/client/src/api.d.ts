@@ -272,6 +272,11 @@ export interface StreamState {
   readonly terms: StreamTerms | null;
   /** What is happening, as of the last second. */
   readonly stats: StreamStats | null;
+  /**
+   * How the host went, when it was the host that ended the stream: `left` when it said so —
+   * sharing stopped, or Prism quit there — and `silent` when it stopped answering.
+   */
+  readonly departed: 'left' | 'silent' | null;
   /** The last few lines the stream process wrote, which is what explains a failure. */
   readonly log: readonly string[];
 }

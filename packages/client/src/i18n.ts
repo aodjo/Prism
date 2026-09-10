@@ -85,6 +85,11 @@ const KO: Record<string, string> = {
   'Every session you end is listed here, with what it came to.':
     '끝난 세션이 결과와 함께 여기에 쌓입니다.',
   'Search devices, sessions, files': '기기, 세션, 파일 검색',
+  'The host disconnected': '호스트가 연결 해제되었습니다',
+  'The connection to the host was lost': '호스트와 연결이 끊어졌습니다',
+  'Check that the host is on and connected to the network.':
+    '호스트가 켜져 있고 네트워크에 연결되어 있는지 확인하세요.',
+  OK: '확인',
   'Sharing terms': '공유 설정',
   'Frame rate, bitrate and where it listens': '프레임 속도, 비트레이트, 대기 주소',
   'Close sharing terms': '공유 설정 닫기',

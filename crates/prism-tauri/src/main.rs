@@ -227,6 +227,13 @@ fn main() {
             app.manage(stream::Held::new(
                 Box::new(move |snapshot| {
                     let _ = reporting.emit("stream:state", snapshot);
+
+                    // The stream window closed because the machine it showed went away, not
+                    // because anybody here closed it. The home window is where that is said, so
+                    // it comes forward to say it.
+                    if snapshot.phase == stream::Phase::Stopped && snapshot.departed.is_some() {
+                        tray::surface(&reporting);
+                    }
                 }),
                 Box::new(move |session| {
                     let held = recording.state::<sessions::Held>();
@@ -324,10 +331,16 @@ fn main() {
                 // one that started it. One left behind goes on holding the session it opened,
                 // so the host it is watching stays busy and every later attempt to watch that
                 // machine is told there is nobody there.
+                //
+                // Sharing ends too, and is waited on for a moment: ending it is what tells the
+                // machine watching this one that it has gone. A process that simply exits says
+                // nothing, and the window over there shows the last picture until it gives up.
                 tauri::RunEvent::Exit => {
                     let held: tauri::State<'_, stream::Held> = app.state();
 
                     let _ = held.stop();
+
+                    sharing::leave(&app.state::<sharing::Held>());
                 }
                 // No windows left is not a reason to stop. The exit somebody asked for carries
                 // a code — `exit` and `restart` both set one — and that is the one that goes

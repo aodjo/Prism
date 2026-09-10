@@ -26,11 +26,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
-
-/// Only the platforms with a capture loop measure elapsed time.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::net::handshake::{Identity, KEY_LEN};
 use crate::net::negotiate::{Codecs, H264, HostAbility};
@@ -336,6 +332,31 @@ impl HostService {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+
+    /// Asks the session to end and waits for it, but no longer than `patience`.
+    ///
+    /// For a process on its way out. Ending the session is what says goodbye to the machine
+    /// watching this one, so it is worth a moment; a session that has not ended by then is left
+    /// to the exit rather than holding it up. Returns whether it ended in time.
+    pub fn join_within(mut self, patience: Duration) -> bool {
+        self.stop();
+
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+
+        let deadline = Instant::now() + patience;
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let finished = thread.is_finished();
+        if finished {
+            let _ = thread.join();
+        }
+
+        finished
     }
 }
 

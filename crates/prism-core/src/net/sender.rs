@@ -23,8 +23,9 @@ use crate::net::loss::LossInjector;
 use crate::net::negotiate::{Accept, HostAbility};
 use crate::net::packet::{
     AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition,
-    FEEDBACK_WANTS_KEYFRAME, FLAG_IDR, FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, InputEvent,
-    InputPacket, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD, channel_of,
+    FEEDBACK_WANTS_KEYFRAME, FLAG_IDR, FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, GOODBYE_LEN,
+    Goodbye, InputEvent, InputPacket, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD,
+    channel_of,
 };
 use crate::net::packetize::SlicePacketizer;
 use crate::net::seal::Opener;
@@ -103,15 +104,33 @@ pub fn spawn_files(files: Arc<Mutex<Files>>, mut socket: SecureSender, alive: Ar
     });
 }
 
+/// How many times the host says goodbye.
+///
+/// Nothing answers it, so it is sent more than once against loss. Three datagrams a few bytes
+/// long, once a session.
+const GOODBYE_COPIES: usize = 3;
+
 /// Ends the threads a session started, when the session that started them is over.
 ///
 /// Sharing is a state rather than an attempt, so a machine offers itself again the moment a
 /// session ends — binding, registering and waiting afresh. That only works if the last session
 /// has actually let go: its return path and its file thread each hold a duplicate of its
 /// socket, and a duplicate of a socket bound to this host's port is that port still taken.
+///
+/// The client is told as well. However the session ended here — sharing stopped, Prism
+/// quitting, the client already gone — the window over there should close now rather than show
+/// the last picture until its idle timeout gives up.
 impl Drop for SliceSender {
-    /// Tells this session's threads that it is over.
+    /// Says goodbye, and tells this session's threads that it is over.
     fn drop(&mut self) {
+        let mut buf = [0u8; GOODBYE_LEN];
+
+        if let Ok(len) = Goodbye.encode_into(&mut buf) {
+            for _ in 0..GOODBYE_COPIES {
+                let _ = self.sender.send(&buf[..len]);
+            }
+        }
+
         self.alive.store(false, Ordering::Relaxed);
     }
 }

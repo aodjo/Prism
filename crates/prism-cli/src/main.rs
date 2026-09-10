@@ -45,6 +45,10 @@ fn printing() -> client::Reporter {
             "client: stats rtt_us={} fps={:.1} kbps={:.0} frames={}",
             counters.round_trip_us, counters.fps, counters.kbps, counters.frames
         ),
+        client::Report::Gone(client::Departure::Left) => println!("client: the host left"),
+        client::Report::Gone(client::Departure::Silent) => {
+            println!("client: the host went quiet");
+        }
     })
 }
 

@@ -34,7 +34,7 @@ use crate::net::handshake::{Identity, KEY_LEN};
 use crate::net::negotiate::Offer;
 use crate::net::packet::{
     AudioPacket, CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
-    FEEDBACK_PACKET_LEN, FEEDBACK_WANTS_KEYFRAME, FecPacket, INPUT_PACKET_LEN, InputEvent,
+    FEEDBACK_PACKET_LEN, FEEDBACK_WANTS_KEYFRAME, FecPacket, Goodbye, INPUT_PACKET_LEN, InputEvent,
     InputPacket, MAX_PACKET_SIZE, VideoPacket, channel_of, control_type_of,
 };
 use crate::net::reassemble::{FrameReassembler, PushOutcome};
@@ -239,6 +239,23 @@ pub enum Report {
     Terms(crate::net::negotiate::Accept),
     /// The counters, once every [`STATS_INTERVAL`].
     Counters(Counters),
+    /// The host is gone, and the session with it.
+    ///
+    /// Not sent when this side ended the session, by a frame budget or by being told to stop:
+    /// only when the far end is why it is over.
+    Gone(Departure),
+}
+
+/// How the host went, when it was the host that ended a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Departure {
+    /// It said goodbye: sharing was stopped on it, or Prism quit there.
+    Left,
+    /// Nothing arrived from it for the whole idle timeout, with no word as to why.
+    ///
+    /// A host that crashed, lost its network, or was put to sleep. Or one whose goodbye was lost
+    /// three times over, which on a path that bad is much the same thing.
+    Silent,
 }
 
 /// Where a client's reports go.
@@ -729,7 +746,10 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
 
         let bytes = match receiver.recv_into(&mut recv_buf) {
             Ok(bytes) => bytes,
-            Err(err) if is_timeout(&err) => break,
+            Err(err) if is_timeout(&err) => {
+                say.send(Report::Gone(Departure::Silent));
+                break;
+            }
             Err(err) => return Err(err),
         };
 
@@ -776,6 +796,11 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
                             *slot = Some(reading);
                         }
                     }
+                }
+                Ok(ControlType::Goodbye) if Goodbye::decode(bytes).is_ok() => {
+                    say.note("the host ended the session".to_owned());
+                    say.send(Report::Gone(Departure::Left));
+                    break;
                 }
                 _ => {}
             }

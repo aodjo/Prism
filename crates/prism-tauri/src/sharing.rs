@@ -406,6 +406,25 @@ pub fn stop_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<
     remember(&chosen, false)
 }
 
+/// How long quitting waits for a session to end.
+///
+/// Long enough for the session to notice between frames and say goodbye to whoever is
+/// watching, which is what closes their window at once instead of after its idle timeout.
+const LEAVING_PATIENCE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Ends sharing as Prism quits, without forgetting that it was on.
+///
+/// Not [`stop_sharing`]: that is somebody turning sharing off, and it is remembered so. This is
+/// the application going away with the machine still meant to be shared, which it will be again
+/// the next time Prism starts.
+pub fn leave(held: &Held) {
+    let running = held.0.lock().ok().and_then(|mut slot| slot.take());
+
+    if let Some(service) = running {
+        let _ = service.join_within(LEAVING_PATIENCE);
+    }
+}
+
 /// Returns what this machine's own session is doing, or nothing when it is not shared.
 ///
 /// This is what a window polls, ten times a second at the very most: a panel that changes

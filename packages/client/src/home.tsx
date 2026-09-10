@@ -50,7 +50,14 @@ const prism = window.prism;
 const RUNNING: ReadonlySet<string> = new Set(['connecting', 'streaming']);
 
 /** Nothing is happening, and nothing has happened yet. */
-const NOTHING: StreamState = { phase: 'idle', host: null, terms: null, stats: null, log: [] };
+const NOTHING: StreamState = {
+  phase: 'idle',
+  host: null,
+  terms: null,
+  stats: null,
+  departed: null,
+  log: [],
+};
 
 /** How many sessions the list shows before somebody asks for the rest. */
 const RECENT = 3;
@@ -162,6 +169,12 @@ function Home(): JSX.Element {
    * only thing left to offer for it is starting Prism again.
    */
   const [asked, setAsked] = useState<ReadonlySet<string>>(new Set());
+  /**
+   * How the host went, when a stream window closed because the machine it showed went away.
+   *
+   * Nobody here closed that window, so the home window says why it went until it is dismissed.
+   */
+  const [gone, setGone] = useState<'left' | 'silent' | null>(null);
   /** Whether the settings are open over the window. */
   const [tuning, setTuning] = useState(false);
   /** Whether the terms this machine is shared on are open beside the switch. */
@@ -244,7 +257,15 @@ function Home(): JSX.Element {
   useEffect(() => {
     prism.onSharing(setMine);
     prism.onSessions(setHistory);
-    prism.onStream(setStream);
+    prism.onStream((state) => {
+      setStream(state);
+
+      // Once the stream has ended, not while the last of it is still arriving. The shell sends
+      // one state for the end of a run, and the next run starts with this cleared.
+      if (state.departed !== null && !RUNNING.has(state.phase)) {
+        setGone(state.departed);
+      }
+    });
 
     // The account is asked again whenever this window comes forward, so a machine signed in
     // somewhere else turns up here without anybody restarting anything.
@@ -837,6 +858,43 @@ function Home(): JSX.Element {
                   }}
                 >
                   {t('Close')}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {gone && (
+          <div className="fixed inset-0 z-[4] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
+            <div
+              role="alertdialog"
+              aria-labelledby="gone-title"
+              className="w-full max-w-[400px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]"
+            >
+              <h2
+                id="gone-title"
+                className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink"
+              >
+                {gone === 'left'
+                  ? t('The host disconnected')
+                  : t('The connection to the host was lost')}
+              </h2>
+              {gone === 'silent' && (
+                <p className="mt-3 mb-0 text-ui text-dim">
+                  {t('Check that the host is on and connected to the network.')}
+                </p>
+              )}
+
+              <div className="mt-5 flex justify-end">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  autoFocus
+                  onClick={() => {
+                    setGone(null);
+                  }}
+                >
+                  {t('OK')}
                 </button>
               </div>
             </div>
