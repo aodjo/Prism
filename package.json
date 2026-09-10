@@ -17,7 +17,8 @@
     "test": "pnpm -r test && pnpm run typecheck && cargo test --workspace",
     "test:rs": "cargo test --workspace",
     "test:ts": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "publish-dev": "node scripts/publish-dev.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

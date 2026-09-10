@@ -39,6 +39,14 @@ import {
 export interface Env {
   /** The account store. */
   readonly prism_accounts: D1Database;
+  /**
+   * Where a development build's bundle is kept.
+   *
+   * Only the line between releases. A released version is an artifact on a GitHub release and
+   * stays there — this is for the builds that exist because somebody fixed something ten minutes
+   * ago on the machine in front of them.
+   */
+  readonly prism_builds: R2Bucket;
   /** Where signed-in machines should look for signalling, as `host:port`. */
   readonly PRISM_ADVERTISE?: string;
   /** The mail provider's key. Without it an address is only ever a name here. */
@@ -280,6 +288,21 @@ async function update(env: Env, path: string, channel: string): Promise<Response
     return malformed('update path');
   }
 
+  // The development line is served from here before GitHub is asked, because that is the whole
+  // point of it: a build published from the machine that made the change is available the moment
+  // it finishes, not when a build farm has made the same thing again on five runners.
+  //
+  // GitHub still answers when nothing has been published — the two are one line, and a machine
+  // following it should get whichever of the two is newer rather than only the one it happened
+  // to be told about.
+  if (channel === 'development') {
+    const published = await publishedBuild(env, target, arch, running);
+
+    if (published) {
+      return json(published);
+    }
+  }
+
   const answer = await fetch(`${RELEASES}?per_page=30`, {
     headers: { 'user-agent': 'prism-accounts', accept: 'application/vnd.github+json' },
     // Releases change when one is cut and not otherwise, so asking GitHub on every launch of
@@ -338,6 +361,65 @@ async function update(env: Env, path: string, channel: string): Promise<Response
     url: found.url,
     signature,
   });
+}
+
+/**
+ * Where a build's bundle lives in the bucket.
+ *
+ * Named for what it is rather than given an opaque key, so that a listing of the bucket reads
+ * the same as a listing of the table and neither has to be consulted to understand the other.
+ *
+ * @param {string} version - What the build calls itself.
+ * @param {string} target - `darwin`, `windows` or `linux`.
+ * @param {string} arch - `aarch64` or `x86_64`.
+ * @returns {string} The object key.
+ */
+function buildKey(version: string, target: string, arch: string): string {
+  return `builds/${version}/${target}-${arch}`;
+}
+
+/**
+ * The newest published development build for a platform, when it is newer than what is running.
+ *
+ * @async
+ * @param {Env} env - The runtime.
+ * @param {string} target - The target the updater asked about.
+ * @param {string} arch - The architecture it asked about.
+ * @param {string} running - The version asking.
+ * @returns {Promise<object | null>} What the updater expects, or null when there is nothing newer.
+ */
+async function publishedBuild(
+  env: Env,
+  target: string,
+  arch: string,
+  running: string,
+): Promise<Record<string, string> | null> {
+  // Ordered by when it was published rather than by version, because a version is a string to
+  // SQLite and `dev.9` sorts above `dev.10`. The comparison that matters is done below, in
+  // JavaScript, by the same function the released line is ordered with.
+  const rows = await env.prism_accounts
+    .prepare(
+      'SELECT version, signature, notes, uploaded_unix FROM builds' +
+        ' WHERE target = ? AND arch = ? ORDER BY uploaded_unix DESC LIMIT 20',
+    )
+    .bind(target, arch)
+    .all<{ version: string; signature: string; notes: string; uploaded_unix: number }>();
+
+  const newest = (rows.results ?? []).sort((left, right) =>
+    compareVersions(right.version, left.version),
+  )[0];
+
+  if (!newest || compareVersions(newest.version, running) <= 0) {
+    return null;
+  }
+
+  return {
+    version: newest.version,
+    notes: newest.notes,
+    pub_date: new Date(newest.uploaded_unix * 1000).toISOString(),
+    url: `https://accounts.presm.kr/v1/builds/${newest.version}/${target}/${arch}`,
+    signature: newest.signature,
+  };
 }
 
 /**
@@ -1330,6 +1412,62 @@ export default {
         // What the strip along the top is: the few numbers an operator would otherwise open a
         // terminal for. Every one of them is measured here rather than remembered, so a stale
         // answer is not possible — only a slow one.
+        // Publishing a development build: the bundle as the body, the signature as a header.
+        //
+        // Behind the operator gate, which is where it belongs — this is the one call on this
+        // server that decides what every machine on the development line will download and run.
+        // The bundle is signed and the updater checks that signature, so a stranger who got
+        // here could not make a machine run their code; they could make every machine on that
+        // line download eight megabytes of nothing, repeatedly, which is enough reason.
+        if (path.startsWith('/v1/admin/builds/') && method === 'PUT') {
+          const [version = '', target = '', arch = ''] = path
+            .slice('/v1/admin/builds/'.length)
+            .split('/');
+
+          if (!version || !target || !arch) {
+            return malformed('build path');
+          }
+
+          const signature = (request.headers.get('x-prism-signature') ?? '').trim();
+
+          if (!signature) {
+            return fail(400, 'That upload carried no signature.');
+          }
+
+          const body = await request.arrayBuffer();
+
+          if (body.byteLength === 0) {
+            return fail(400, 'That upload was empty.');
+          }
+
+          // The object first. A row pointing at a bundle that is not there is an update every
+          // machine is offered and none can download; a bundle nothing points at is a few
+          // megabytes nobody reads.
+          await env.prism_builds.put(buildKey(version, target, arch), body);
+
+          await env.prism_accounts
+            .prepare(
+              'INSERT OR REPLACE INTO builds' +
+                ' (version, target, arch, signature, notes, bytes, uploaded_unix, published_by)' +
+                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            )
+            .bind(
+              version,
+              target,
+              arch,
+              signature,
+              (request.headers.get('x-prism-notes') ?? '').trim(),
+              body.byteLength,
+              nowUnix(),
+              acting,
+            )
+            .run();
+
+          await record(env, acting, 'build.publish', `${version} ${target}/${arch}`);
+
+          return json({ version, target, arch, bytes: body.byteLength });
+        }
+
         if (path === '/v1/admin/overview' && method === 'GET') {
           const started = Date.now();
           const counts = await env.prism_accounts
@@ -1551,6 +1689,36 @@ export default {
       // machine most in need of one.
       if (path.startsWith('/v1/update/') && method === 'GET') {
         return update(env, path, request.headers.get('x-prism-channel') ?? 'production');
+      }
+
+      // A published development build, fetched by the updater that was just told about it.
+      //
+      // Open, and that is not an oversight. What is behind this is a signed bundle whose
+      // signature the updater checks before a byte of it runs, and it is the same file every
+      // machine on the development line is about to download. A gate here would protect a file
+      // that is already handed to anybody who asks for an update.
+      if (path.startsWith('/v1/builds/') && method === 'GET') {
+        const [version = '', target = '', arch = ''] = path.slice('/v1/builds/'.length).split('/');
+
+        if (!version || !target || !arch) {
+          return malformed('build path');
+        }
+
+        const object = await env.prism_builds.get(buildKey(version, target, arch));
+
+        if (!object) {
+          return fail(404, 'There is no such build.');
+        }
+
+        return new Response(object.body, {
+          headers: {
+            'content-type': 'application/gzip',
+            'content-length': String(object.size),
+            // Immutable because it is: a version is published once and the object under it is
+            // never rewritten. Publishing again means publishing a different version.
+            'cache-control': 'public, max-age=31536000, immutable',
+          },
+        });
       }
 
       // A signalling region saying what it is doing. It sends; nothing asks it — which is what

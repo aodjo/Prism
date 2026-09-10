@@ -159,3 +159,39 @@ CREATE TABLE IF NOT EXISTS region_reports (
   -- The pairs it introduced lately, as JSON, for the same reason.
   introduced     TEXT NOT NULL
 );
+
+-- A development build somebody published without cutting a release.
+--
+-- The released line is GitHub's: a release is a tag, a set of artifacts and a page to read, and
+-- none of that is worth reimplementing here. This table is the line between releases, where the
+-- alternative is waiting for a build farm to hand back a bundle that already exists on the
+-- machine that made the change.
+--
+-- One row per platform per version, because a version is published one platform at a time —
+-- whoever is fixing a Mac bug has a Mac in front of them and nothing else.
+CREATE TABLE IF NOT EXISTS builds (
+  -- What the build calls itself, without the leading `v`: `1.0.0-dev.211`.
+  version       TEXT NOT NULL,
+  -- The target as the updater asks about it: `darwin`, `windows`, `linux`.
+  target        TEXT NOT NULL,
+  -- The architecture as the updater asks about it: `aarch64`, `x86_64`.
+  arch          TEXT NOT NULL,
+  -- The minisign signature over the bundle, as the updater wants it: the signature itself,
+  -- not somewhere to fetch one. It base64-decodes this field and checks the download against
+  -- it, so a link here is an update that downloads in full and then refuses to install.
+  signature     TEXT NOT NULL,
+  -- What this build is, in one line, shown in the window that offers it.
+  notes         TEXT NOT NULL DEFAULT '',
+  -- How many bytes the object is, so a listing can be read without opening the bucket.
+  bytes         INTEGER NOT NULL,
+  -- When it was published, by this server's clock.
+  uploaded_unix INTEGER NOT NULL,
+  -- Which account published it, for the same reason every other change here is attributed.
+  published_by  TEXT NOT NULL,
+  PRIMARY KEY (version, target, arch)
+);
+
+-- The one question asked of this table on every launch of every machine: what is the newest
+-- build for this platform. Without it that is a scan, and it grows with every build ever
+-- published.
+CREATE INDEX IF NOT EXISTS builds_by_platform ON builds (target, arch, uploaded_unix DESC);
