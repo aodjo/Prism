@@ -7,26 +7,8 @@
 
 use prism_core::decode::{NAL_IDR, NAL_PPS, NAL_SPS, nal_type, nal_units};
 
-/// How long a test waits for a session to hand back what it was given.
-///
-/// Generous, because this is a test's patience and not a latency budget — what is being checked
-/// is that the picture survives the round trip, never that it survives it quickly. The
-/// pipeline's real deadlines are measured against a running session, not here.
-///
-/// Ten seconds rather than the five it was, because the tests in this file run in parallel and
-/// several concurrent software encodes starve one another — measured on GitHub's Intel macOS
-/// runner, a virtual machine with no media engine, where this work takes two orders of magnitude
-/// longer than on a machine with one.
-///
-/// It bounds what a *missing* frame costs; it does not promise one arrives. Raising it alone did
-/// not fix that run — at thirty seconds the same test still failed, four minutes later, because
-/// the frame was never coming at all.
-///
-/// Gated to match the two modules that use it. Both are macOS-only — VideoToolbox is the only
-/// session either end of this round trip can be — and a constant compiled where nothing reads
-/// it is dead code that `-D warnings` stops the Windows build on.
 #[cfg(target_os = "macos")]
-const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
+mod common;
 
 #[test]
 fn nal_units_are_split_on_either_start_code_length() {
@@ -170,7 +152,7 @@ mod round_trip {
             // in a virtual machine does. What this test is actually for is the assertion at the
             // bottom: three quarters of the frames must come back *and match*. That catches a
             // broken encoder; demanding every single frame only caught a slow one.
-            let Some(encoded) = encoder.poll(crate::PATIENCE) else {
+            let Some(encoded) = encoder.poll(crate::common::PATIENCE) else {
                 continue;
             };
             let pts_us = encoded.pts_us;
@@ -189,7 +171,7 @@ mod round_trip {
                 "parameter sets arrived with the first frame"
             );
 
-            let Some(picture) = decoder.poll(crate::PATIENCE) else {
+            let Some(picture) = decoder.poll(crate::common::PATIENCE) else {
                 continue;
             };
 
@@ -295,7 +277,7 @@ mod through_the_wire {
                 .encode(source.pixel_buffer(), phase as u64 * 16_667, phase == 0)
                 .expect("frame encodes");
 
-            let Some(frame) = encoder.poll(crate::PATIENCE) else {
+            let Some(frame) = encoder.poll(crate::common::PATIENCE) else {
                 continue;
             };
 
@@ -339,7 +321,8 @@ mod through_the_wire {
             );
 
             submitted += 1;
-            if decoder.decode(&bitstream, pts_us).is_ok() && decoder.poll(crate::PATIENCE).is_some()
+            if decoder.decode(&bitstream, pts_us).is_ok()
+                && decoder.poll(crate::common::PATIENCE).is_some()
             {
                 decoded += 1;
             }
