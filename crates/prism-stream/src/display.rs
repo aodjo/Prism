@@ -89,15 +89,14 @@ fn is_quit(event: &Event) -> bool {
     }
 }
 
-/// Returns whether an event is the chord that takes the pointer, or hands it back.
+/// Returns whether an event is the chord that stops controlling the far machine, or starts again.
 ///
-/// Control and option together, pressed with nothing else, which is what every other machine
-/// on a desk uses for the same thing. Shift is excluded so that reaching for the quit chord
-/// does not release the pointer on the way.
+/// Control and option together, pressed with nothing else. Shift is excluded so that reaching
+/// for the quit chord does not change anything on the way.
 ///
 /// Read from the modifiers rather than from the key, so it does not matter which of the two
 /// went down first or whether they are the left or the right one.
-fn is_grab_toggle(event: &Event) -> bool {
+fn is_control_toggle(event: &Event) -> bool {
     let Event::KeyDown {
         keycode: Some(key),
         keymod,
@@ -120,33 +119,69 @@ fn is_grab_toggle(event: &Event) -> bool {
         && !keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD)
 }
 
-/// Returns whether an event is a key being let go.
+/// Returns whether an event is a key or a button being let go.
 ///
-/// Sent on whether or not the pointer is the host's, because the chord that hands it back is
-/// two keys held down: the host saw them pressed and would go on holding them if the release
-/// stayed on this machine.
+/// Sent whether or not this machine is controlling the far one, because the chord that stops
+/// it is two keys held down, and a drag can be let go of after it stopped: the host saw them
+/// pressed and would go on holding them if the release stayed on this machine.
 fn is_release(event: &Event) -> bool {
-    matches!(event, Event::KeyUp { .. })
+    matches!(event, Event::KeyUp { .. } | Event::MouseButtonUp { .. })
 }
 
-/// Returns whether an event is a click inside the picture.
+/// Returns where on the far screen a place in the window is, as the wire carries it.
 ///
-/// What takes the pointer without a chord, the way a machine on the desk is used: somebody
-/// who clicks the screen they are watching means to be working on it.
-fn is_click(event: &Event) -> bool {
-    matches!(event, Event::MouseButtonDown { .. })
+/// The picture fills the window, so the fraction of the way across the window the pointer is
+/// is the fraction of the way across the screen it is pointing at. The last point of the
+/// window is the last point of the screen, which is why it divides by one less than the size.
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(to_fraction(0.0, 0.0, (1280, 720)), (0, 0));
+/// assert_eq!(to_fraction(1279.0, 719.0, (1280, 720)), (65535, 65535));
+/// ```
+fn to_fraction(x: f32, y: f32, area: (u32, u32)) -> (u16, u16) {
+    let across = (x / area.0.saturating_sub(1).max(1) as f32).clamp(0.0, 1.0);
+    let down = (y / area.1.saturating_sub(1).max(1) as f32).clamp(0.0, 1.0);
+
+    (
+        (across * f32::from(u16::MAX)).round() as u16,
+        (down * f32::from(u16::MAX)).round() as u16,
+    )
+}
+
+/// Returns where a click was made, when the event is one.
+///
+/// Sent ahead of the button itself. The host's pointer is wherever the last motion put it,
+/// and a click that arrives with no motion before it — the first after control was taken, or
+/// one made without moving — would otherwise land there rather than where it was made.
+fn where_clicked(event: &Event, area: (u32, u32)) -> Option<InputEvent> {
+    match event {
+        Event::MouseButtonDown { x, y, .. } | Event::MouseButtonUp { x, y, .. } => {
+            let (x, y) = to_fraction(*x, *y, area);
+
+            Some(InputEvent::MouseTo { x, y })
+        }
+        _ => None,
+    }
 }
 
 /// Translates one SDL event into an input event for the host, if it is one.
 ///
+/// Pointer motion goes as a place rather than a distance: the pointer here is over a picture
+/// of the far screen, and where it points is where the far pointer belongs. Sending how far it
+/// moved instead leaves the two pointers wherever they each happened to start, and they never
+/// meet.
+///
 /// Key repeats are dropped. The host's own operating system generates repeats from the
 /// key being held, so forwarding the client's as well would double them.
-fn to_input_event(event: &Event) -> Option<InputEvent> {
+fn to_input_event(event: &Event, area: (u32, u32)) -> Option<InputEvent> {
     match event {
-        Event::MouseMotion { xrel, yrel, .. } => Some(InputEvent::MouseMove {
-            dx: *xrel as i16,
-            dy: *yrel as i16,
-        }),
+        Event::MouseMotion { x, y, .. } => {
+            let (x, y) = to_fraction(*x, *y, area);
+
+            Some(InputEvent::MouseTo { x, y })
+        }
         Event::MouseButtonDown { mouse_btn, .. } => Some(InputEvent::MouseButton {
             button: to_button(*mouse_btn)?,
             pressed: true,
@@ -278,8 +313,8 @@ fn hud_lines(
     // Last, and only where there is something to say: a session that is watching and nothing
     // else has no chord to be told about.
     match control {
-        Some(true) => lines.push("control  on, control option to let go".to_owned()),
-        Some(false) => lines.push("control  off, click to take it".to_owned()),
+        Some(true) => lines.push("control  on, control option to stop".to_owned()),
+        Some(false) => lines.push("control  off, control option to take it".to_owned()),
         None => {}
     }
 
@@ -381,28 +416,21 @@ fn choose_a_file(
     }
 }
 
-/// Takes the pointer and keyboard for the machine being watched, or gives them back.
+/// Says that this machine has started controlling the far one, or stopped.
 ///
-/// One place, because there are two ways to ask — the chord and the toolbar — and a state the
-/// window server holds, a flag the loop holds and a picture in the title bar that all have to
-/// agree afterwards.
-fn hold(
-    sdl: &sdl3::Sdl,
-    window: &sdl3::video::Window,
-    bar: Option<&toolbar::Toolbar>,
-    say: &Reporter,
-    on: bool,
-) {
-    sdl.mouse().set_relative_mouse_mode(window, on);
-
+/// One place, because there are two ways to ask — the chord and the toolbar — and the flag the
+/// loop holds and the picture in the title bar have to agree afterwards. Nothing about the
+/// pointer changes here: it stays this machine's, visible and free, and what the flag decides
+/// is only whether where it points is sent on.
+fn announce_control(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
     if let Some(bar) = bar {
         bar.set_controlling(on);
     }
 
     say.note(if on {
-        "display: controlling this machine, control option to let go"
+        "display: controlling this machine, control option to stop"
     } else {
-        "display: watching only, click to control this machine"
+        "display: watching only, control option to take control"
     });
 }
 
@@ -518,10 +546,14 @@ pub fn run(
     let mut hud_frames = 0u64;
     let mut sent_input = 0u64;
 
-    // Whether the pointer and keyboard are the host's right now. Off to begin with: a window
-    // that seized the mouse the moment it opened would be one somebody had to know a chord to
-    // escape from before they had seen the screen they came for.
-    let mut grabbed = false;
+    // Whether what happens in this window is sent on to the far machine. On from the start,
+    // because nothing is seized to make it so: the pointer stays this machine's, visible and
+    // free to leave the window, and only where it points inside it goes across.
+    let mut controlling = capture_input;
+
+    // The size the pointer's coordinates are measured against, which is the window's own and
+    // not the drawable's: the two differ on a screen with more than one pixel to a point.
+    let mut area = window.size();
 
     // Whether the window is filling the screen, which SDL will not answer and this therefore
     // has to remember.
@@ -536,15 +568,15 @@ pub fn run(
     let (chosen_tx, chosen_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
 
     if capture_input {
-        say.note("display: click to control this machine, control option to let go");
+        announce_control(bar.as_ref(), say, controlling);
     }
 
     'main: loop {
         while let Some(tool) = bar.as_ref().and_then(toolbar::Toolbar::pressed) {
             match tool {
                 toolbar::Tool::Control if capture_input => {
-                    grabbed = !grabbed;
-                    hold(&sdl, &window, bar.as_ref(), say, grabbed);
+                    controlling = !controlling;
+                    announce_control(bar.as_ref(), say, controlling);
                 }
                 // Asked for on a session that is only watching. Said rather than ignored,
                 // because a control that does nothing when pressed is a fault to look for.
@@ -619,9 +651,9 @@ pub fn run(
             if is_quit(&event) {
                 break 'main;
             }
-            if capture_input && (is_grab_toggle(&event) || (!grabbed && is_click(&event))) {
-                grabbed = !grabbed;
-                hold(&sdl, &window, bar.as_ref(), say, grabbed);
+            if capture_input && is_control_toggle(&event) {
+                controlling = !controlling;
+                announce_control(bar.as_ref(), say, controlling);
                 continue;
             }
             if resized(&event) {
@@ -632,10 +664,18 @@ pub fn run(
                 }
                 drawable_width = width;
                 drawable_height = height;
+                area = window.size();
             }
-            if capture_input && (grabbed || is_release(&event)) {
+            if capture_input && (controlling || is_release(&event)) {
                 if let Some(sender) = input_slot.get() {
-                    if let Some(input) = to_input_event(&event) {
+                    if controlling {
+                        if let Some(place) = where_clicked(&event, area) {
+                            if sender.send(place).is_ok() {
+                                sent_input += 1;
+                            }
+                        }
+                    }
+                    if let Some(input) = to_input_event(&event, area) {
                         if let Ok(stamped) = sender.send(input) {
                             sent_input += 1;
                             predict(&mut cursor, stamped, input);
@@ -695,7 +735,7 @@ pub fn run(
                             shown,
                             missed,
                             clock_offset_us: clock_offset,
-                            control: capture_input.then_some(grabbed),
+                            control: capture_input.then_some(controlling),
                         },
                         &underway,
                     ));
@@ -704,7 +744,17 @@ pub fn run(
                 }
 
                 let target = (drawable_width as usize, drawable_height as usize);
-                if surface.present(&decoded, cursor.normalised(), target)? {
+                // The far pointer, drawn only while this machine is watching. While it is
+                // controlling, this machine's own pointer is at the place the far one is being
+                // sent to, and drawing the far one as well is a second pointer a moment behind
+                // the first.
+                let far_pointer = if controlling {
+                    None
+                } else {
+                    cursor.normalised()
+                };
+
+                if surface.present(&decoded, far_pointer, target)? {
                     shown += 1;
                     hud_frames += 1;
                 } else {
@@ -739,4 +789,31 @@ pub fn run(
         .expect("the receive thread should not panic")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_fraction;
+
+    #[test]
+    fn the_corners_of_the_window_are_the_corners_of_the_screen() {
+        assert_eq!(to_fraction(0.0, 0.0, (1280, 752)), (0, 0));
+        assert_eq!(to_fraction(1279.0, 751.0, (1280, 752)), (65535, 65535));
+    }
+
+    #[test]
+    fn the_middle_of_the_window_is_the_middle_of_the_screen() {
+        let (x, y) = to_fraction(639.5, 375.5, (1280, 752));
+
+        assert!(x.abs_diff(u16::MAX / 2) <= 1, "{x}");
+        assert!(y.abs_diff(u16::MAX / 2) <= 1, "{y}");
+    }
+
+    #[test]
+    fn a_pointer_past_the_edge_stays_on_the_edge() {
+        // Motion reported while the pointer is dragged out of the window, which SDL does for
+        // as long as a button is held. Wrapping would put the far pointer on the opposite side.
+        assert_eq!(to_fraction(-40.0, 900.0, (1280, 752)), (0, 65535));
+        assert_eq!(to_fraction(5000.0, -1.0, (1280, 752)), (65535, 0));
+    }
 }
