@@ -15,6 +15,7 @@ The first byte of every packet is the channel tag.
 | `Input`    | 3 | client → host | keyboard, mouse, gamepad |
 | `Feedback` | 4 | client → host | frame ACKs (LTR), clock sync, congestion signals |
 | `Fec`      | 5 | host → client | Reed-Solomon parity for video slices |
+| `File`     | 6 | both  | files moving between the two machines |
 
 ## Size limits
 
@@ -325,9 +326,61 @@ description that could not have been produced — a zero data or parity count, a
 not below the parity count, a tail length outside one to `MAX_VIDEO_PAYLOAD` — because the
 recovery path is driven directly by these numbers.
 
+## File packets (channel 6)
+
+Files move in either direction, one at a time each way, through one folder on each machine.
+The second byte is the message.
+
+| Message | Value | Direction | Purpose |
+|---|---|---|---|
+| `Offer`   | 0 | either | a file is on its way, if the far side will have it |
+| `Answer`  | 1 | either | whether it will, or why it will not |
+| `Chunk`   | 2 | sender → receiver | one piece of a file that was accepted |
+| `Report`  | 3 | receiver → sender | what has arrived, so the sender knows what to repeat |
+| `List`    | 4 | either | what is the far machine offering |
+| `Listing` | 5 | either | what it is offering |
+| `Ask`     | 6 | either | send me that one |
+
+```
+Offer
+offset  size  field       type   notes
+0       1     channel     u8     always 6
+1       1     type        u8     always 0
+2       4     id          u32    chosen by the sender, unique within a session
+6       8     size        u64    bytes in the file
+14      4     chunks      u32    ceil(size / MAX_FILE_PAYLOAD)
+18      2     name_len    u16    bytes of UTF-8 that follow
+20      ..    name        bytes  a file name and nothing else
+
+Answer                       Chunk
+2   4  id        u32         2   4  id       u32
+6   1  accepted  u8          6   4  index    u32
+7   1  refusal   u8          10  ..  payload  bytes, at most 1166
+
+Report                       Listing                     Ask
+2   4  id        u32         2   1  more     u8          2   1  name_len  u8
+6   4  have      u32         3   2  count    u16         3   ..  name      bytes
+10  4  arrived   u32         5   ..  entries
+                             entry: size u64, name_len u8, name bytes
+```
+
+Two numbers do the whole of the repair. `have` is how many chunks arrived in an unbroken run
+from the start, so everything below it is settled and the sender can forget it. `arrived`
+covers the thirty-two chunks after that: bit *i* set means chunk `have + i` is already there.
+A sender stays within that window, because sending past it would be sending chunks the next
+report has no way to describe.
+
+Every chunk but the last is exactly `MAX_FILE_PAYLOAD`, which is what lets a receiver write
+one that arrived out of order straight to `index * MAX_FILE_PAYLOAD` and hold nothing.
+
+A name is refused at the wire rather than repaired: empty, longer than 255 bytes, either of
+the two relative directories, or holding a separator or a null. What arrives is written into
+one folder, and a name that had to be sanitised before it was safe is a name nobody meant to
+send. A file lands under a temporary name and is only put in place once it is whole.
+
 ## Reserved
 
-The `Audio` payload layout is defined in M7. Until then only its channel tag is fixed.
+Nothing. Every channel tag from zero to six is defined; a decoder rejects anything above.
 
 ## Test vectors
 
