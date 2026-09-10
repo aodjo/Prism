@@ -297,6 +297,114 @@ function reading(label, parts) {
 }
 
 /**
+ * The one card the strip opens, moved and refilled rather than built per reading.
+ *
+ * Only ever one is open, and a card per item would be four subtrees to keep in step with
+ * numbers that change on every refresh.
+ *
+ * @type {HTMLElement|null}
+ */
+let strip = null;
+
+/**
+ * Opens a reading up when somebody looks at it.
+ *
+ * @param {HTMLElement} item - The reading in the strip.
+ * @param {() => Array<Node|string|false|null>} build - What the card says.
+ * @returns {HTMLElement} The same reading, so this can wrap one in place.
+ */
+function explains(item, build) {
+  // Reachable by keyboard, because a number nobody can read without a mouse is a number half
+  // the operators cannot read.
+  item.tabIndex = 0;
+  item.classList.add('asks');
+
+  /**
+   * Fills the card and puts it under the reading.
+   *
+   * @returns {void}
+   */
+  const show = () => {
+    if (!strip?.parentElement) {
+      return;
+    }
+
+    strip.replaceChildren(...build());
+    strip.hidden = false;
+
+    // Placed against the window rather than against the strip: the strip is narrower than the
+    // card, so clamping to it would push a card opened on the last reading off the screen.
+    const bar = strip.parentElement.getBoundingClientRect();
+    const box = item.getBoundingClientRect();
+    const rightmost = window.innerWidth - 16 - strip.offsetWidth;
+
+    strip.style.left = `${Math.max(16, Math.min(rightmost, box.left)) - bar.left}px`;
+    strip.style.top = `${box.bottom - bar.top + 10}px`;
+  };
+
+  /**
+   * Closes it.
+   *
+   * @returns {void}
+   */
+  const hide = () => {
+    if (strip) {
+      strip.hidden = true;
+    }
+  };
+
+  item.addEventListener('mouseenter', show);
+  item.addEventListener('focus', show);
+  item.addEventListener('mouseleave', hide);
+  item.addEventListener('blur', hide);
+
+  return item;
+}
+
+/**
+ * A count, grouped so that five figures can be read at a glance.
+ *
+ * @param {number} value - How many.
+ * @param {string} unit - The counter that follows it.
+ * @returns {string} The number and its counter.
+ */
+function counted(value, unit) {
+  return `${(value ?? 0).toLocaleString('ko-KR')}${unit}`;
+}
+
+/**
+ * The head of a detail card: what it is, and one line saying so.
+ *
+ * @param {string} title - What the reading is.
+ * @param {string} blurb - The sentence under it.
+ * @returns {HTMLElement} The head.
+ */
+function about(title, blurb) {
+  return el('div.detail-head', {}, [el('b', { text: title }), el('span', { text: blurb })]);
+}
+
+/**
+ * A row with a bar under it, for a number that runs against a limit.
+ *
+ * @param {string} label - What is being used.
+ * @param {string} value - How much of it, written out.
+ * @param {number} share - How full, from 0 to 1.
+ * @param {boolean} [tight] - Whether it is close enough to the limit to say so in red.
+ * @returns {HTMLElement} The row.
+ */
+function meter(label, value, share, tight = false) {
+  return el('div.meter', {}, [
+    el('span.meter-label', { text: label }),
+    el('span.meter-value', { class: tight ? 'is-bad' : '', text: value }),
+    el('div.gauge.wide', {}, [
+      el('i', {
+        style: `width:${Math.min(100, Math.max(0, share * 100))}%${tight ? ';background:#ff5c6e' : ''}`,
+      }),
+    ]),
+  ]);
+}
+
+/**
  * The strip along the top, and the operator's own chip.
  *
  * Every number in it is measured when it is asked for, so a stale reading is not possible —
@@ -312,27 +420,118 @@ function drawStatusBar() {
   const capacity = regions.reduce((total, region) => total + (region.link_mbps ?? 0), 0);
   const healthy = up === regions.length;
 
+  const peak = regions.reduce((total, region) => total + (region.peak_mbps ?? 0), 0);
+
+  strip = el('div.hover-card.detail', { hidden: true });
+
   return el('div.statusbar', {}, [
     el('div.live', {}, [
-      reading('', [
-        el('i', { class: `dot ${healthy ? 'good' : 'busy'}` }),
-        el('span.ink-3', { text: healthy ? '정상' : `리전 ${regions.length - up}곳 응답 없음` }),
-      ]),
-      el('i.live-divider'),
-      reading('리전', [
-        el('span.mono', { class: healthy ? '' : 'is-bad', text: `${up}/${regions.length}` }),
-      ]),
-      el('i.live-divider'),
-      reading('D1', [el('span.mono.ink-2', { text: `${database.latency_ms ?? '—'}ms` })]),
-      el('i.live-divider'),
-      reading('릴레이', [
-        el('div.gauge', {}, [
-          el('i', { style: `width:${capacity ? Math.min(100, (carrying / capacity) * 100) : 0}%` }),
+      strip,
+      explains(
+        reading('', [
+          el('i', { class: `dot ${healthy ? 'good' : 'busy'}` }),
+          el('span.ink-3', { text: healthy ? '정상' : `리전 ${regions.length - up}곳 응답 없음` }),
         ]),
-        el('span.mono.ink-2', { text: `${carrying} Mbps` }),
-        capacity > 0 &&
-          el('span.fine.muted', { text: `회선의 ${((carrying / capacity) * 100).toFixed(1)}%` }),
-      ]),
+        () => [
+          about('전체 상태', '리전과 데이터베이스를 한 번에 본 것입니다.'),
+          el('dl', {}, [
+            el('dt', { text: '리전' }),
+            el('dd', {
+              class: healthy ? '' : 'is-bad',
+              text: healthy ? `${up}곳 모두 정상` : `${regions.length - up}곳 응답 없음`,
+            }),
+            el('dt', { text: 'D1 응답' }),
+            el('dd', { text: `${database.latency_ms ?? '—'}ms` }),
+            el('dt', { text: '릴레이' }),
+            el('dd', { text: `${carrying} Mbps` }),
+            el('dt', { text: '빌드' }),
+            el('dd', { text: overview?.version ?? '—' }),
+          ]),
+        ],
+      ),
+      el('i.live-divider'),
+      explains(
+        reading('리전', [
+          el('span.mono', { class: healthy ? '' : 'is-bad', text: `${up}/${regions.length}` }),
+        ]),
+        () => [
+          about('리전', '각 리전이 마지막으로 보고한 때입니다.'),
+          el(
+            'dl',
+            {},
+            regions.flatMap((region) => [
+              el('dt', { text: region.name }),
+              el('dd', {
+                class: region.up ? '' : 'is-bad',
+                text: region.reports ? since(region.heard_seconds) : '보고 없음',
+              }),
+            ]),
+          ),
+        ],
+      ),
+      el('i.live-divider'),
+      explains(
+        reading('D1', [el('span.mono.ink-2', { text: `${database.latency_ms ?? '—'}ms` })]),
+        () => [
+          about('D1 데이터베이스', '계정과 기기, 열린 세션이 들어 있습니다.'),
+          el('dl', {}, [
+            el('dt', { text: '쿼리 응답 시간' }),
+            el('dd', { text: `${database.latency_ms ?? '—'}ms` }),
+            el('dt', { text: '계정' }),
+            el('dd', { text: counted(database.accounts, '개') }),
+            el('dt', { text: '메일 미인증' }),
+            el('dd', { text: counted(database.unverified, '개') }),
+            el('dt', { text: '기기' }),
+            el('dd', { text: counted(database.devices, '대') }),
+            el('dt', { text: '열린 세션' }),
+            el('dd', { text: counted(database.sessions, '개') }),
+          ]),
+        ],
+      ),
+      el('i.live-divider'),
+      explains(
+        reading('릴레이', [
+          el('div.gauge', {}, [
+            el('i', {
+              style: `width:${capacity ? Math.min(100, (carrying / capacity) * 100) : 0}%`,
+            }),
+          ]),
+          el('span.mono.ink-2', { text: `${carrying} Mbps` }),
+          capacity > 0 &&
+            el('span.fine.muted', { text: `회선의 ${((carrying / capacity) * 100).toFixed(1)}%` }),
+        ]),
+        () => [
+          about('릴레이', '리전들이 지금 나르고 있는 트래픽입니다.'),
+          el('dl', {}, [
+            el('dt', { text: '지금' }),
+            el('dd', { text: `${carrying} Mbps` }),
+            el('dt', { text: '회선 합계' }),
+            el('dd', { text: capacity ? `${capacity} Mbps` : '—' }),
+            el('dt', { text: '최고' }),
+            el('dd', { text: `${peak} Mbps` }),
+          ]),
+          // Only the metered ones. A machine on an unmetered plan has nothing to run out of,
+          // and a bar drawn against no limit would invent one.
+          regions.some((region) => region.limit_gb) &&
+            el('div.detail-part', {}, [
+              el('span.detail-heading', { text: '트래픽 허용량' }),
+              ...regions
+                .filter((region) => region.limit_gb)
+                .map((region) => {
+                  const used = region.carried_bytes ?? 0;
+                  const allowed = region.limit_gb * 1e9;
+                  const share = Math.min(1, used / allowed);
+
+                  return meter(
+                    region.name,
+                    `${(used / 1e9).toFixed(0)} / ${region.limit_gb} GB`,
+                    share,
+                    share > 0.8,
+                  );
+                }),
+            ]),
+        ],
+      ),
       el('button.refresh', { type: 'button', title: '새로고침', on: { click: () => refresh() } }, [
         icon('refresh', 15),
       ]),
