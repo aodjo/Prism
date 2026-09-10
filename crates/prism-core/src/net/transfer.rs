@@ -732,6 +732,22 @@ impl Files {
     }
 }
 
+/// The folder the two machines hand things to each other through.
+///
+/// One place with a name somebody can find, rather than the downloads folder: what arrives
+/// here arrived because another machine sent it, and mixing that in with what a browser
+/// downloaded would make it impossible to tell the two apart afterwards.
+///
+/// Returns `None` on a machine with no home directory, where there is nowhere to put it.
+#[must_use]
+pub fn shared_folder() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())?;
+
+    Some(PathBuf::from(home).join("Prism"))
+}
+
 /// Something the far machine sent that the caller has to know about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Landed {

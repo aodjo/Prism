@@ -22,6 +22,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -34,6 +35,7 @@ use std::time::Instant;
 use crate::net::handshake::{Identity, KEY_LEN};
 use crate::net::negotiate::{Codecs, H264, HostAbility};
 use crate::net::sender::SliceSender;
+use crate::net::transfer::Files;
 
 /// How the host should behave.
 #[derive(Debug, Clone)]
@@ -79,6 +81,12 @@ pub struct HostConfig {
     /// desktop audio and is under half a percent of what the picture costs, so this is on by
     /// default and off only when somebody has a reason.
     pub audio_bitrate_bps: Option<u32>,
+    /// Where files sent to this machine are put, and what it offers when asked for a listing.
+    ///
+    /// `None` turns the file channel off entirely: nothing is accepted and nothing is listed,
+    /// which is what a measurement run wants and what a machine whose owner has not asked for
+    /// file transfer gets.
+    pub shared_folder: Option<PathBuf>,
 }
 
 impl Default for HostConfig {
@@ -97,6 +105,7 @@ impl Default for HostConfig {
             inject_input: true,
             audio_bitrate_bps: Some(128_000),
             codecs: host_codecs(),
+            shared_folder: crate::net::transfer::shared_folder(),
         }
     }
 }
@@ -729,7 +738,12 @@ fn ready(mut sender: SliceSender, config: &HostConfig) -> io::Result<SliceSender
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
-    sender.serve_return_path(config.inject_input)?;
+    let files = config
+        .shared_folder
+        .clone()
+        .map(|folder| Arc::new(Mutex::new(Files::new(folder))));
+
+    sender.serve_return_path(config.inject_input, files)?;
     if let Some(loss) = config.parity_loss {
         sender.enable_parity(loss);
     }

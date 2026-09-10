@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use prism_core::cursor::CursorTracker;
 use prism_core::net::packet::{InputEvent, MouseButton};
+use prism_core::net::transfer::{self, Files, Landed};
 use prism_core::render::pacing::PresentPacer;
 use prism_core::stats::LatencyRecorder;
 use sdl3::event::Event;
@@ -307,6 +308,36 @@ fn resized(event: &Event) -> bool {
     )
 }
 
+/// Opens the system's file chooser and sends what was picked down `chosen`.
+///
+/// The dialog answers on SDL's event pump, which is this thread, so the callback cannot do the
+/// work itself: it is running inside the poll the main loop is in the middle of. It hands the
+/// path over and the loop picks it up on its next turn.
+fn choose_a_file(
+    window: &sdl3::video::Window,
+    chosen: &std::sync::mpsc::Sender<std::path::PathBuf>,
+    say: &Reporter,
+) {
+    let chosen = chosen.clone();
+    let opened = sdl3::dialog::show_open_file_dialog(
+        &[],
+        None::<&std::path::Path>,
+        false,
+        window,
+        Box::new(move |picked, _| {
+            if let Ok(paths) = picked {
+                if let Some(path) = paths.into_iter().next() {
+                    let _ = chosen.send(path);
+                }
+            }
+        }),
+    );
+
+    if let Err(err) = opened {
+        say.note(format!("files: no file chooser on this machine ({err})"));
+    }
+}
+
 /// Takes the pointer and keyboard for the machine being watched, or gives them back.
 ///
 /// One place, because there are two ways to ask — the chord and the toolbar — and a state the
@@ -400,10 +431,17 @@ pub fn run(
     let offset = Arc::new(AtomicI64::new(client::OFFSET_UNKNOWN));
     let input_slot: Arc<OnceLock<client::InputSender>> = Arc::new(OnceLock::new());
     let cursor_sink: client::CursorSink = Arc::new(Mutex::new(None));
+
+    // Both directions of file movement, held here as well as by the session: this is what the
+    // toolbar reaches for when somebody chooses a file, and the session is what carries it.
+    let moving = transfer::shared_folder().map(|folder| Arc::new(Mutex::new(Files::new(folder))));
+    let (landed_tx, landed_rx) = sync_channel(8);
+
     let worker = {
         let offset = Arc::clone(&offset);
         let input = Arc::clone(&input_slot);
         let cursor = Arc::clone(&cursor_sink);
+        let files = moving.clone();
         #[cfg(target_os = "windows")]
         let gpu = surface.gpu();
         let report = say.clone();
@@ -417,6 +455,8 @@ pub fn run(
                     cursor: Some(cursor),
                     audio: audio_sink,
                     report: Some(report),
+                    files,
+                    landed: Some(landed_tx),
                     #[cfg(target_os = "windows")]
                     gpu,
                 },
@@ -448,6 +488,10 @@ pub fn run(
     // somebody asks for the size the far machine is actually sending.
     let mut picture: Option<(u32, u32)> = None;
 
+    // Where the file chooser puts what somebody picked. A channel rather than a shared slot,
+    // because the dialog answers from inside the event pump and this loop reads it outside.
+    let (chosen_tx, chosen_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+
     if capture_input {
         say.note("display: click to control this machine, control option to let go");
     }
@@ -473,7 +517,58 @@ pub fn run(
                     filling = !filling;
                     let _ = window.set_fullscreen(filling);
                 }
+                toolbar::Tool::Send => choose_a_file(&window, &chosen_tx, say),
+                toolbar::Tool::Fetch => {
+                    if let Some(files) = moving.as_ref() {
+                        if let Ok(mut files) = files.lock() {
+                            files.ask_for_listing();
+                        }
+                    }
+                }
                 toolbar::Tool::Disconnect => break 'main,
+            }
+        }
+
+        // What the file dialog came back with, if somebody has answered it since the last
+        // turn. Offered here rather than in the callback, because the callback runs inside
+        // SDL's event pump and the transfer is this thread's to start.
+        while let Ok(path) = chosen_rx.try_recv() {
+            let Some(files) = moving.as_ref() else {
+                continue;
+            };
+
+            match files.lock().map(|mut files| files.send(&path)) {
+                Ok(Ok(_)) => say.note(format!("files: sending {}", path.display())),
+                Ok(Err(err)) => say.note(format!("files: {err}")),
+                Err(_) => {}
+            }
+        }
+
+        // A name picked out of the menu of what the far machine is offering.
+        while let Some(name) = bar.as_ref().and_then(toolbar::Toolbar::chosen) {
+            if let Some(files) = moving.as_ref() {
+                if let Ok(mut files) = files.lock() {
+                    files.fetch(&name);
+                }
+            }
+        }
+
+        while let Ok(event) = landed_rx.try_recv() {
+            match event {
+                Landed::Received { name, path } => {
+                    say.note(format!("files: {name} arrived in {}", path.display()));
+                }
+                Landed::Listing(listing) => {
+                    let files: Vec<(String, u64)> = listing
+                        .files
+                        .into_iter()
+                        .map(|file| (file.name, file.size))
+                        .collect();
+
+                    if let Some(bar) = bar.as_ref() {
+                        bar.offer(&files, listing.more);
+                    }
+                }
             }
         }
 

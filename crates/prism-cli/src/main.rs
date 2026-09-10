@@ -199,6 +199,13 @@ enum Command {
         #[arg(long)]
         audio: Option<u32>,
 
+        /// Accept files into this folder, and offer what is in it when asked.
+        ///
+        /// Off unless named. A run started to measure the video path should not write a file
+        /// because the other end pressed a button.
+        #[arg(long)]
+        share: Option<PathBuf>,
+
         /// Where this machine's long-term key is kept, generated on first use.
         #[arg(long)]
         identity: Option<PathBuf>,
@@ -288,6 +295,24 @@ enum Command {
         /// measured without a hand on the mouse.
         #[arg(long)]
         synthetic_input: bool,
+
+        /// Accept files into this folder, and send them from it.
+        ///
+        /// Off unless named, for the same reason the host's is.
+        #[arg(long)]
+        share: Option<PathBuf>,
+
+        /// Offer this file to the host once the session is open.
+        ///
+        /// Requires --share, which is what says this machine will move files at all.
+        #[arg(long)]
+        send: Option<PathBuf>,
+
+        /// Ask the host for this file once the session is open.
+        ///
+        /// The name of one of the files in the host's shared folder, as its listing gives it.
+        #[arg(long)]
+        fetch: Option<String>,
 
         /// Where this machine's long-term key is kept, generated on first use.
         #[arg(long)]
@@ -679,6 +704,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             pace,
             adaptive,
             audio,
+            share,
             identity,
             peer_key,
         } => {
@@ -706,6 +732,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     // than restated here — a second answer to that question is a second answer
                     // that drifts.
                     codecs: prism_core::control::host::host_codecs(),
+                    // Off, like the audio, unless --share names somewhere to put things. A
+                    // run started to measure the video path should not accept a file because
+                    // somebody on the other end pressed a button.
+                    shared_folder: share,
                 },
                 frame_bytes,
                 slices,
@@ -784,6 +814,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             no_input,
             audio,
             synthetic_input,
+            share,
+            send,
+            fetch,
             identity,
             peer_key,
         } => {
@@ -833,6 +866,51 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             let offset =
                 std::sync::Arc::new(std::sync::atomic::AtomicI64::new(client::OFFSET_UNKNOWN));
 
+            // What the session moves files with, and what this arm reaches for to start one.
+            // Queued before the session opens: nothing is sent until it does, and a caller
+            // that had to wait for a signal to say so would need a signal to wait for.
+            let moving = share.map(|folder| {
+                let files = std::sync::Arc::new(std::sync::Mutex::new(
+                    prism_core::net::transfer::Files::new(folder),
+                ));
+
+                if let Ok(mut held) = files.lock() {
+                    if let Some(path) = send.as_ref() {
+                        match held.send(path) {
+                            Ok(_) => println!("files  : offering {}", path.display()),
+                            Err(err) => eprintln!("files  : {err}"),
+                        }
+                    }
+
+                    if let Some(name) = fetch.as_deref() {
+                        held.fetch(name);
+                        println!("files  : asking for {name}");
+                    }
+                }
+
+                files
+            });
+
+            let watching = moving.clone();
+            let (landed_tx, landed_rx) = std::sync::mpsc::sync_channel(8);
+
+            std::thread::spawn(move || {
+                while let Ok(event) = landed_rx.recv() {
+                    match event {
+                        prism_core::net::transfer::Landed::Received { name, path } => {
+                            println!("files  : {name} arrived in {}", path.display());
+                        }
+                        prism_core::net::transfer::Landed::Listing(listing) => {
+                            for file in listing.files {
+                                println!("files  : the host has {} ({} bytes)", file.name, file.size);
+                            }
+                        }
+                    }
+                }
+
+                drop(watching);
+            });
+
             #[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
             {
                 let _ = (window_width, window_height, pacing_us, no_input);
@@ -852,6 +930,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         offset: Some(offset),
                         input: synthetic_input.then(windowless_input),
                         report: Some(printing()),
+                        files: moving,
+                        landed: Some(landed_tx),
                         ..client::ClientHooks::default()
                     },
                 )?)
@@ -876,6 +956,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                             offset: Some(offset),
                             input: synthetic_input.then(windowless_input),
                             report: Some(printing()),
+                            files: moving,
+                            landed: Some(landed_tx),
                             ..client::ClientHooks::default()
                         },
                     )?)

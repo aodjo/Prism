@@ -19,6 +19,10 @@ pub enum Tool {
     Fit,
     /// Fill the screen, and leave it again.
     Fullscreen,
+    /// Send a file to the machine being watched.
+    Send,
+    /// Ask the machine being watched what it is offering.
+    Fetch,
     /// End the session.
     Disconnect,
 }
@@ -45,5 +49,16 @@ impl Toolbar {
     /// Does nothing, because there is no item to redraw.
     pub fn set_controlling(&self, controlling: bool) {
         let _ = controlling;
+    }
+
+    /// Returns `None`, because there is no menu to choose from.
+    #[must_use]
+    pub fn chosen(&self) -> Option<String> {
+        None
+    }
+
+    /// Does nothing, because there is no control to open a menu under.
+    pub fn offer(&self, files: &[(String, u64)], more: bool) {
+        let _ = (files, more);
     }
 }

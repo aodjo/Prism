@@ -9,8 +9,9 @@
 //! that nothing is sent unsealed, unpaced, or uncounted.
 
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::clock::now_us;
 use crate::input::{Injector, PlatformInjector};
@@ -23,9 +24,10 @@ use crate::net::negotiate::{Accept, HostAbility};
 use crate::net::packet::{
     AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition,
     FEEDBACK_WANTS_KEYFRAME, FLAG_IDR, FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, InputEvent,
-    InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD, channel_of,
+    InputPacket, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD, channel_of,
 };
 use crate::net::packetize::SlicePacketizer;
+use crate::net::transfer::{Files, Landed};
 use crate::net::seal::Opener;
 use crate::net::secure::SecureSender;
 use crate::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
@@ -55,6 +57,50 @@ pub fn max_slice_bytes(parity_loss: Option<f32>) -> usize {
     parity_loss.map_or(usize::MAX, |loss| {
         max_data_shards_for(loss) * MAX_VIDEO_PAYLOAD
     })
+}
+
+/// How long the file thread waits when a transfer has nothing to send.
+///
+/// Long enough that an idle session is an idle thread, short enough that a person who has just
+/// chosen a file does not notice the wait before it starts moving.
+const FILE_IDLE: Duration = Duration::from_millis(20);
+
+/// The gap between two file packets, which is what holds a transfer under the picture.
+///
+/// Roughly eight megabits a second at a full packet. A file is never the thing somebody is
+/// waiting on in a session about a screen, so it takes what is left rather than competing:
+/// this is a tenth of what the video is configured for and it cannot grow.
+const FILE_PACE: Duration = Duration::from_micros(1_100);
+
+/// Starts the thread that moves a file while the session runs.
+///
+/// Paced rather than driven by the return path, and on a handle of its own so that a chunk
+/// waiting to go never sits behind a frame that is already being written.
+pub fn spawn_files(files: Arc<Mutex<Files>>, mut socket: SecureSender) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; MAX_PLAINTEXT_SIZE];
+
+        loop {
+            let written = match files.lock() {
+                Ok(mut files) => files.step(&mut buf).unwrap_or(0),
+                // Another thread died holding it, which means this session's file state is
+                // gone. Ending quietly: there is nothing left to move.
+                Err(_) => return,
+            };
+
+            if written == 0 {
+                std::thread::sleep(FILE_IDLE);
+
+                continue;
+            }
+
+            if socket.send(&buf[..written]).is_err() {
+                return;
+            }
+
+            std::thread::sleep(FILE_PACE);
+        }
+    });
 }
 
 /// The shortest gap between two keyframes the host will produce because it was asked to.
@@ -763,7 +809,11 @@ impl SliceSender {
     ///
     /// Returns the underlying [`io::Error`] if the socket cannot be duplicated, and
     /// [`io::ErrorKind::AlreadyExists`] if a return path is already running.
-    pub fn serve_return_path(&mut self, inject_input: bool) -> io::Result<()> {
+    pub fn serve_return_path(
+        &mut self,
+        inject_input: bool,
+        files: Option<Arc<Mutex<Files>>>,
+    ) -> io::Result<()> {
         let opener = self.opener.take().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -773,6 +823,16 @@ impl SliceSender {
 
         let mut receiver = self.sender.receiver(opener)?;
         let mut replies = self.sender.split()?;
+
+        // Its own thread and its own handle on the socket, because a file moves on a clock of
+        // its own: this thread wakes when the client says something, and a transfer that only
+        // advanced then would run at the rate of the return path rather than at the rate the
+        // wire has room for.
+        if let Some(files) = files.as_ref() {
+            spawn_files(Arc::clone(files), self.sender.split()?);
+        }
+
+        let carrier = files;
         let feedback = Arc::clone(&self.feedback);
         let adaptive = self.adaptive;
         let start_bps = self.pacer.as_ref().map_or(0, SendPacer::bitrate_bps);
@@ -923,6 +983,24 @@ impl SliceSender {
                         feedback.target_bps.store(after, Ordering::Relaxed);
                         if after != before {
                             feedback.rate_changes.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    // Offers, answers, chunks and reports. Whatever the state machine wants
+                    // to say back goes out from the file thread, which is holding the same
+                    // lock this one is about to let go of.
+                    Ok(Channel::File) => {
+                        let Some(files) = carrier.as_ref() else {
+                            continue;
+                        };
+
+                        if let Ok(mut files) = files.lock() {
+                            match files.arrived(bytes) {
+                                Ok(Some(Landed::Received { name, path })) => {
+                                    println!("files  : {name} arrived in {}", path.display());
+                                }
+                                Ok(_) => {}
+                                Err(err) => eprintln!("files  : {err}"),
+                            }
                         }
                     }
                     _ => {}

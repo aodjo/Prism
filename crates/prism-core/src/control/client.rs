@@ -39,6 +39,7 @@ use crate::net::packet::{
 };
 use crate::net::reassemble::{FrameReassembler, PushOutcome};
 use crate::net::secure::{SecureReceiver, SecureSender};
+use crate::net::transfer::{Files, Landed};
 use crate::net::transport::UdpTransport;
 
 use crate::stats::{LatencyRecorder, LatencySummary};
@@ -300,6 +301,13 @@ pub struct ClientHooks {
     pub input: Option<Arc<OnceLock<InputSender>>>,
     /// Updated as the host reports where its pointer is.
     pub cursor: Option<CursorSink>,
+    /// Both directions of file movement, when this machine will move files.
+    ///
+    /// Held by the caller as well, which is how a window offers a file to the host and asks
+    /// for what the host is offering: the same state machine, under the same lock.
+    pub files: Option<Arc<Mutex<Files>>>,
+    /// Where a file that has finished arriving, or a listing that has come back, is announced.
+    pub landed: Option<SyncSender<Landed>>,
     /// Where arriving audio frames go, when this machine can play them.
     ///
     /// Absent when nothing is showing the stream, because a session with no window is a
@@ -568,6 +576,8 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         cursor,
         audio,
         report,
+        files,
+        landed,
         ..
     } = hooks;
     let say = Say(report);
@@ -662,6 +672,15 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         }
     }
 
+    // A file moves on a clock of its own, on a handle of its own. This loop is busy with the
+    // picture and would otherwise only push a chunk when a frame arrived, which on a still
+    // screen is twice a second.
+    if let Some(files) = files.as_ref() {
+        if let Ok(split) = sender.split() {
+            crate::net::sender::spawn_files(Arc::clone(files), split);
+        }
+    }
+
     loop {
         if last_ping.elapsed() >= PING_INTERVAL {
             last_ping = Instant::now();
@@ -748,6 +767,27 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
                     }
                 }
                 Err(_) => malformed += 1,
+            }
+
+            continue;
+        }
+
+        // Files have their own state machine and their own thread to send from. Nothing here
+        // is on the picture's path: this only hands the packet over and carries on.
+        if channel_of(bytes) == Ok(Channel::File) {
+            if let Some(files) = files.as_ref() {
+                let told = files.lock().map(|mut files| files.arrived(bytes));
+
+                match told {
+                    Ok(Ok(Some(event))) => {
+                        if let Some(sink) = landed.as_ref() {
+                            let _ = sink.try_send(event);
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(err)) => say.note(format!("files: {err}")),
+                    Err(_) => {}
+                }
             }
 
             continue;

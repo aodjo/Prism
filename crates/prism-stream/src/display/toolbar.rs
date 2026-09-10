@@ -26,8 +26,8 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSImage, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode, NSToolbarItem,
-    NSToolbarItemIdentifier, NSWindow, NSWindowToolbarStyle,
+    NSEvent, NSImage, NSMenu, NSMenuItem, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
+    NSToolbarItem, NSToolbarItemIdentifier, NSWindow, NSWindowToolbarStyle,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSString};
 use sdl3::video::Window;
@@ -43,6 +43,10 @@ pub enum Tool {
     Fit,
     /// Fill the screen, and leave it again.
     Fullscreen,
+    /// Send a file to the machine being watched.
+    Send,
+    /// Ask the machine being watched what it is offering.
+    Fetch,
     /// End the session.
     Disconnect,
 }
@@ -54,6 +58,8 @@ impl Tool {
             Tool::Control => "kr.presm.prism.control",
             Tool::Fit => "kr.presm.prism.fit",
             Tool::Fullscreen => "kr.presm.prism.fullscreen",
+            Tool::Send => "kr.presm.prism.send",
+            Tool::Fetch => "kr.presm.prism.fetch",
             Tool::Disconnect => "kr.presm.prism.disconnect",
         }
     }
@@ -69,6 +75,8 @@ impl Tool {
             Tool::Control => "제어",
             Tool::Fit => "원본 크기",
             Tool::Fullscreen => "전체 화면",
+            Tool::Send => "파일 보내기",
+            Tool::Fetch => "파일 가져오기",
             Tool::Disconnect => "연결 끊기",
         }
     }
@@ -83,16 +91,20 @@ impl Tool {
             Tool::Control => "cursorarrow",
             Tool::Fit => "arrow.down.right.and.arrow.up.left",
             Tool::Fullscreen => "arrow.up.left.and.arrow.down.right",
+            Tool::Send => "square.and.arrow.up",
+            Tool::Fetch => "square.and.arrow.down",
             Tool::Disconnect => "power",
         }
     }
 }
 
 /// The controls, in the order they appear.
-const TOOLS: [Tool; 4] = [
+const TOOLS: [Tool; 6] = [
     Tool::Control,
     Tool::Fit,
     Tool::Fullscreen,
+    Tool::Send,
+    Tool::Fetch,
     Tool::Disconnect,
 ];
 
@@ -103,11 +115,15 @@ const CONTROLLING: &str = "cursorarrow.rays";
 struct Held {
     /// Presses nobody has read yet.
     pressed: Arc<Mutex<VecDeque<Tool>>>,
+    /// Files chosen from the menu that nobody has read yet.
+    chosen: Arc<Mutex<VecDeque<String>>>,
     /// The items, kept so the toolbar can be asked for them and so one can be redrawn.
     ///
     /// `RefCell` rather than a lock: the class is main-thread only, and every path that
     /// reaches this is the window's own.
     items: RefCell<Vec<(Tool, Retained<NSToolbarItem>)>>,
+    /// The window the controls are in, so a menu can be opened in its coordinates.
+    window: RefCell<Option<Retained<NSWindow>>>,
 }
 
 define_class!(
@@ -154,6 +170,18 @@ define_class!(
     }
 
     impl Controls {
+        /// Records which file was chosen from the menu of what the far machine has.
+        ///
+        /// The name is the item's title. It came from the far machine and has already been
+        /// refused by the wire if it was not a file name, so what is put back on the queue is
+        /// the same string the listing carried.
+        #[unsafe(method(chose:))]
+        fn chose(&self, sender: &NSMenuItem) {
+            if let Ok(mut queue) = self.ivars().chosen.lock() {
+                queue.push_back(sender.title().to_string());
+            }
+        }
+
         /// Records that one of the items was pressed.
         ///
         /// The window's loop reads the queue on its next turn rather than acting here, so a
@@ -187,6 +215,7 @@ impl Controls {
 /// The controls in a window's title bar, and the presses they have collected.
 pub struct Toolbar {
     pressed: Arc<Mutex<VecDeque<Tool>>>,
+    chosen: Arc<Mutex<VecDeque<String>>>,
     controls: Retained<Controls>,
     /// Held so the toolbar outlives this call. Nothing reads it again.
     _toolbar: Retained<NSToolbar>,
@@ -204,9 +233,12 @@ impl Toolbar {
         let ns_window = cocoa_window(window)?;
 
         let pressed = Arc::new(Mutex::new(VecDeque::new()));
+        let chosen = Arc::new(Mutex::new(VecDeque::new()));
         let controls = Controls::alloc(marker).set_ivars(Held {
             pressed: Arc::clone(&pressed),
+            chosen: Arc::clone(&chosen),
             items: RefCell::new(Vec::new()),
+            window: RefCell::new(Some(ns_window.clone())),
         });
         // SAFETY: `init` on `NSObject` takes no arguments and returns the object it was sent
         // to, and the instance variables it needs were set on the allocation above.
@@ -236,6 +268,7 @@ impl Toolbar {
 
         Some(Self {
             pressed,
+            chosen,
             controls,
             _toolbar: toolbar,
         })
@@ -244,6 +277,82 @@ impl Toolbar {
     /// Returns the next control that was pressed, or `None` if none was.
     pub fn pressed(&self) -> Option<Tool> {
         self.pressed.lock().ok()?.pop_front()
+    }
+
+    /// Returns the next file chosen from the menu, or `None` if none was.
+    pub fn chosen(&self) -> Option<String> {
+        self.chosen.lock().ok()?.pop_front()
+    }
+
+    /// Shows what the far machine is offering, under the item that asked for it.
+    ///
+    /// A menu rather than a window, because this is a short list of names attached to the
+    /// control that produced it — and because a window would need a list, a scrollbar and a
+    /// way to close it, none of which this process has and all of which the menu bar does.
+    ///
+    /// An empty listing still opens, saying that it is empty. A menu that did not appear would
+    /// be indistinguishable from a button that does nothing.
+    pub fn offer(&self, files: &[(String, u64)], more: bool) {
+        let Some(marker) = MainThreadMarker::new() else {
+            return;
+        };
+
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(marker), &NSString::from_str(""));
+
+        // SAFETY: every selector named here is one this class defines and every one of them
+        // takes the single sender argument the menu sends with it. The strings are live for
+        // the duration of each call, and the menu copies what it keeps.
+        unsafe {
+            if files.is_empty() {
+                let empty = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(marker),
+                    &NSString::from_str("가져올 파일이 없습니다"),
+                    None,
+                    &NSString::from_str(""),
+                );
+
+                empty.setEnabled(false);
+                menu.addItem(&empty);
+            }
+
+            for (name, size) in files {
+                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(marker),
+                    &NSString::from_str(name),
+                    Some(sel!(chose:)),
+                    &NSString::from_str(""),
+                );
+
+                // Not retained, which is the usual Objective-C rule; what keeps it alive is
+                // the toolbar holding the same object as its delegate.
+                item.setTarget(Some(&*self.controls));
+                item.setToolTip(Some(&NSString::from_str(&plainly(*size))));
+                menu.addItem(&item);
+            }
+
+            if more {
+                let rest = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(marker),
+                    &NSString::from_str("…그 밖에 더 있습니다"),
+                    None,
+                    &NSString::from_str(""),
+                );
+
+                rest.setEnabled(false);
+                menu.addItem(&rest);
+            }
+        }
+
+        let at = NSEvent::mouseLocation();
+        let Some(window) = self.controls.ivars().window.borrow().clone() else {
+            return;
+        };
+
+        // Below the pointer, in the window's own coordinates, so it opens under the control
+        // that was pressed rather than wherever the screen's origin happens to be.
+        let inside = window.convertPointFromScreen(at);
+
+        menu.popUpMenuPositioningItem_atLocation_inView(None, inside, None);
     }
 
     /// Redraws the control item to say whether the far machine is being controlled.
@@ -270,6 +379,20 @@ impl core::fmt::Debug for Toolbar {
         f.debug_struct("Toolbar")
             .field("waiting", &waiting)
             .finish_non_exhaustive()
+    }
+}
+
+/// Renders a size the way somebody reads one.
+fn plainly(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    match bytes {
+        0..KB => format!("{bytes} B"),
+        KB..MB => format!("{:.0} KB", bytes as f64 / KB as f64),
+        MB..GB => format!("{:.1} MB", bytes as f64 / MB as f64),
+        _ => format!("{:.2} GB", bytes as f64 / GB as f64),
     }
 }
 
