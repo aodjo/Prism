@@ -33,7 +33,7 @@ import { execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stdin, stdout } from 'node:process';
 
@@ -255,6 +255,9 @@ const put = await fetch(`${SERVER}/v1/admin/builds/${version}/${target}/${arch}`
     'content-type': 'application/octet-stream',
     'x-prism-signature': signature,
     'x-prism-notes': notes,
+    // What the bundler called it. Kept rather than rebuilt from the version and the platform,
+    // so a list of builds names the files that are actually there.
+    'x-prism-filename': basename(made),
   },
   body,
 });
