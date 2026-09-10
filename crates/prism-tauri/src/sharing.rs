@@ -236,6 +236,36 @@ fn remember(chosen: &State<'_, Chosen>, on: bool) -> Result<(), String> {
 /// parsed, if this machine's identity cannot be read, or if the session's thread cannot be
 /// spawned. All four are worth showing rather than swallowing: each one leaves a machine that
 /// looks shared and is not.
+/// Puts a machine back to sharing, if that is how it was left.
+///
+/// Somebody who turned this machine on for another one of theirs meant it to stay on. Without
+/// this the switch went quietly back to off at every launch, which makes a machine reachable
+/// only while somebody has a window open on it — the opposite of what sharing is for. The
+/// setting has recorded the answer since the beginning; nothing acted on it.
+///
+/// Failures are not reported and not written down. There is no window listening yet, and a
+/// machine that could not start sharing this time is one that should still try next time: the
+/// usual reason is a screen recording grant given while Prism was running, which the next launch
+/// is exactly what fixes.
+pub fn resume(app: &tauri::AppHandle) {
+    use tauri::Manager as _;
+
+    let chosen: State<'_, Chosen> = app.state();
+
+    let wanted = chosen
+        .0
+        .lock()
+        .map(|settings| settings.sharing)
+        .unwrap_or(false);
+
+    if !wanted {
+        return;
+    }
+
+    let held: State<'_, Held> = app.state();
+    let _ = start_sharing(held, chosen);
+}
+
 #[tauri::command]
 pub fn start_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<Snapshot, String> {
     // Before anything else, because a machine that may not record its screen shares perfectly:
