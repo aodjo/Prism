@@ -64,6 +64,20 @@ const version = channel === 'production' ? VERSION : `${VERSION}-dev.${build}`;
 
 const config = JSON.parse(readFileSync(CONFIG, 'utf8'));
 config.version = version;
+
+// A development build says so on the dock and in the tab strip, before anybody opens it.
+//
+// The same drawing on a light ground rather than a badge or a different mark: what has to be
+// obvious is which of two icons is which, and that reads at sixteen pixels where a corner
+// ornament does not. It also survives being the only Prism somebody has open.
+//
+// Worth having because both lines are installed on the same machines here, and a bug reported
+// against the wrong one costs an afternoon.
+config.bundle.icon =
+  channel === 'production'
+    ? ['icons/icon.png', 'icons/icon.ico', 'icons/icon.icns']
+    : ['icons/dev/icon.png', 'icons/dev/icon.ico', 'icons/dev/icon.icns'];
+
 writeFileSync(CONFIG, `${JSON.stringify(config, null, 2)}\n`);
 
 // Printed as `key=value` lines so a workflow can read them straight into its own environment.
