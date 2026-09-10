@@ -103,6 +103,19 @@ pub fn request_permission(
     Ok(look(controlling))
 }
 
+/// Starts Prism again, for a grant the system will not report until it does.
+///
+/// Screen recording is read once per process on macOS: a grant given while the application is
+/// running is a grant it goes on saying it does not have. Nothing in a window can work around
+/// that, so this exists to do the one thing that does.
+///
+/// Does not return when it works. A caller reaches the line after it only where the platform
+/// refused, which is why it is not `-> !`.
+#[tauri::command]
+pub fn restart(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// Returns whether the session will accept the client's input.
 ///
 /// # Errors

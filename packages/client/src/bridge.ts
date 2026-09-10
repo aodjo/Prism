@@ -166,6 +166,8 @@ export function installBridge(): void {
     requestPermission: (id: string): Promise<HostPermissions> =>
       call<HostPermissions>('request_permission', { id }),
 
+    restart: (): Promise<null> => call<null>('restart'),
+
     startSharing: async (): Promise<HostSnapshot> => revive(await call<RawSnapshot>('start_sharing')),
 
     stopSharing: (): Promise<null> => call<null>('stop_sharing'),

@@ -246,6 +246,14 @@ function Setup(): JSX.Element {
   const [version, setVersion] = useState('');
   const [settings, setSettings] = useState<Settings | null>(null);
   const [held, setHeld] = useState<HostPermissions | null>(null);
+  /**
+   * The grants this run has already asked for.
+   *
+   * A row that has been asked for and is still not held has nothing left to ask: the system
+   * prompts once in the life of an application, and afterwards the button would only reopen the
+   * pane holding an answer somebody has already given.
+   */
+  const [asked, setAsked] = useState<ReadonlySet<string>>(new Set());
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -349,13 +357,45 @@ function Setup(): JSX.Element {
       return;
     }
 
-    void (async () => {
+    /**
+     * Reads what the system allows now.
+     *
+     * @returns {Promise<void>}
+     */
+    const read = async (): Promise<void> => {
       try {
         setHeld(await prism.permissions());
       } catch {
         setHeld({ screen: false, input: false, missing: [] });
       }
-    })();
+    };
+
+    void read();
+
+    // Again whenever this window comes back. Allowing something happens in System Settings,
+    // which means it happens while this window is not the one being looked at — and a row that
+    // still says Allow after somebody has just allowed it is the interface disagreeing with
+    // what they did.
+    //
+    // Both events, because they are not the same moment: a window raised over another fires
+    // focus and nothing else, and one uncovered without being raised fires only the other.
+    const again = (): void => {
+      void read();
+    };
+
+    const uncovered = (): void => {
+      if (!document.hidden) {
+        void read();
+      }
+    };
+
+    window.addEventListener('focus', again);
+    document.addEventListener('visibilitychange', uncovered);
+
+    return () => {
+      window.removeEventListener('focus', again);
+      document.removeEventListener('visibilitychange', uncovered);
+    };
   }, [step]);
 
   /**
@@ -835,6 +875,24 @@ function Setup(): JSX.Element {
                       <span className="text-fine">✓</span>
                       <span>Granted</span>
                     </span>
+                  ) : grant.id === 'screen' && asked.has(grant.id) ? (
+                    // Screen recording only. It is the grant the system reads once for the
+                    // life of a process, so one given a moment ago is one this run will go
+                    // on calling missing however many times it is asked — and the way to a
+                    // machine that can be shared is through starting this one again.
+                    //
+                    // Not the others. Accessibility is read afresh every time, so allowing it
+                    // shows up in the check this window makes when it comes back, and a row
+                    // offering to restart for it would be advice that fixes nothing.
+                    <button
+                      type="button"
+                      className="btn-secondary no-drag"
+                      onClick={() => {
+                        void prism.restart();
+                      }}
+                    >
+                      Restart PRISM
+                    </button>
                   ) : (
                     <button
                       type="button"
@@ -847,6 +905,7 @@ function Setup(): JSX.Element {
                             // Redrawn either way. The system may have granted it, refused
                             // it, or opened its own settings pane — and only the check
                             // afterwards says which.
+                            setAsked((was) => new Set(was).add(grant.id));
                             setHeld(await prism.permissions());
                           }
                         })();
