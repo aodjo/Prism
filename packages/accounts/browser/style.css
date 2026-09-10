@@ -273,12 +273,27 @@ button:disabled {
 }
 
 .live {
+  position: relative;
   display: flex;
   align-items: center;
   padding: 4px;
   border: 1px solid var(--line-2);
   border-radius: var(--radius-pill);
   background: var(--wash-1);
+}
+
+/* A reading that has more to say. The strip is a row of numbers and only some of them open,
+   so the cursor is what tells them apart before anybody hovers one. */
+.live-item.asks {
+  border-radius: var(--radius-pill);
+  cursor: help;
+  outline: none;
+  transition: background 120ms ease;
+}
+
+.live-item.asks:hover,
+.live-item.asks:focus-visible {
+  background: var(--wash-3);
 }
 
 .live-item {
@@ -873,6 +888,67 @@ button:disabled {
   font-size: 12px;
   color: var(--ink-2);
   text-align: right;
+}
+
+/* The card the status strip opens. Wider than the map's, because its rows are sentences in
+   Korean rather than a place name and a number. */
+.detail {
+  width: 296px;
+}
+
+.detail-head {
+  display: grid;
+  gap: 6px;
+}
+
+.detail-head b {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.detail-head span {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-2);
+}
+
+.detail-part {
+  display: grid;
+  gap: 11px;
+  margin-top: 15px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-2);
+}
+
+.detail-heading {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.meter {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 7px 16px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.meter-label {
+  font-size: 12px;
+  color: var(--muted-2);
+}
+
+.meter-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  text-align: right;
+}
+
+.gauge.wide {
+  grid-column: 1 / -1;
+  width: auto;
 }
 
 .chips {
