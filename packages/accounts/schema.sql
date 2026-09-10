@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS devices (
   public_key TEXT NOT NULL,
   label      TEXT NOT NULL,
   added_unix INTEGER NOT NULL,
+  -- Until when this machine is shared, as a Unix time, or zero when it is not.
+  --
+  -- A time rather than a flag, because a machine that stops being shared by crashing, losing
+  -- its network or being put to sleep never gets to say so. It says it is shared every half
+  -- minute while it is, and one that stops saying so drops off the others' lists on its own.
+  shared_until INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (email, public_key)
 );
 

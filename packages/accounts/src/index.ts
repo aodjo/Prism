@@ -78,6 +78,15 @@ const SESSION_SECONDS = 30 * 24 * 60 * 60;
 /** How long an emailed signup code is good for. */
 const CHALLENGE_SECONDS = 15 * 60;
 
+/**
+ * How long a machine saying it is shared is believed.
+ *
+ * A shared machine says so every thirty seconds, so this is two missed in a row. A machine that
+ * crashed or lost its network stops being offered to the others a minute and a half later, and a
+ * single lost announcement does not make one flicker off a list.
+ */
+const SHARED_SECONDS = 90;
+
 /** How many bytes a session token is made of. */
 const TOKEN_BYTES = 32;
 
@@ -176,16 +185,31 @@ function looksLikeEmail(email: string): boolean {
 interface Device {
   readonly public_key: string;
   readonly label: string;
+  /** Whether it is shared right now, which is what puts it on the others' home screens. */
+  readonly shared: boolean;
 }
 
-/** Reads an account's machines, oldest first. */
+/**
+ * Reads an account's machines, oldest first.
+ *
+ * @param {Env} env - The bindings.
+ * @param {string} email - The account.
+ * @returns {Promise<Device[]>} Every machine on it, each saying whether it is shared right now.
+ */
 async function devicesOf(env: Env, email: string): Promise<Device[]> {
   const { results } = await env.prism_accounts
-    .prepare('SELECT public_key, label FROM devices WHERE email = ? ORDER BY added_unix')
-    .bind(email)
-    .all<Device>();
+    .prepare(
+      'SELECT public_key, label, shared_until > ? AS shared FROM devices WHERE email = ? ' +
+        'ORDER BY added_unix',
+    )
+    .bind(nowUnix(), email)
+    .all<{ public_key: string; label: string; shared: number }>();
 
-  return results ?? [];
+  return (results ?? []).map((row) => ({
+    public_key: row.public_key,
+    label: row.label,
+    shared: row.shared === 1,
+  }));
 }
 
 /**
@@ -1529,6 +1553,39 @@ export default {
           .run();
 
         return json({ devices: await devicesOf(env, signedIn) });
+      }
+
+      // A machine saying whether it is shared. Said again every thirty seconds while it is, and
+      // believed for SHARED_SECONDS, so one that goes away without a word drops off on its own.
+      if (path.startsWith('/v1/devices/') && path.endsWith('/sharing') && method === 'PUT') {
+        if (!signedIn) {
+          return fail(401, REFUSED);
+        }
+
+        const key = decodeURIComponent(
+          path.slice('/v1/devices/'.length, -'/sharing'.length),
+        ).toLowerCase();
+
+        if (unhex(key)?.length !== 32) {
+          return malformed('public key');
+        }
+
+        const sent = await body<{ shared?: boolean }>();
+
+        if (typeof sent?.shared !== 'boolean') {
+          return malformed('sharing state');
+        }
+
+        const written = await env.prism_accounts
+          .prepare('UPDATE devices SET shared_until = ? WHERE email = ? AND public_key = ?')
+          .bind(sent.shared ? nowUnix() + SHARED_SECONDS : 0, signedIn, key)
+          .run();
+
+        if (!written.meta.changes) {
+          return fail(404, 'That machine is not on this account.');
+        }
+
+        return json({ ok: true });
       }
 
       if (path.startsWith('/v1/devices/') && method === 'DELETE') {
