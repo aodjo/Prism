@@ -8,14 +8,23 @@
  *
  * The type scale is not shared. This page is in Korean and the applications are in English, and
  * Hangul at ten pixels with the tracking small Latin capitals want is a row of grey smudges.
+ * Nor is the typeface: Pretendard is drawn for Hangul beside Latin at the same optical size,
+ * which is what every line on this page is.
  */
 
+/*
+ * Pretendard, served from this origin because the policy above names no other one.
+ *
+ * The variable cut rather than six static weights: two megabytes once, cached for a year, and
+ * every weight this page uses comes out of it. `LICENSE.txt` beside this file is the SIL Open
+ * Font License it is under.
+ */
 @font-face {
-  font-family: 'IBM Plex Sans KR';
+  font-family: 'Pretendard';
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 45 920;
   font-display: swap;
-  src: local('IBM Plex Sans KR');
+  src: url('/admin/pretendard.woff2') format('woff2-variations');
 }
 
 :root {
@@ -53,10 +62,54 @@
   --radius-tile: 10px;
   --radius-field: 10px;
 
-  --sans: 'IBM Plex Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+  --sans: 'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
   --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
   color-scheme: dark;
+}
+
+/*
+ * The same page with the ground turned over.
+ *
+ * Only the tokens are redefined — nothing below this line knows which way round it is, which is
+ * what stops the two from drifting into two designs. `theme.js` stamps the attribute in the head
+ * from what was last chosen, or from the system when nothing was.
+ *
+ * The accents are not the same values. Mint at `#4de8b0` is a fine green on near-black and an
+ * illegible one on white, so each of the four is the colour that reads on this ground rather
+ * than the colour that was used on the other.
+ */
+:root[data-theme='light'] {
+  --base: #ffffff;
+  --sunk: #f7f7f9;
+
+  --wash-1: rgba(11, 11, 16, 0.028);
+  --wash-2: rgba(11, 11, 16, 0.04);
+  --wash-3: rgba(11, 11, 16, 0.052);
+  --wash-4: rgba(11, 11, 16, 0.075);
+
+  --line-1: rgba(11, 11, 16, 0.07);
+  --line-2: rgba(11, 11, 16, 0.09);
+  --line-4: rgba(11, 11, 16, 0.13);
+
+  --ink: #0b0b10;
+  --ink-2: #23232c;
+  --ink-3: #3a3a46;
+  --muted: #55555f;
+  --muted-2: #6c6c78;
+  --dim: #8a8a96;
+  --dim-2: #a6a6b0;
+
+  --violet: #5b3ce0;
+  --mint: #0f9a68;
+  --amber: #a76a09;
+  --danger: #d92d3f;
+  --danger-ink: #c02133;
+
+  --light: #16161c;
+  --on-light: #f6f6f8;
+
+  color-scheme: light;
 }
 
 * {
@@ -450,9 +503,12 @@ button:disabled {
   color: var(--on-light);
 }
 
+/* A token rather than white, because on a light ground this button is dark and hovering it to
+   white would be white text on white. `--ink` is the far end of the scale whichever way round
+   the page is, which is what "more of the same" means here. */
 .pill.primary:hover:not(:disabled) {
-  background: #fff;
-  border-color: #fff;
+  background: var(--ink);
+  border-color: var(--ink);
 }
 
 .pill.primary:disabled {
@@ -1280,4 +1336,315 @@ button:disabled {
   .nav {
     width: auto;
   }
+}
+
+
+/* ── Development builds ───────────────────────────────────────────────────── */
+
+/* Capped at the width the map already uses, which is what stops a list of four files from
+   being drawn across two thousand pixels with a canyon between the name and the size. */
+.explorer {
+  display: grid;
+  grid-template-columns: 268px minmax(0, 1fr);
+  width: 100%;
+  max-width: 1080px;
+  min-height: 340px;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-card);
+  background: var(--wash-1);
+}
+
+.explorer-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 8px;
+  border-right: 1px solid var(--line-2);
+  background: var(--sunk);
+  overflow-y: auto;
+}
+
+/* The two heads sit at the same height and carry the same rule under them, so the panes read as
+   one table split down the middle rather than two lists that happen to be side by side. */
+.explorer-tree-head,
+.explorer-head {
+  display: flex;
+  align-items: center;
+  height: 42px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.explorer-tree-head {
+  padding: 0 10px;
+}
+
+.explorer-folder {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: var(--radius-tile);
+  color: var(--muted-2);
+  text-align: left;
+}
+
+.explorer-folder:hover {
+  background: var(--wash-1);
+}
+
+.explorer-folder.is-open {
+  background: var(--wash-3);
+}
+
+.explorer-folder-what {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+/* The version, which is the only part of a row that has to be readable at a glance, and the
+   only part that can be long. So it is the part that gives way. */
+.explorer-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer-folder.is-open .explorer-name {
+  color: var(--ink);
+}
+
+.tag-now {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(77, 232, 176, 0.14);
+  color: var(--mint);
+  font-size: 11px;
+}
+
+.explorer-files {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0 10px 10px;
+  overflow-y: auto;
+}
+
+/* One grid for the head and every row, so a size and an age line up under the words naming
+   them instead of wherever the text before them happened to end. */
+.explorer-head,
+.explorer-file {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 84px 82px 76px 72px;
+  align-items: center;
+  gap: 14px;
+}
+
+.explorer-head {
+  padding: 0 6px;
+}
+
+.explorer-file {
+  padding: 11px 6px;
+  border-radius: var(--radius-tile);
+}
+
+/* A rule between files rather than around each one. What separates two rows here is that they
+   are two files; a box around each would say they are two things of different kinds. */
+.explorer-file + .explorer-file {
+  border-top: 1px solid var(--line-1);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.explorer-file:hover {
+  background: var(--wash-1);
+}
+
+.explorer-glyph {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-tile);
+  background: var(--wash-3);
+}
+
+.explorer-glyph.small {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: none;
+}
+
+.explorer-what {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.explorer-what > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Numbers under the words that name them, which means right-aligned: a column of figures is
+   read down its last digit, not its first. */
+.explorer-head > .label:nth-child(4),
+.explorer-head > .label:nth-child(5),
+.explorer-figure {
+  text-align: right;
+}
+
+.explorer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+/* Shown only on the row being pointed at. Two of these on every row, always visible, would make
+   a list of four builds look like a list of twelve controls. */
+.icon-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-tile);
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease;
+}
+
+.explorer-file:hover .icon-button,
+.icon-button:focus-visible {
+  opacity: 1;
+}
+
+.icon-button:hover {
+  background: var(--wash-4);
+}
+
+/* Where a build came from. Two words rather than a colour, because "GitHub" and "직접 올림" are
+   the whole of what somebody needs and a legend for two dots is not. */
+.explorer-source {
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--wash-3);
+  color: var(--muted-2);
+  font-size: 11.5px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.explorer-source.is-github {
+  background: none;
+  color: var(--dim);
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────────────────── */
+
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  margin-bottom: 18px;
+  padding: 3px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+}
+
+.tab {
+  padding: 6px 16px;
+  border-radius: var(--radius-pill);
+  color: var(--muted-2);
+  font-size: 13px;
+}
+
+.tab:hover {
+  color: var(--ink-3);
+}
+
+.tab.is-open {
+  background: var(--wash-4);
+  color: var(--ink);
+}
+
+/* Icons take the colour of what holds them, so a theme change reaches them without any of these
+   call sites naming a value. */
+.explorer-glyph,
+.icon-button {
+  color: var(--muted-2);
+}
+
+.icon-button.is-danger {
+  color: var(--danger-ink);
+}
+
+/* The name a file actually has, which is the one thing on the row that is not prose. */
+.explorer-file-name {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+/* The dotted land behind the markers, which is a drawing rather than a photograph and so takes
+   the theme like everything else. */
+.map {
+  color: var(--line-4);
+}
+
+/* The controls that belong to the window rather than to what is in it. */
+.chrome-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+  color: var(--muted-2);
+}
+
+.chrome-button:hover {
+  background: var(--wash-2);
+  color: var(--ink-3);
+}
+
+.statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.operator .icon {
+  color: var(--muted-2);
+}
+
+/* The code both screens show. Large and monospaced because its only job is to be compared with
+   another one across the desk, and two of these differing by a character have to look different
+   at a glance. */
+.publish-code {
+  margin: 20px 0 4px;
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: 4px;
+  text-align: center;
+  color: var(--ink);
 }

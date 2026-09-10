@@ -21,7 +21,7 @@
 // The dashboard, served from this Worker rather than deployed beside it: an operator's tool
 // that ships separately is one that drifts from the thing it operates, and the page and the
 // API would then be able to disagree about what an account is.
-import { APP, CSS, HTML, UI, WASM } from './dashboard.js';
+import { APP, CSS, HTML, THEME, UI, WASM } from './dashboard.js';
 import {
   base32,
   hex,
@@ -39,6 +39,14 @@ import {
 export interface Env {
   /** The account store. */
   readonly prism_accounts: D1Database;
+  /**
+   * Where a development build's bundle is kept.
+   *
+   * Only the line between releases. A released version is an artifact on a GitHub release and
+   * stays there — this is for the builds that exist because somebody fixed something ten minutes
+   * ago on the machine in front of them.
+   */
+  readonly prism_builds: R2Bucket;
   /** Where signed-in machines should look for signalling, as `host:port`. */
   readonly PRISM_ADVERTISE?: string;
   /** The mail provider's key. Without it an address is only ever a name here. */
@@ -72,6 +80,26 @@ const CHALLENGE_SECONDS = 15 * 60;
 
 /** How many bytes a session token is made of. */
 const TOKEN_BYTES = 32;
+
+/**
+ * How long a terminal's request to publish stays answerable.
+ *
+ * Ten minutes, which is somebody walking to another window and reading a code. Longer would be a
+ * code left on a screen for an afternoon; shorter would expire while a build was still running.
+ */
+const PUBLISH_GRANT_SECONDS = 10 * 60;
+
+/**
+ * How long the session a publish grant opens is good for.
+ *
+ * An hour, which is a run of builds rather than one. Approving in a browser is cheap but it is
+ * not free, and somebody fixing one thing publishes four times before they are done — asking
+ * again between each is asking about a decision they have already made.
+ *
+ * It is an ordinary session, so it can be ended from the dashboard like any other, which is
+ * faster than any expiry.
+ */
+const PUBLISH_SESSION_SECONDS = 60 * 60;
 
 /** How many bytes the second factor's shared secret is. */
 const TOTP_BYTES = 20;
@@ -204,7 +232,7 @@ async function decoy(env: Env): Promise<Uint8Array> {
 const DASHBOARD_POLICY =
   "default-src 'none'; script-src 'self' 'wasm-unsafe-eval';" +
   " style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:;" +
-  " form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
+  " font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 /**
  * The dashboard's files, by the path a browser asks for them at.
@@ -223,6 +251,7 @@ const DASHBOARD: Record<string, { body: string | ArrayBuffer; type: string }> = 
   '/admin/style.css': { body: CSS, type: 'text/css; charset=utf-8' },
   '/admin/app.js': { body: APP, type: 'text/javascript; charset=utf-8' },
   '/admin/ui.js': { body: UI, type: 'text/javascript; charset=utf-8' },
+  '/admin/theme.js': { body: THEME, type: 'text/javascript; charset=utf-8' },
   '/admin/argon2.wasm': { body: WASM, type: 'application/wasm' },
 };
 
@@ -232,7 +261,31 @@ const DASHBOARD: Record<string, { body: string | ArrayBuffer; type: string }> = 
  * @param {string} path - What was asked for.
  * @returns {Response} The file, or a refusal.
  */
-function dashboard(path: string): Response {
+async function dashboard(path: string, env: Env): Promise<Response> {
+  // The typeface, which is two megabytes and therefore not in the module. Everything else this
+  // page needs is carried in the Worker's own script; a font that size would be most of what a
+  // deployment is, uploaded again on every change to a line of CSS.
+  //
+  // Served from here rather than from a CDN because the content policy this page is under names
+  // no other origin, and naming one to get a font would be naming one for everything.
+  if (path === '/admin/pretendard.woff2') {
+    const object = await env.prism_builds.get('assets/pretendard.woff2');
+
+    if (!object) {
+      return fail(404, 'There is nothing at that address.');
+    }
+
+    return new Response(object.body, {
+      headers: {
+        'content-type': 'font/woff2',
+        'content-length': String(object.size),
+        // A version of a typeface is never rewritten, and this one is asked for on every first
+        // visit. Cached for a year, which is the longest anything is allowed to claim.
+        'cache-control': 'public, max-age=31536000, immutable',
+      },
+    });
+  }
+
   const file = DASHBOARD[path];
 
   if (!file) {
@@ -280,25 +333,27 @@ async function update(env: Env, path: string, channel: string): Promise<Response
     return malformed('update path');
   }
 
-  const answer = await fetch(`${RELEASES}?per_page=30`, {
-    headers: { 'user-agent': 'prism-accounts', accept: 'application/vnd.github+json' },
-    // Releases change when one is cut and not otherwise, so asking GitHub on every launch of
-    // every machine would be spending somebody's rate limit on an answer that did not move.
-    cf: { cacheTtl: 300, cacheEverything: true },
-  }).catch(() => null);
+  // Three lines, and each is served from exactly one place.
+  //
+  // `local` is this store and nothing else: what somebody built on the machine in front of them
+  // and put here, available the moment it finished rather than when a build farm has made the
+  // same thing again on five runners. Nothing follows it by default — a machine has to be asked
+  // to, which is the whole safety of it, because a build from a working tree may contain
+  // anything and was never compiled for the other four platforms.
+  //
+  // `development` and `production` are GitHub's: a release is a tag, a set of artifacts and a
+  // page somebody can read, and none of that is worth reimplementing.
+  if (channel === 'local') {
+    const built = await publishedBuild(env, target, arch, running);
 
-  if (!answer?.ok) {
-    return new Response(null, { status: 204 });
+    return built ? json(built) : new Response(null, { status: 204 });
   }
 
-  const releases = (await answer.json().catch(() => [])) as {
-    tag_name: string;
-    body: string | null;
-    published_at: string;
-    draft: boolean;
-    prerelease: boolean;
-    assets: { name: string; browser_download_url: string }[];
-  }[];
+  const releases = await published();
+
+  if (releases === null) {
+    return new Response(null, { status: 204 });
+  }
 
   // A development build is a prerelease of the version being worked toward, so the two lines
   // are the same list read with different eyes: production takes releases, development takes
@@ -338,6 +393,188 @@ async function update(env: Env, path: string, channel: string): Promise<Response
     url: found.url,
     signature,
   });
+}
+
+/** One release as GitHub describes it, in the fields anything here reads. */
+interface Release {
+  tag_name: string;
+  body: string | null;
+  published_at: string;
+  draft: boolean;
+  prerelease: boolean;
+  assets: { name: string; browser_download_url: string; size: number }[];
+}
+
+/**
+ * Every release this repository has, newest first.
+ *
+ * Cached, because releases change when one is cut and not otherwise: asking GitHub on every
+ * launch of every machine would spend somebody's rate limit on an answer that did not move.
+ *
+ * @async
+ * @returns {Promise<Release[] | null>} The releases, or null if GitHub could not be reached.
+ */
+async function published(): Promise<Release[] | null> {
+  const answer = await fetch(`${RELEASES}?per_page=30`, {
+    headers: { 'user-agent': 'prism-accounts', accept: 'application/vnd.github+json' },
+    cf: { cacheTtl: 300, cacheEverything: true },
+  }).catch(() => null);
+
+  if (!answer?.ok) {
+    return null;
+  }
+
+  return (await answer.json().catch(() => [])) as Release[];
+}
+
+/** Every platform the update endpoint knows how to answer for. */
+const PLATFORM_PAIRS: readonly (readonly [string, string])[] = [
+  ['darwin', 'aarch64'],
+  ['darwin', 'x86_64'],
+  ['windows', 'x86_64'],
+  ['windows', 'aarch64'],
+  ['linux', 'x86_64'],
+  ['linux', 'aarch64'],
+];
+
+/**
+ * What GitHub is carrying for one line, in the shape the dashboard's list uses.
+ *
+ * Found through the same `assetFor` the updater goes through rather than by taking a file name
+ * apart, so a list that shows a build is a list of builds a machine could actually be given. An
+ * artifact whose signature is missing is not offered by the updater and is not shown here.
+ *
+ * @async
+ * @param {boolean} prerelease - Development when true, released when false.
+ * @returns {Promise<object[]>} One entry per platform per release.
+ */
+async function releasedBuilds(prerelease: boolean): Promise<Record<string, unknown>[]> {
+  const releases = (await published()) ?? [];
+  const found: Record<string, unknown>[] = [];
+
+  for (const release of releases) {
+    if (release.draft || release.prerelease !== prerelease) {
+      continue;
+    }
+
+    for (const [target, arch] of PLATFORM_PAIRS) {
+      const asset = assetFor(release.assets, target, arch);
+
+      if (!asset) {
+        continue;
+      }
+
+      found.push({
+        version: release.tag_name.replace(/^v/u, ''),
+        target,
+        arch,
+        notes: (release.body ?? '').split('\n')[0] ?? '',
+        filename: asset.filename,
+        bytes: asset.bytes,
+        uploaded_unix: Math.floor(new Date(release.published_at).getTime() / 1000),
+        published_by: 'GitHub',
+        url: asset.url,
+        source: 'github',
+      });
+    }
+  }
+
+  return found;
+}
+
+/**
+ * What a build file is, and what to call it, for a browser being handed one.
+ *
+ * Worked out when it is stored rather than when it is served, and kept on the object: the name
+ * is what the bundler called it and the type follows from that name, and neither is knowable
+ * from the key it is filed under.
+ *
+ * Without this a disk image goes out labelled as a gzip, and a browser saves what it is told —
+ * so an installer arrives as `installer.gz` and does not open.
+ *
+ * @param {string} filename - What the bundler called it.
+ * @returns {{contentType: string, contentDisposition: string}} What to store on the object.
+ */
+function fileMetadata(filename: string): {
+  contentType: string;
+  contentDisposition: string;
+} {
+  const types: Record<string, string> = {
+    '.dmg': 'application/x-apple-diskimage',
+    '.tar.gz': 'application/gzip',
+    '.exe': 'application/vnd.microsoft.portable-executable',
+    '.appimage': 'application/octet-stream',
+    '.zip': 'application/zip',
+  };
+
+  const lower = filename.toLowerCase();
+  const found = Object.keys(types).find((end) => lower.endsWith(end));
+
+  return {
+    contentType: found ? (types[found] as string) : 'application/octet-stream',
+    // Quoted, and only ever a name this server wrote down. A header built out of something a
+    // caller chose is a header a caller can put a newline in.
+    contentDisposition: `attachment; filename="${filename.replace(/[^\w.\-+]/gu, '_')}"`,
+  };
+}
+
+/**
+ * Where a build's bundle lives in the bucket.
+ *
+ * Named for what it is rather than given an opaque key, so that a listing of the bucket reads
+ * the same as a listing of the table and neither has to be consulted to understand the other.
+ *
+ * @param {string} version - What the build calls itself.
+ * @param {string} target - `darwin`, `windows` or `linux`.
+ * @param {string} arch - `aarch64` or `x86_64`.
+ * @returns {string} The object key.
+ */
+function buildKey(version: string, target: string, arch: string): string {
+  return `builds/${version}/${target}-${arch}`;
+}
+
+/**
+ * The newest published development build for a platform, when it is newer than what is running.
+ *
+ * @async
+ * @param {Env} env - The runtime.
+ * @param {string} target - The target the updater asked about.
+ * @param {string} arch - The architecture it asked about.
+ * @param {string} running - The version asking.
+ * @returns {Promise<object | null>} What the updater expects, or null when there is nothing newer.
+ */
+async function publishedBuild(
+  env: Env,
+  target: string,
+  arch: string,
+  running: string,
+): Promise<Record<string, string> | null> {
+  // Ordered by when it was published rather than by version, because a version is a string to
+  // SQLite and `dev.9` sorts above `dev.10`. The comparison that matters is done below, in
+  // JavaScript, by the same function the released line is ordered with.
+  const rows = await env.prism_accounts
+    .prepare(
+      'SELECT version, signature, notes, uploaded_unix FROM builds' +
+        ' WHERE target = ? AND arch = ? ORDER BY uploaded_unix DESC LIMIT 20',
+    )
+    .bind(target, arch)
+    .all<{ version: string; signature: string; notes: string; uploaded_unix: number }>();
+
+  const newest = (rows.results ?? []).sort((left, right) =>
+    compareVersions(right.version, left.version),
+  )[0];
+
+  if (!newest || compareVersions(newest.version, running) <= 0) {
+    return null;
+  }
+
+  return {
+    version: newest.version,
+    notes: newest.notes,
+    pub_date: new Date(newest.uploaded_unix * 1000).toISOString(),
+    url: `https://accounts.presm.kr/v1/builds/${newest.version}/${target}/${arch}`,
+    signature: newest.signature,
+  };
 }
 
 /**
@@ -409,10 +646,10 @@ const UPDATABLE: Record<string, string> = {
  * @returns {{url: string, signatureUrl: string} | null} Where each of the two is, or null.
  */
 function assetFor(
-  assets: { name: string; browser_download_url: string }[],
+  assets: { name: string; browser_download_url: string; size: number }[],
   target: string,
   arch: string,
-): { url: string; signatureUrl: string } | null {
+): { url: string; signatureUrl: string; bytes: number; filename: string } | null {
   const os = PLATFORMS[target];
   const machine = PLATFORMS[arch];
   const extension = UPDATABLE[target];
@@ -433,7 +670,12 @@ function assetFor(
   const signature = assets.find((asset) => asset.name === `${wanted.name}.sig`);
 
   return signature
-    ? { url: wanted.browser_download_url, signatureUrl: signature.browser_download_url }
+    ? {
+        url: wanted.browser_download_url,
+        signatureUrl: signature.browser_download_url,
+        bytes: wanted.size,
+        filename: wanted.name,
+      }
     : null;
 }
 
@@ -1330,6 +1572,211 @@ export default {
         // What the strip along the top is: the few numbers an operator would otherwise open a
         // terminal for. Every one of them is measured here rather than remembered, so a stale
         // answer is not possible — only a slow one.
+        // What a terminal is waiting to be allowed to do, so the dashboard can show it.
+        if (path.startsWith('/v1/admin/publish/') && method === 'GET') {
+          const wanted = decodeURIComponent(path.slice('/v1/admin/publish/'.length));
+          const grant = await env.prism_accounts
+            .prepare(
+              'SELECT user_code, asked_for, expires_unix, email FROM publish_grants' +
+                ' WHERE user_code = ? AND expires_unix > ?',
+            )
+            .bind(wanted.toUpperCase(), nowUnix())
+            .first();
+
+          return grant ? json(grant) : fail(404, 'That request is no longer waiting.');
+        }
+
+        // Saying yes. Which account said so is written down rather than merely checked, because
+        // the session this opens belongs to them and every build published through it is theirs.
+        if (path.startsWith('/v1/admin/publish/') && method === 'POST') {
+          const wanted = decodeURIComponent(path.slice('/v1/admin/publish/'.length)).toUpperCase();
+          const done = await env.prism_accounts
+            .prepare(
+              'UPDATE publish_grants SET email = ? WHERE user_code = ? AND expires_unix > ?' +
+                " AND email = ''",
+            )
+            .bind(acting, wanted, nowUnix())
+            .run();
+
+          if (!done.meta.changes) {
+            return fail(404, 'That request is no longer waiting.');
+          }
+
+          await record(env, acting, 'publish.allow', wanted);
+
+          return json({ ok: true });
+        }
+
+        // Saying no, which is the grant ceasing to exist. The terminal's next poll finds nothing
+        // and says it was refused, which is what happened.
+        if (path.startsWith('/v1/admin/publish/') && method === 'DELETE') {
+          const wanted = decodeURIComponent(path.slice('/v1/admin/publish/'.length)).toUpperCase();
+
+          await env.prism_accounts
+            .prepare('DELETE FROM publish_grants WHERE user_code = ?')
+            .bind(wanted)
+            .run();
+
+          await record(env, acting, 'publish.refuse', wanted);
+
+          return json({ ok: true });
+        }
+
+        // Everything on one line, newest first, wherever it came from.
+        //
+        // Both sources, because both are real: a machine following the development line is
+        // offered whichever of the two is newer, so a page showing only one of them would be
+        // showing half of what its readers are running.
+        //
+        // The published half comes from the table rather than from listing the bucket. The
+        // bucket holds bytes; what a build *is* — which version, which platform, who put it
+        // there and when — is here, and a listing that read the objects would have to guess all
+        // of it back out of a key.
+        if (path === '/v1/admin/builds' && method === 'GET') {
+          const asked = url.searchParams.get('channel') ?? 'development';
+          const line = asked === 'production' || asked === 'local' ? asked : 'development';
+
+          // Each line from where that line is actually served, so this page and a machine asking
+          // for an update are reading the same thing. A list assembled some other way would be a
+          // second answer to the question the updater already answers.
+          if (line === 'local') {
+            const { results } = await env.prism_accounts
+              .prepare(
+                'SELECT version, target, arch, notes, filename, bytes, uploaded_unix,' +
+                  ' published_by, installer_filename, installer_bytes FROM builds' +
+                  ' ORDER BY uploaded_unix DESC LIMIT 500',
+              )
+              .all<Record<string, string | number>>();
+
+            // One entry per file rather than per build, because the page is a list of files and
+            // a version on macOS holds two of them: the archive the updater fetches and the
+            // disk image a person opens.
+            const files = (results ?? []).flatMap((row) => [
+              { ...row, source: 'server', kind: 'update' },
+              ...(row.installer_filename
+                ? [
+                    {
+                      ...row,
+                      source: 'server',
+                      kind: 'installer',
+                      filename: row.installer_filename,
+                      bytes: row.installer_bytes,
+                    },
+                  ]
+                : []),
+            ]);
+
+            return json({ builds: files });
+          }
+
+          return json({ builds: await releasedBuilds(line === 'development') });
+        }
+
+        // Taking one off the line.
+        //
+        // The object first and the row second, in that order for the same reason publishing does
+        // them the other way round: what must never exist is a row promising a bundle that is
+        // gone. A few orphaned megabytes are the harmless failure.
+        if (path.startsWith('/v1/admin/builds/') && method === 'DELETE') {
+          const [version = '', target = '', arch = ''] = path
+            .slice('/v1/admin/builds/'.length)
+            .split('/');
+
+          if (!version || !target || !arch) {
+            return malformed('build path');
+          }
+
+          await env.prism_builds.delete(buildKey(version, target, arch));
+          await env.prism_accounts
+            .prepare('DELETE FROM builds WHERE version = ? AND target = ? AND arch = ?')
+            .bind(version, target, arch)
+            .run();
+
+          await record(env, acting, 'build.withdraw', `${version} ${target}/${arch}`);
+
+          return json({ ok: true });
+        }
+
+        // Publishing a development build: the bundle as the body, the signature as a header.
+        //
+        // Behind the operator gate, which is where it belongs — this is the one call on this
+        // server that decides what every machine on the development line will download and run.
+        // The bundle is signed and the updater checks that signature, so a stranger who got
+        // here could not make a machine run their code; they could make every machine on that
+        // line download eight megabytes of nothing, repeatedly, which is enough reason.
+        if (path.startsWith('/v1/admin/builds/') && method === 'PUT') {
+          const [version = '', target = '', arch = '', kind = ''] = path
+            .slice('/v1/admin/builds/'.length)
+            .split('/');
+
+          if (!version || !target || !arch) {
+            return malformed('build path');
+          }
+
+          const body = await request.arrayBuffer();
+
+          if (body.byteLength === 0) {
+            return fail(400, 'That upload was empty.');
+          }
+
+          // The file a person downloads, which on macOS is not the file the updater fetches.
+          // It carries no signature because nothing checks one: what checks a `.dmg` is
+          // Gatekeeper, against the Developer ID it was signed with before it got here.
+          if (kind === 'installer') {
+            const named = (request.headers.get('x-prism-filename') ?? '').trim();
+
+            await env.prism_builds.put(`${buildKey(version, target, arch)}.installer`, body, {
+              httpMetadata: fileMetadata(named),
+            });
+
+            await env.prism_accounts
+              .prepare(
+                'UPDATE builds SET installer_filename = ?, installer_bytes = ?' +
+                  ' WHERE version = ? AND target = ? AND arch = ?',
+              )
+              .bind(named, body.byteLength, version, target, arch)
+              .run();
+
+            return json({ version, target, arch, bytes: body.byteLength });
+          }
+
+          const signature = (request.headers.get('x-prism-signature') ?? '').trim();
+
+          if (!signature) {
+            return fail(400, 'That upload carried no signature.');
+          }
+
+          // The object first. A row pointing at a bundle that is not there is an update every
+          // machine is offered and none can download; a bundle nothing points at is a few
+          // megabytes nobody reads.
+          await env.prism_builds.put(buildKey(version, target, arch), body, {
+            httpMetadata: fileMetadata((request.headers.get('x-prism-filename') ?? '').trim()),
+          });
+
+          await env.prism_accounts
+            .prepare(
+              'INSERT OR REPLACE INTO builds' +
+                ' (version, target, arch, signature, notes, filename, bytes, uploaded_unix,' +
+                ' published_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            )
+            .bind(
+              version,
+              target,
+              arch,
+              signature,
+              (request.headers.get('x-prism-notes') ?? '').trim(),
+              (request.headers.get('x-prism-filename') ?? '').trim(),
+              body.byteLength,
+              nowUnix(),
+              acting,
+            )
+            .run();
+
+          await record(env, acting, 'build.publish', `${version} ${target}/${arch}`);
+
+          return json({ version, target, arch, bytes: body.byteLength });
+        }
+
         if (path === '/v1/admin/overview' && method === 'GET') {
           const started = Date.now();
           const counts = await env.prism_accounts
@@ -1549,8 +1996,134 @@ export default {
       // on it rather than who was allowed to ask about it. Requiring an account here would
       // mean an application that cannot update until somebody signs in, which is exactly the
       // machine most in need of one.
+      // A terminal asking to publish, and the terminal waiting for an answer. Both are open,
+      // because neither is a credential: the first hands out a code that does nothing until an
+      // operator approves it in a browser, and the second is useless without the secret half of
+      // that code. What the pair replaces is a password typed at a shell prompt.
+      if (path === '/v1/publish/request' && method === 'POST') {
+        const sent = await body<{ what?: string }>();
+        const device = hex(randomBytes(TOKEN_BYTES));
+        // Two groups of four, from an alphabet with no character that is another one in a
+        // different font. This is read aloud off one screen and compared with another.
+        const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        const user = [...randomBytes(8)]
+          .map((byte) => alphabet[byte % alphabet.length])
+          .join('')
+          .replace(/^(....)/u, '$1-');
+
+        await env.prism_accounts
+          .prepare('DELETE FROM publish_grants WHERE expires_unix <= ?')
+          .bind(nowUnix())
+          .run();
+
+        await env.prism_accounts
+          .prepare(
+            'INSERT INTO publish_grants (device_hash, user_code, asked_for, expires_unix)' +
+              ' VALUES (?, ?, ?, ?)',
+          )
+          .bind(
+            hex(await sha256(device)),
+            user,
+            (sent?.what ?? '').slice(0, 120),
+            nowUnix() + PUBLISH_GRANT_SECONDS,
+          )
+          .run();
+
+        return json({
+          device_code: device,
+          user_code: user,
+          verify_url: `https://admin.presm.kr/?publish=${encodeURIComponent(user)}`,
+          expires_in: PUBLISH_GRANT_SECONDS,
+        });
+      }
+
+      if (path === '/v1/publish/wait' && method === 'GET') {
+        const device = url.searchParams.get('device_code') ?? '';
+
+        if (!device) {
+          return malformed('device_code');
+        }
+
+        const hash = hex(await sha256(device));
+        const grant = await env.prism_accounts
+          .prepare(
+            'SELECT email, expires_unix FROM publish_grants WHERE device_hash = ? AND' +
+              ' expires_unix > ?',
+          )
+          .bind(hash, nowUnix())
+          .first<{ email: string; expires_unix: number }>();
+
+        if (!grant) {
+          return fail(404, 'That request is no longer waiting.');
+        }
+
+        if (!grant.email) {
+          return new Response(null, { status: 202 });
+        }
+
+        // Minted here rather than when it was approved, so that a token exists only in the one
+        // answer that carries it. The grant goes at the same moment: it opens one session and
+        // is then a row nothing can use.
+        const token = hex(randomBytes(TOKEN_BYTES));
+
+        await env.prism_accounts
+          .prepare('INSERT INTO sessions (token_hash, email, expires_unix) VALUES (?, ?, ?)')
+          .bind(hex(await sha256(token)), grant.email, nowUnix() + PUBLISH_SESSION_SECONDS)
+          .run();
+
+        await env.prism_accounts
+          .prepare('DELETE FROM publish_grants WHERE device_hash = ?')
+          .bind(hash)
+          .run();
+
+        return json({ token, email: grant.email });
+      }
+
       if (path.startsWith('/v1/update/') && method === 'GET') {
         return update(env, path, request.headers.get('x-prism-channel') ?? 'production');
+      }
+
+      // A published development build, fetched by the updater that was just told about it.
+      //
+      // Open, and that is not an oversight. What is behind this is a signed bundle whose
+      // signature the updater checks before a byte of it runs, and it is the same file every
+      // machine on the development line is about to download. A gate here would protect a file
+      // that is already handed to anybody who asks for an update.
+      if (path.startsWith('/v1/builds/') && method === 'GET') {
+        const [version = '', target = '', arch = '', kind = ''] = path
+          .slice('/v1/builds/'.length)
+          .split('/');
+
+        if (!version || !target || !arch) {
+          return malformed('build path');
+        }
+
+        const key = buildKey(version, target, arch);
+        const object = await env.prism_builds.get(
+          kind === 'installer' ? `${key}.installer` : key,
+        );
+
+        if (!object) {
+          return fail(404, 'There is no such build.');
+        }
+
+        const headers = new Headers({
+          'content-length': String(object.size),
+          // Immutable because it is: a version is published once and the object under it is
+          // never rewritten. Publishing again means publishing a different version.
+          'cache-control': 'public, max-age=31536000, immutable',
+        });
+
+        // What was written down when it was stored: the type it actually is, and the name the
+        // bundler gave it. A browser saves what it is told, and told nothing it invents a name
+        // out of the last part of the path.
+        object.writeHttpMetadata(headers);
+
+        if (!headers.has('content-type')) {
+          headers.set('content-type', 'application/octet-stream');
+        }
+
+        return new Response(object.body, { headers });
       }
 
       // A signalling region saying what it is doing. It sends; nothing asks it — which is what
@@ -1561,7 +2134,9 @@ export default {
 
       // The dashboard itself, which is the same API with somewhere to click.
       if (path === '/' || path === '/admin' || path.startsWith('/admin/')) {
-        return method === 'GET' ? dashboard(path) : fail(405, 'That is not a method for this.');
+        return method === 'GET'
+          ? dashboard(path, env)
+          : fail(405, 'That is not a method for this.');
       }
 
       return fail(404, 'There is nothing at that address.');

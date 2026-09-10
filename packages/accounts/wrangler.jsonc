@@ -43,6 +43,22 @@
     }
   ],
 
+  // Where a development build is kept, so that one can be published without a release being cut.
+  //
+  // The released line still comes from GitHub: a release is a tag, a set of artifacts and a page
+  // somebody can read, and none of that is worth reimplementing. This is for the line between
+  // releases, where waiting ten minutes for a build farm to hand back a bundle that was already
+  // built on the machine that made the change is the whole cost of a one-line fix.
+  //
+  // Objects rather than rows because they are eight megabytes each. D1 holds what a build is;
+  // this holds the build.
+  "r2_buckets": [
+    {
+      "binding": "prism_builds",
+      "bucket_name": "prism-builds"
+    }
+  ],
+
   // Where signed-in machines should look for signalling. The NAME, so a region added later is
   // one that existing installations start using without being updated.
   "vars": {
