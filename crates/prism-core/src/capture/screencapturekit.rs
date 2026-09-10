@@ -68,6 +68,37 @@ impl CapturedFrame {
     }
 }
 
+/// Returns how many pixels a display has, as opposed to how many points it is laid out in.
+///
+/// `SCDisplay` reports points. On a Retina display that is half the pixels in each direction,
+/// and capturing at that size sent a quarter of the picture the screen was actually showing —
+/// soft text on the far end, however large the window it arrived in. The display's current mode
+/// knows its backing size; the points are what is left when it will not say.
+fn native_pixels(display: &objc2_screen_capture_kit::SCDisplay) -> (u32, u32) {
+    // SAFETY: the display belongs to shareable content that is alive for this call, and these
+    // three getters take no arguments and return plain values.
+    let (points_wide, points_high, id) = unsafe {
+        (
+            display.width() as u32,
+            display.height() as u32,
+            display.displayID(),
+        )
+    };
+
+    let Some(mode) = objc2_core_graphics::CGDisplayCopyDisplayMode(id) else {
+        return (points_wide, points_high);
+    };
+
+    let wide = objc2_core_graphics::CGDisplayMode::pixel_width(Some(&mode)) as u32;
+    let high = objc2_core_graphics::CGDisplayMode::pixel_height(Some(&mode)) as u32;
+
+    if wide == 0 || high == 0 {
+        (points_wide, points_high)
+    } else {
+        (wide, high)
+    }
+}
+
 /// Moves an Objective-C object between threads.
 ///
 /// ScreenCaptureKit answers asynchronously on a queue of its own choosing, so the result
@@ -170,21 +201,21 @@ impl ScreenCapture {
 
         // SAFETY: the content object is alive and its display list is immutable.
         let displays = unsafe { content.displays() };
-        let display = displays.firstObject().ok_or(CaptureError::NoDisplay)?;
 
-        // SAFETY: the display belongs to the content just fetched.
-        let (native_width, native_height) =
-            unsafe { (display.width() as u32, display.height() as u32) };
-        let width = if config.width > 0 {
-            config.width
-        } else {
-            native_width
-        };
-        let height = if config.height > 0 {
-            config.height
-        } else {
-            native_height
-        };
+        // The main display, which is the one input is placed on and the one the pointer is
+        // reported against. ScreenCaptureKit lists displays in an order of its own, and on a
+        // machine with several the first of them was a portrait monitor off to one side —
+        // so the picture was one screen and the clicks landed on another.
+        let main = objc2_core_graphics::CGMainDisplayID();
+        let display = displays
+            .iter()
+            // SAFETY: each display belongs to the content just fetched.
+            .find(|one| unsafe { one.displayID() } == main)
+            .or_else(|| displays.firstObject())
+            .ok_or(CaptureError::NoDisplay)?;
+
+        let (width, height) =
+            crate::capture::fit_within(native_pixels(&display), (config.width, config.height));
 
         let empty: Retained<NSArray<_>> = NSArray::new();
         // SAFETY: the display and the empty exclusion list both outlive the call.

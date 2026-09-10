@@ -990,13 +990,18 @@ fn stream(
 ) -> Result<(), String> {
     use crate::encode::pump::{PumpConfig, Pumped, ScreenPump};
 
+    // What the client said it can show, as the negotiation settled it. Passed on rather than left
+    // at zero: zero is the display's own size, and the capture used to take that and ignore the
+    // agreement entirely — so the terms said one size and the frames were another.
+    let (width, height) = sender.agreed().map_or((0, 0), |agreed| {
+        (u32::from(agreed.width), u32::from(agreed.height))
+    });
+
     let mut pump = ScreenPump::start(PumpConfig {
         fps: config.fps,
         bitrate_bps: config.bitrate_bps,
-        // The display's own size. A window application has nobody to ask for a smaller one,
-        // and the client's offer has already capped what the negotiation agreed.
-        width: 0,
-        height: 0,
+        width,
+        height,
         codec: agreed_codec(&sender),
     })
     .map_err(|err| err.to_string())?;
