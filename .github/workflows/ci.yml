@@ -320,8 +320,13 @@ jobs:
               node scripts/version.mjs >> "$GITHUB_OUTPUT"
           fi
 
+      # Only the bundles. Without the pattern this takes *every* artifact the run produced, and
+      # `docker/build-push-action` quietly uploads a build record of its own — so the moment the
+      # image job was added, this job started trying to download something it had no use for and
+      # failed on it. Five regions deployed and no release came out.
       - uses: actions/download-artifact@v7
         with:
+          pattern: prism-*
           path: bundles
 
       # Renamed so that one look at a file says what it is:
