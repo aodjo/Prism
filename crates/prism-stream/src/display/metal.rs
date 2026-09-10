@@ -17,7 +17,7 @@ use sdl3_sys::metal::{
     SDL_Metal_CreateView, SDL_Metal_DestroyView, SDL_Metal_GetLayer, SDL_MetalView,
 };
 
-use crate::display::{HUD_FONT_SIZE, HUD_HEIGHT, HUD_WIDTH};
+use crate::display::hud_measure;
 
 /// A decoded picture on this platform.
 pub type Picture = prism_core::decode::videotoolbox::DecodedFrame;
@@ -47,7 +47,12 @@ impl Surface {
     ///
     /// Returns an error if SDL will not make a Metal view, or if Metal will not build the
     /// renderer, the statistics panel or the cursor.
-    pub fn new(window: &Window, width: u32, height: u32) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        window: &Window,
+        width: u32,
+        height: u32,
+        scale: f64,
+    ) -> Result<Self, Box<dyn Error>> {
         // SAFETY: the window outlives this surface, which is dropped before it.
         let view = unsafe { SDL_Metal_CreateView(window.raw()) };
         if view.is_null() {
@@ -55,7 +60,8 @@ impl Surface {
         }
 
         let renderer = MetalRenderer::new(MTLPixelFormat::BGRA8Unorm)?;
-        let overlay = TextOverlay::new(renderer.device(), HUD_WIDTH, HUD_HEIGHT, HUD_FONT_SIZE)?;
+        let (hud_width, hud_height, hud_font) = hud_measure(scale);
+        let overlay = TextOverlay::new(renderer.device(), hud_width, hud_height, hud_font)?;
         let cursor = CursorOverlay::new(renderer.device())?;
 
         let surface = Self {

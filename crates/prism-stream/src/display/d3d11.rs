@@ -16,7 +16,7 @@ use sdl3_sys::properties::SDL_GetPointerProperty;
 use sdl3_sys::video::{SDL_GetWindowProperties, SDL_PROP_WINDOW_WIN32_HWND_POINTER};
 use windows::Win32::Foundation::HWND;
 
-use crate::display::{HUD_FONT_SIZE, HUD_HEIGHT, HUD_WIDTH};
+use crate::display::hud_measure;
 
 /// A decoded picture on this platform.
 pub type Picture = prism_core::decode::mediafoundation::DecodedFrame;
@@ -47,14 +47,20 @@ impl Surface {
     /// Returns an error if SDL will not give up the window handle, if no Direct3D device with
     /// video support can be created, or if the renderer, the statistics panel or the cursor
     /// cannot be built.
-    pub fn new(window: &Window, width: u32, height: u32) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        window: &Window,
+        width: u32,
+        height: u32,
+        scale: f64,
+    ) -> Result<Self, Box<dyn Error>> {
         let hwnd = window_handle(window)?;
         let (device, context) = prism_core::decode::mediafoundation::create_device()?;
 
         // SAFETY: the handle came from the window this surface belongs to, which outlives it.
         let renderer = unsafe { D3d11Renderer::new(&device, &context, hwnd, width, height)? };
 
-        let overlay = TextOverlay::new(&renderer, HUD_WIDTH, HUD_HEIGHT, HUD_FONT_SIZE)?;
+        let (hud_width, hud_height, hud_font) = hud_measure(scale);
+        let overlay = TextOverlay::new(&renderer, hud_width, hud_height, hud_font)?;
         let cursor = CursorOverlay::new(&renderer)?;
 
         Ok(Self {

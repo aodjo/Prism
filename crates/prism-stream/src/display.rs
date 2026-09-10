@@ -17,7 +17,7 @@
 //! draw on Windows. That is what [`surface`] is — the same three operations, twice.
 
 use std::error::Error;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -67,6 +67,21 @@ const HUD_HEIGHT: usize = 184;
 
 /// How large the statistics panel's text is, in pixels.
 const HUD_FONT_SIZE: f64 = 13.0;
+
+/// The statistics panel's width, height and text size for a window with this many pixels to
+/// a point.
+///
+/// The three above are what the panel measures in points. It is drawn in pixels, so on a
+/// Retina window it would otherwise come out at half the size with text too small to read.
+fn hud_measure(scale: f64) -> (usize, usize, f64) {
+    let scale = scale.max(1.0);
+
+    (
+        (HUD_WIDTH as f64 * scale).round() as usize,
+        (HUD_HEIGHT as f64 * scale).round() as usize,
+        HUD_FONT_SIZE * scale,
+    )
+}
 
 /// Returns whether an event should end the session.
 ///
@@ -448,7 +463,7 @@ fn announce_control(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
 ///
 /// Panics if the receive thread panicked.
 pub fn run(
-    config: ClientConfig,
+    mut config: ClientConfig,
     width: u32,
     height: u32,
     pacing_us: u32,
@@ -458,10 +473,15 @@ pub fn run(
 ) -> Result<(), Box<dyn Error>> {
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
+
+    // Every pixel the screen has. Without this the window is drawn at one pixel to a point
+    // and the compositor doubles it on a Retina display, which is a picture that arrives sharp
+    // and is shown soft.
     let mut window = video
         .window("Prism", width, height)
         .position_centered()
         .resizable()
+        .high_pixel_density()
         .build()?;
 
     // Installed before anything is drawn, because adding a toolbar moves the content view
@@ -469,10 +489,16 @@ pub fn run(
     let bar = toolbar::Toolbar::install(&window);
 
     let (mut drawable_width, mut drawable_height) = window.size_in_pixels();
+    let scale = f64::from(drawable_width) / f64::from(window.size().0.max(1));
+
+    // The offer is what the host sizes its frames to, and it is only known now: the window is
+    // what decides how many pixels there are to fill. Points would ask for half of them.
+    config.offer.max_width = u16::try_from(drawable_width).unwrap_or(u16::MAX);
+    config.offer.max_height = u16::try_from(drawable_height).unwrap_or(u16::MAX);
 
     // Declared after the window so it is dropped before it: the surface holds objects the
     // window owns, and releasing them afterwards would be releasing them into nothing.
-    let mut surface = surface::Surface::new(&window, drawable_width, drawable_height)?;
+    let mut surface = surface::Surface::new(&window, drawable_width, drawable_height, scale)?;
 
     say.note(format!(
         "display: window {width}x{height}, drawable {drawable_width}x{drawable_height}, {}",
@@ -508,11 +534,16 @@ pub fn run(
     let moving = transfer::shared_folder().map(|folder| Arc::new(Mutex::new(Files::new(folder))));
     let (landed_tx, landed_rx) = sync_channel(8);
 
+    // What tells the session the window is gone. Without it the session only ends when the host
+    // goes quiet, which a host that is still streaming never does.
+    let leaving = Arc::new(AtomicBool::new(false));
+
     let worker = {
         let offset = Arc::clone(&offset);
         let input = Arc::clone(&input_slot);
         let cursor = Arc::clone(&cursor_sink);
         let files = moving.clone();
+        let stop = Arc::clone(&leaving);
         #[cfg(target_os = "windows")]
         let gpu = surface.gpu();
         let report = say.clone();
@@ -528,6 +559,7 @@ pub fn run(
                     report: Some(report),
                     files,
                     landed: Some(landed_tx),
+                    stop: Some(stop),
                     #[cfg(target_os = "windows")]
                     gpu,
                 },
@@ -746,17 +778,11 @@ pub fn run(
                 }
 
                 let target = (drawable_width as usize, drawable_height as usize);
-                // The far pointer, drawn only while this machine is watching. While it is
-                // controlling, this machine's own pointer is at the place the far one is being
-                // sent to, and drawing the far one as well is a second pointer a moment behind
-                // the first.
-                let far_pointer = if controlling {
-                    None
-                } else {
-                    cursor.normalised()
-                };
-
-                if surface.present(&decoded, far_pointer, target)? {
+                // The far pointer, where the host says it is, drawn whether or not this machine
+                // is controlling it. It trails this machine's own pointer by a frame or two, and
+                // that is the point of showing it: a far pointer that stays behind when this one
+                // moves is the one sign on screen that the host is not doing what it is told.
+                if surface.present(&decoded, cursor.normalised(), target)? {
                     shown += 1;
                     hud_frames += 1;
                 } else {
@@ -767,6 +793,12 @@ pub fn run(
             Err(RecvTimeoutError::Disconnected) => break 'main,
         }
     }
+
+    // The window first, so leaving is instant whatever the session takes to wind down. A window
+    // still on screen while this thread waits is a window the system draws the spinning pointer
+    // over; one that has gone has nothing to draw it on.
+    window.hide();
+    leaving.store(true, Ordering::Relaxed);
 
     say.note(format!(
         "display: {shown} pictures shown, {missed} were dropped to stay in time"
@@ -786,12 +818,29 @@ pub fn run(
         ));
     }
     report_pacing(say, &mut pacer);
-    worker
-        .join()
-        .expect("the receive thread should not panic")?;
+
+    // Given a moment to finish, because its last lines are the session's own summary. Not
+    // waited on past that: a host that has gone silent leaves the session in a read that only
+    // its idle timeout ends, and the process is on its way out regardless.
+    let deadline = Instant::now() + SESSION_WIND_DOWN;
+    while !worker.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    if worker.is_finished() {
+        worker
+            .join()
+            .expect("the receive thread should not panic")?;
+    }
 
     Ok(())
 }
+
+/// How long a closed window waits for its session to report before leaving without it.
+///
+/// The session notices it has been told to stop within one packet, and a live host sends
+/// several a second, so this is only ever reached when the host has already gone quiet.
+const SESSION_WIND_DOWN: Duration = Duration::from_millis(1500);
 
 #[cfg(test)]
 mod tests {

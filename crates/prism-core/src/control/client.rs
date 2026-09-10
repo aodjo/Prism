@@ -308,6 +308,12 @@ pub struct ClientHooks {
     pub files: Option<Arc<Mutex<Files>>>,
     /// Where a file that has finished arriving, or a listing that has come back, is announced.
     pub landed: Option<SyncSender<Landed>>,
+    /// Set to end the session from outside, the way a window closing does.
+    ///
+    /// The session otherwise ends only when the host goes quiet, and a host that is still
+    /// streaming never does — so a window that had been closed went on waiting for a session
+    /// that went on running, and showed the spinning pointer until something killed it.
+    pub stop: Option<Arc<AtomicBool>>,
     /// Where arriving audio frames go, when this machine can play them.
     ///
     /// Absent when nothing is showing the stream, because a session with no window is a
@@ -592,6 +598,7 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         report,
         files,
         landed,
+        stop,
         ..
     } = hooks;
     let say = Say(report);
@@ -700,6 +707,15 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
     }
 
     loop {
+        // Checked once a packet, which a live session delivers several times a second even on
+        // a screen where nothing moves: the host repeats the picture and answers every ping.
+        if stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Relaxed))
+        {
+            break;
+        }
+
         if last_ping.elapsed() >= PING_INTERVAL {
             last_ping = Instant::now();
             let ping = ClockPing { t1_us: now_us() };
