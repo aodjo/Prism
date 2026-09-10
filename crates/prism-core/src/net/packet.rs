@@ -1211,11 +1211,7 @@ fn expect_file(bytes: &[u8], needed: usize) -> Result<(), ProtocolError> {
 ///
 /// As [`expect_file`], plus [`ProtocolError::UnknownFileType`] and
 /// [`ProtocolError::WrongFileType`].
-fn expect_file_type(
-    bytes: &[u8],
-    expected: FileType,
-    needed: usize,
-) -> Result<(), ProtocolError> {
+fn expect_file_type(bytes: &[u8], expected: FileType, needed: usize) -> Result<(), ProtocolError> {
     expect_file(bytes, needed.max(FILE_HEADER_LEN))?;
 
     let got = FileType::try_from(bytes[1])?;
@@ -2003,6 +1999,8 @@ pub enum InputKind {
     MouseScroll = 2,
     /// A key going down or coming up.
     Key = 3,
+    /// The pointer put at a place on the host's screen.
+    MouseTo = 4,
 }
 
 impl TryFrom<u8> for InputKind {
@@ -2019,6 +2017,7 @@ impl TryFrom<u8> for InputKind {
             1 => Ok(InputKind::MouseButton),
             2 => Ok(InputKind::MouseScroll),
             3 => Ok(InputKind::Key),
+            4 => Ok(InputKind::MouseTo),
             other => Err(ProtocolError::UnknownInputKind(other)),
         }
     }
@@ -2093,6 +2092,23 @@ pub enum InputEvent {
         /// Whether it is now down.
         pressed: bool,
     },
+    /// The pointer put at a place on the host's screen.
+    ///
+    /// Where [`InputEvent::MouseMove`] says how far, this says where: the client's pointer is
+    /// over a picture of the host's screen, and the place it points at is the place the host's
+    /// pointer goes. That is what makes the two agree. Motion alone cannot — the host adds it
+    /// to wherever its own pointer happened to be, and the two drift apart the first time
+    /// either one moves without the other.
+    ///
+    /// The position is a fraction of the captured screen rather than a pixel, because the two
+    /// machines disagree about how many pixels it has: the client sees it scaled to a window,
+    /// and the host counts in points on one platform and in pixels on another.
+    MouseTo {
+        /// Across the screen, from 0 at the left edge to 65535 at the right.
+        x: u16,
+        /// Down the screen, from 0 at the top edge to 65535 at the bottom.
+        y: u16,
+    },
 }
 
 /// An input event with the time it happened.
@@ -2149,6 +2165,7 @@ impl InputPacket {
             InputEvent::Key { usage, pressed } => {
                 (InputKind::Key, usage as i16, 0, u8::from(pressed))
             }
+            InputEvent::MouseTo { x, y } => (InputKind::MouseTo, x as i16, y as i16, 0),
         };
 
         buf[0] = Channel::Input as u8;
@@ -2213,6 +2230,10 @@ impl InputPacket {
             InputKind::Key => InputEvent::Key {
                 usage: x as u16,
                 pressed,
+            },
+            InputKind::MouseTo => InputEvent::MouseTo {
+                x: x as u16,
+                y: y as u16,
             },
         };
 

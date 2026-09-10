@@ -138,6 +138,7 @@ describe('input packets', () => {
     expect(InputKind.MouseButton).toBe(vectors.inputKinds.mouseButton);
     expect(InputKind.MouseScroll).toBe(vectors.inputKinds.mouseScroll);
     expect(InputKind.Key).toBe(vectors.inputKinds.key);
+    expect(InputKind.MouseTo).toBe(vectors.inputKinds.mouseTo);
     expect(MouseButton.Left).toBe(vectors.mouseButtons.left);
   });
 
@@ -152,6 +153,7 @@ describe('input packets', () => {
         event = { kind: InputKind.MouseScroll as const, dx: x, dy: y };
       else if (kind === InputKind.MouseButton)
         event = { kind: InputKind.MouseButton as const, button: x as MouseButton, pressed };
+      else if (kind === InputKind.MouseTo) event = { kind: InputKind.MouseTo as const, x, y };
       else event = { kind: InputKind.Key as const, usage: x, pressed };
 
       const packet = { originTsUs: BigInt(vector.fields.originTsUs), event };
@@ -167,6 +169,21 @@ describe('input packets', () => {
     const bytes = hexToBytes(vectors.inputPackets[1]!.hex);
     bytes[10] = 9;
     expect(() => decodeInputPacket(bytes)).toThrow(PrismProtocolError);
+  });
+
+  it('refuses to aim the pointer off the screen', () => {
+    // Packed into two bytes as it stands, 65536 would wrap to zero and put the pointer on the
+    // opposite edge from the one it was aimed at.
+    for (const x of [-1, 65536, 0.5]) {
+      expect(
+        () =>
+          encodeInputPacket({
+            originTsUs: 0n,
+            event: { kind: InputKind.MouseTo, x, y: 0 },
+          }),
+        String(x),
+      ).toThrow(PrismProtocolError);
+    }
   });
 });
 

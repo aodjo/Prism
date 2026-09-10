@@ -111,6 +111,7 @@ export enum InputKind {
   MouseButton = 1,
   MouseScroll = 2,
   Key = 3,
+  MouseTo = 4,
 }
 
 /** Which pointer button an event refers to. */

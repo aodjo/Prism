@@ -5,7 +5,8 @@
 //! injector checks at startup and reports it.
 //!
 //! Two pieces of state have to be tracked rather than derived. The pointer position,
-//! because the wire carries relative motion and CoreGraphics wants an absolute point; and
+//! because the wire can carry relative motion and CoreGraphics wants an absolute point —
+//! and an absolute place, when the wire sends one, is posted as the motion to it; and
 //! the modifier keys, because a synthesised key event does not pick up the shift that a
 //! previous synthesised event pressed, so every event has to be told which modifiers are
 //! held.
@@ -258,6 +259,14 @@ impl Injector for MacInjector {
             InputEvent::MouseButton { button, pressed } => self.press_button(button, pressed),
             InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
             InputEvent::Key { usage, pressed } => self.press_key(usage, pressed),
+            // Posted as the motion from here to there, so everything a relative move gets —
+            // a drag while a button is held, the delta a game reads — an absolute one gets
+            // too, and the position this keeps ends up where the client pointed.
+            InputEvent::MouseTo { x, y } => {
+                let target = place_on(self.bounds, x, y);
+
+                self.move_pointer(target.x - self.position.x, target.y - self.position.y)
+            }
         }
     }
 
@@ -295,6 +304,21 @@ impl Injector for MacInjector {
         };
 
         (actual.x - self.position.x).abs() < 2.0 && (actual.y - self.position.y).abs() < 2.0
+    }
+}
+
+/// Returns the point on a display a fraction of the way across and down it.
+///
+/// Zero is the first column and row and 65535 the last, so both edges can be reached. Scaling
+/// by the full width instead would put the far edge one point off the screen, where the pointer
+/// is clamped back to a place the client did not point at.
+fn place_on(bounds: CGRect, x: u16, y: u16) -> CGPoint {
+    let across = (bounds.size.width - 1.0).max(0.0);
+    let down = (bounds.size.height - 1.0).max(0.0);
+
+    CGPoint {
+        x: bounds.origin.x + across * f64::from(x) / f64::from(u16::MAX),
+        y: bounds.origin.y + down * f64::from(y) / f64::from(u16::MAX),
     }
 }
 
@@ -511,9 +535,38 @@ pub fn hid_to_virtual_key(usage: u16) -> Option<u16> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{MacInjector, hid_to_virtual_key};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    use super::{MacInjector, hid_to_virtual_key, place_on};
     use crate::input::{Injector, InputError};
     use crate::net::packet::InputEvent;
+
+    #[test]
+    fn a_fraction_of_the_screen_lands_on_the_point_it_names() {
+        // The size the host in the virtual machine reports, and an origin that is not zero,
+        // because a main display is not always the one the coordinates start at.
+        let bounds = CGRect {
+            origin: CGPoint { x: 100.0, y: 50.0 },
+            size: CGSize {
+                width: 1728.0,
+                height: 966.0,
+            },
+        };
+
+        let first = place_on(bounds, 0, 0);
+        assert_eq!((first.x, first.y), (100.0, 50.0));
+
+        let last = place_on(bounds, u16::MAX, u16::MAX);
+        assert_eq!(
+            (last.x, last.y),
+            (1827.0, 1015.0),
+            "the far corner is reachable"
+        );
+
+        let middle = place_on(bounds, u16::MAX / 2, u16::MAX / 2);
+        assert!((middle.x - (100.0 + 863.5)).abs() < 0.1, "{middle:?}");
+        assert!((middle.y - (50.0 + 482.5)).abs() < 0.1, "{middle:?}");
+    }
 
     #[test]
     fn the_navigation_cluster_reaches_the_keys_it_names() {

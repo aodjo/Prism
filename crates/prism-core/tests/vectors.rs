@@ -165,6 +165,10 @@ fn input_packets_round_trip_through_the_vectors() {
         v["inputKinds"]["key"].as_u64().unwrap()
     );
     assert_eq!(
+        InputKind::MouseTo as u64,
+        v["inputKinds"]["mouseTo"].as_u64().unwrap()
+    );
+    assert_eq!(
         MouseButton::Left as u64,
         v["mouseButtons"]["left"].as_u64().unwrap()
     );
@@ -189,9 +193,15 @@ fn input_packets_round_trip_through_the_vectors() {
                 dx: x,
                 dy: fields["y"].as_i64().unwrap() as i16,
             },
-            _ => InputEvent::Key {
+            3 => InputEvent::Key {
                 usage: x as u16,
                 pressed,
+            },
+            // Unsigned on the wire's own terms: the same two bytes the other kinds read as a
+            // signed number, read as a fraction of the screen.
+            _ => InputEvent::MouseTo {
+                x: fields["x"].as_u64().unwrap() as u16,
+                y: fields["y"].as_u64().unwrap() as u16,
             },
         };
 
@@ -422,7 +432,10 @@ fn feedback_packets_round_trip_through_the_vectors() {
 fn file_constants_match_the_shared_vectors() {
     let v = vectors();
 
-    assert_eq!(Channel::File as u64, v["channels"]["file"].as_u64().unwrap());
+    assert_eq!(
+        Channel::File as u64,
+        v["channels"]["file"].as_u64().unwrap()
+    );
 
     for (tag, name) in [
         (FileType::Offer, "offer"),
@@ -461,7 +474,11 @@ fn file_constants_match_the_shared_vectors() {
         (FILE_ASK_FIXED_LEN, "fileAskFixedLen"),
         (MAX_FILE_NAME, "maxFileName"),
     ] {
-        assert_eq!(value as u64, v["constants"][name].as_u64().unwrap(), "{name}");
+        assert_eq!(
+            value as u64,
+            v["constants"][name].as_u64().unwrap(),
+            "{name}"
+        );
     }
 }
 

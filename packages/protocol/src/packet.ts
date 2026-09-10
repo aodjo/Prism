@@ -834,7 +834,8 @@ export type InputEvent =
   | { kind: InputKind.MouseMove; dx: number; dy: number }
   | { kind: InputKind.MouseButton; button: MouseButton; pressed: boolean }
   | { kind: InputKind.MouseScroll; dx: number; dy: number }
-  | { kind: InputKind.Key; usage: number; pressed: boolean };
+  | { kind: InputKind.Key; usage: number; pressed: boolean }
+  | { kind: InputKind.MouseTo; x: number; y: number };
 
 /**
  * An input event with the time it happened.
@@ -881,6 +882,12 @@ export function encodeInputPacket(packet: InputPacket): Uint8Array {
     case InputKind.Key:
       x = packet.event.usage > 0x7fff ? packet.event.usage - 0x10000 : packet.event.usage;
       flags = packet.event.pressed ? 1 : 0;
+      break;
+    case InputKind.MouseTo:
+      assertFraction('x', packet.event.x);
+      assertFraction('y', packet.event.y);
+      x = packet.event.x > 0x7fff ? packet.event.x - 0x10000 : packet.event.x;
+      y = packet.event.y > 0x7fff ? packet.event.y - 0x10000 : packet.event.y;
       break;
   }
 
@@ -943,8 +950,38 @@ export function decodeInputPacket(bytes: Uint8Array): InputPacket {
         originTsUs,
         event: { kind: InputKind.Key, usage: x < 0 ? x + 0x10000 : x, pressed },
       };
+    case InputKind.MouseTo:
+      return {
+        originTsUs,
+        event: {
+          kind: InputKind.MouseTo,
+          x: x < 0 ? x + 0x10000 : x,
+          y: y < 0 ? y + 0x10000 : y,
+        },
+      };
     default:
       throw new PrismProtocolError(`unknown input kind ${kind}`);
+  }
+}
+
+/**
+ * Throws unless a value is a fraction of the screen as the wire carries one.
+ *
+ * Zero is one edge and 65535 the other. Anything outside that would wrap around when it is
+ * packed into the two bytes the field has, and put the pointer on the opposite side of the
+ * screen from where it was aimed.
+ *
+ * @param {string} field - Field name, used in the error message.
+ * @param {number} value - Value to check.
+ * @returns {void} Nothing; the function is used purely for its throwing behaviour.
+ * @throws {PrismProtocolError} If `value` is not an integer in the range 0 to 65535.
+ *
+ * @example
+ * assertFraction('x', 32768); // passes
+ */
+function assertFraction(field: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff) {
+    throw new PrismProtocolError(`${field} is ${value}, outside 0 to 65535`);
   }
 }
 
