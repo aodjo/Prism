@@ -84,6 +84,9 @@ export const APP = ${literal(read('app.js'))};
 /** What those screens are built out of. */
 export const UI = ${literal(read('ui.js'))};
 
+/** Which way round it is drawn, decided in the head before anything is painted. */
+export const THEME = ${literal(read('theme.js'))};
+
 /**
  * The password derivation, as base64.
  *

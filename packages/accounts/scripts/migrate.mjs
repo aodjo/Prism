@@ -41,6 +41,21 @@ const COLUMNS = [
     column: 'operator',
     sql: 'ALTER TABLE accounts ADD COLUMN operator INTEGER NOT NULL DEFAULT 0',
   },
+  {
+    table: 'builds',
+    column: 'filename',
+    sql: "ALTER TABLE builds ADD COLUMN filename TEXT NOT NULL DEFAULT ''",
+  },
+  {
+    table: 'builds',
+    column: 'installer_filename',
+    sql: "ALTER TABLE builds ADD COLUMN installer_filename TEXT NOT NULL DEFAULT ''",
+  },
+  {
+    table: 'builds',
+    column: 'installer_bytes',
+    sql: 'ALTER TABLE builds ADD COLUMN installer_bytes INTEGER NOT NULL DEFAULT 0',
+  },
 ];
 
 /** The one description of what this database is meant to look like. */
