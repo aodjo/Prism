@@ -312,23 +312,32 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("the shell could not start")
-        .run(|app, event| match event {
-            // No windows left is not a reason to stop. The exit somebody asked for carries a
-            // code — `exit` and `restart` both set one — and that is the one that goes through.
-            tauri::RunEvent::ExitRequested {
-                code: None, api, ..
-            } => {
-                api.prevent_exit();
+        .run(|app, event| {
+            // Only the arm below wants it, and that arm is macOS's. Everywhere else this is a
+            // binding nothing reads, which `-D warnings` counts as an error rather than a
+            // nicety — and no local check compiles this crate for those targets to say so.
+            #[cfg(not(target_os = "macos"))]
+            let _ = app;
+
+            match event {
+                // No windows left is not a reason to stop. The exit somebody asked for carries
+                // a code — `exit` and `restart` both set one — and that is the one that goes
+                // through.
+                tauri::RunEvent::ExitRequested {
+                    code: None, api, ..
+                } => {
+                    api.prevent_exit();
+                }
+                // Clicking the icon in the dock, which on macOS is how somebody asks for a
+                // window back without going to the menu bar for it.
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen {
+                    has_visible_windows: false,
+                    ..
+                } => {
+                    tray::surface(app);
+                }
+                _ => {}
             }
-            // Clicking the icon in the dock, which on macOS is how somebody asks for a window
-            // back without going to the menu bar for it.
-            #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen {
-                has_visible_windows: false,
-                ..
-            } => {
-                tray::surface(app);
-            }
-            _ => {}
         });
 }
