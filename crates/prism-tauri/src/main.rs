@@ -245,6 +245,11 @@ fn main() {
             // to reach the application by.
             tray::install(app.handle())?;
 
+            // And back to sharing, if that is how this machine was left. Also before the window:
+            // a machine somebody left shared should be reachable from the moment it starts, not
+            // from the moment its window finishes drawing.
+            sharing::resume(app.handle());
+
             let (label, page) = opening();
             let window = windows::stage(app.handle(), label, page)?;
 
