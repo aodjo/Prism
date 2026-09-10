@@ -176,53 +176,89 @@ async fn look(
         .map_err(|err| err.to_string())
 }
 
-/// Looks once, shortly after the window opens, and says what it found.
+/// How long between one look for a new version and the next.
 ///
-/// Emits `update:available` carrying an [`Available`] when there is a newer version, and
-/// nothing at all when there is not. Installing is a separate decision, made by whoever is
-/// looking at the window.
+/// Half an hour, because this application is left open. A check made only at launch is a check
+/// a machine that has been running since breakfast never makes again — and the builds it is
+/// looking for arrive several times a day.
+const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Looks shortly after the window opens, and goes on looking while the application runs.
+///
+/// Emits `update:available` carrying an [`Available`] when it finds a version that is newer than
+/// the one running and is not the one it last said this about. Installing is a separate
+/// decision, made by whoever is looking at the window.
 ///
 /// Spawned rather than awaited: a check that has to finish before a window appears is a window
 /// that does not appear when the network is slow, and the reason for updating is not urgent
 /// enough to be worth that.
+///
+/// The setting is read on each pass rather than once. Somebody who turns automatic updates off
+/// has turned them off now, not from the next launch.
 pub fn check_in_background(app: &AppHandle) {
     let app = app.clone();
 
-    tauri::async_runtime::spawn(async move {
-        let wanted = {
-            let held: State<'_, crate::Held> = app.state();
-            let Ok(settings) = held.0.lock() else {
-                return;
-            };
+    // A thread of its own rather than an asynchronous task, because what this does between
+    // checks is wait for half an hour. Sleeping that on a task would want a timer this crate
+    // does not otherwise have a runtime dependency for, and a parked thread costs nothing.
+    std::thread::spawn(move || {
+        // What was last announced, so that a version somebody has already been offered is not
+        // offered again every half hour. A newer one still is: this remembers the answer, not
+        // the fact of having asked.
+        let mut announced: Option<String> = None;
 
-            settings.auto_update
-        };
+        loop {
+            look_once(&app, &mut announced);
 
-        if !wanted {
-            return;
-        }
-
-        let held: State<'_, crate::Held> = app.state();
-        let Ok(channel) = following(&held) else {
-            return;
-        };
-
-        // Found, and then said rather than acted on. Installing here would replace the bundle
-        // under a running process — which changes nothing a person can see until they next
-        // launch, and would do it while they were in the middle of watching another machine.
-        // What happens next is their decision, and `install_update` carries it out.
-        //
-        // Failures are not reported. Nothing is wrong with this machine because a server was
-        // unreachable, and a window that says so on every launch without a network would be
-        // reporting the network rather than the application.
-        if let Ok(Some(update)) = look(&app, &channel).await {
-            let _ = app.emit(
-                "update:available",
-                Available {
-                    version: update.version.clone(),
-                    notes: update.body.clone().unwrap_or_default(),
-                },
-            );
+            std::thread::sleep(LOOK_EVERY);
         }
     });
+}
+
+/// One pass: read the setting, ask, and say what came back if it is worth saying.
+///
+/// The setting is read here rather than by the caller, so that somebody who turns automatic
+/// updates off has turned them off now rather than from the next launch.
+fn look_once(app: &AppHandle, announced: &mut Option<String>) {
+    let held: State<'_, crate::Held> = app.state();
+
+    let wanted = {
+        let Ok(settings) = held.0.lock() else {
+            return;
+        };
+
+        settings.auto_update
+    };
+
+    if !wanted {
+        return;
+    }
+
+    let Ok(channel) = following(&held) else {
+        return;
+    };
+
+    // Found, and then said rather than acted on. Installing here would replace the bundle under
+    // a running process — which changes nothing a person can see until they next launch, and
+    // would do it while they were in the middle of watching another machine. What happens next
+    // is their decision, and `install_update` carries it out.
+    //
+    // Failures are not reported. Nothing is wrong with this machine because a server was
+    // unreachable, and a window that says so on every launch without a network would be
+    // reporting the network rather than the application.
+    let found = tauri::async_runtime::block_on(look(app, &channel));
+
+    if let Ok(Some(update)) = found
+        && announced.as_deref() != Some(update.version.as_str())
+    {
+        *announced = Some(update.version.clone());
+
+        let _ = app.emit(
+            "update:available",
+            Available {
+                version: update.version.clone(),
+                notes: update.body.clone().unwrap_or_default(),
+            },
+        );
+    }
 }

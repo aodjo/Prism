@@ -232,11 +232,28 @@ fn remember(chosen: &State<'_, Chosen>, on: bool) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// Fails if the address to listen on cannot be parsed, if this machine's identity cannot be
-/// read, or if the session's thread cannot be spawned. All three are worth showing rather than
-/// swallowing: each one leaves a machine that looks shared and is not.
+/// Fails if this machine may not record its screen, if the address to listen on cannot be
+/// parsed, if this machine's identity cannot be read, or if the session's thread cannot be
+/// spawned. All four are worth showing rather than swallowing: each one leaves a machine that
+/// looks shared and is not.
 #[tauri::command]
 pub fn start_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<Snapshot, String> {
+    // Before anything else, because a machine that may not record its screen shares perfectly:
+    // it registers, it is found, it accepts a session, it agrees a codec, and it sends nothing
+    // at all. What somebody sees at the other end is a black window and no reason for it — and
+    // the reason was knowable here, one call, before any of it started.
+    //
+    // Screen recording only. Accessibility missing means a session nobody can type into, which
+    // is a screen share and a thing somebody may well want; this one means there is nothing to
+    // share.
+    if !prism_core::control::permissions::check().screen {
+        return Err(
+            "Prism may not record this screen yet. Allow Screen Recording for Prism in \
+             System Settings, then start Prism again."
+                .to_owned(),
+        );
+    }
+
     let mut session = held
         .0
         .lock()
