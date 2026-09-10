@@ -176,6 +176,13 @@ mod round_trip {
             let pts_us = encoded.pts_us;
             let bitstream = encoded.data.clone();
 
+            // Which frame this actually is, read off its timestamp rather than assumed from
+            // the loop. The two are the same only while the encoder hands back exactly what it
+            // was just given — which a `RealTime` session does not promise, and a software one
+            // does not do. Comparing a picture against the pattern for a frame it is not
+            // produced a mean luma error of 46 and looked exactly like a broken codec.
+            let painted = (pts_us / 33_333) as usize;
+
             decoder.decode(&bitstream, pts_us).expect("frame decodes");
             assert!(
                 decoder.is_ready(),
@@ -198,10 +205,10 @@ mod round_trip {
                 .expect("the picture can be read back");
             assert_eq!(luma.len(), (WIDTH * HEIGHT) as usize);
 
-            let error = mean_absolute_error(&luma, phase);
+            let error = mean_absolute_error(&luma, painted);
             assert!(
                 error < 12.0,
-                "{codec:?} phase {phase} decoded to a different picture, mean luma error \
+                "{codec:?} phase {painted} decoded to a different picture, mean luma error \
                  {error:.1}"
             );
 
