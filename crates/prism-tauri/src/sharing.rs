@@ -217,6 +217,97 @@ fn remember(chosen: &State<'_, Chosen>, on: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether this machine holds every grant a session of it needs.
+///
+/// Screen recording always, and Accessibility when the settings let the other machine control
+/// this one. Without the first a session sends nothing — a black window at the far end and no
+/// reason for it. Without the second it sends a picture and drops every click and keystroke
+/// with nothing to say so; the only trace is a line in a log nobody reads.
+///
+/// Looked at, never asked for. Asking raises a system dialog, and that belongs to somebody
+/// pressing the button in the window that explains what it is for — not to a launch, and not
+/// to a switch that somebody expected to simply turn on.
+fn holds_what_it_needs(chosen: &State<'_, Chosen>) -> bool {
+    let control = chosen
+        .0
+        .lock()
+        .map(|settings| settings.control)
+        .unwrap_or(false);
+
+    prism_core::control::permissions::check()
+        .missing(control)
+        .is_empty()
+}
+
+/// How often a machine that is shared looks again at what it has been allowed.
+///
+/// Accessibility can be taken away while Prism runs and the answer changes at once, so a session
+/// that goes on after it would be one that looks controllable and is not.
+const GRANT_CHECK: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Stops sharing the moment a grant a session needs goes away.
+///
+/// Runs for as long as a session does. A machine left shared without what sharing needs is the
+/// worst of both: it is listed, it answers, and whoever connects gets a picture they cannot use.
+fn watch_grants(app: tauri::AppHandle) {
+    use tauri::Manager as _;
+
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(GRANT_CHECK);
+
+            let held: State<'_, Held> = app.state();
+            let running = held
+                .0
+                .lock()
+                .map(|session| session.is_some())
+                .unwrap_or(false);
+
+            if !running {
+                return;
+            }
+
+            let chosen: State<'_, Chosen> = app.state();
+
+            if holds_what_it_needs(&chosen) {
+                continue;
+            }
+
+            let _ = stop_sharing(held, chosen);
+
+            return;
+        }
+    });
+}
+
+/// Puts a machine back to sharing, if that is how it was left.
+///
+/// Somebody who turned this machine on for another one of theirs meant it to stay on. Without
+/// this the switch went quietly back to off at every launch, which makes a machine reachable
+/// only while somebody has a window open on it — the opposite of what sharing is for. The
+/// setting has recorded the answer since the beginning; nothing acted on it.
+///
+/// A machine without the grants sharing needs is put back to not shared, and says so the way any
+/// unshared machine does: the switch is off, and pressing it is what shows what is missing.
+pub fn resume(app: &tauri::AppHandle) {
+    use tauri::Manager as _;
+
+    let chosen: State<'_, Chosen> = app.state();
+
+    let wanted = chosen
+        .0
+        .lock()
+        .map(|settings| settings.sharing)
+        .unwrap_or(false);
+
+    if !wanted {
+        return;
+    }
+
+    let held: State<'_, Held> = app.state();
+    let _ = start_sharing(app.clone(), held, chosen);
+}
+
 /// Starts sharing this machine and returns what the session is doing a moment later.
 ///
 /// Returns as soon as the session's thread exists. Binding a socket, registering with a
@@ -232,91 +323,25 @@ fn remember(chosen: &State<'_, Chosen>, on: bool) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// Fails if this machine may not record its screen, if the address to listen on cannot be
-/// parsed, if this machine's identity cannot be read, or if the session's thread cannot be
-/// spawned. All four are worth showing rather than swallowing: each one leaves a machine that
-/// looks shared and is not.
-/// Whether this machine may record its screen, asking the system if nobody has been asked yet.
-///
-/// A machine that may not record its screen shares perfectly: it registers, it is found, it
-/// accepts a session, it agrees a codec, and it sends nothing at all. What somebody sees at the
-/// other end is a black window and no reason for it — and the reason is knowable here, in one
-/// call, before any of it starts.
-///
-/// Screen recording only. Accessibility missing means a session nobody can type into, which is
-/// a screen share and a thing somebody may well want; this one means there is nothing to share.
-///
-/// # Errors
-///
-/// Says what to do when the answer is no. `ask` decides whether the system is put the question:
-/// `check` cannot tell a refusal from a question nobody has put yet, so somewhere has to ask or
-/// the dialog is never raised and the one thing that would fix it cannot happen. But that dialog
-/// belongs to somebody pressing a button, not to a launch.
-fn may_record(ask: bool) -> Result<(), String> {
-    let held = prism_core::control::permissions::check().screen
-        || (ask
-            && prism_core::control::permissions::request(
-                prism_core::control::permissions::Grant::Screen,
-            ));
-
-    if held {
-        return Ok(());
-    }
-
-    Err(
-        "Prism may not record this screen yet. Allow Screen Recording for Prism in \
-         System Settings, then start Prism again."
-            .to_owned(),
-    )
-}
-
-/// Puts a machine back to sharing, if that is how it was left.
-///
-/// Somebody who turned this machine on for another one of theirs meant it to stay on. Without
-/// this the switch went quietly back to off at every launch, which makes a machine reachable
-/// only while somebody has a window open on it — the opposite of what sharing is for. The
-/// setting has recorded the answer since the beginning; nothing acted on it.
-///
-/// Failures are not reported and not written down. There is no window listening yet, and a
-/// machine that could not start sharing this time is one that should still try next time: the
-/// usual reason is a screen recording grant given while Prism was running, which the next launch
-/// is exactly what fixes.
-pub fn resume(app: &tauri::AppHandle) {
-    use tauri::Manager as _;
-
-    // Looked at rather than asked for. A launch that raises a system dialog is a launch nobody
-    // asked anything of, and a machine coming back to what it was left doing has asked nothing.
-    if may_record(false).is_err() {
-        return;
-    }
-
-    let chosen: State<'_, Chosen> = app.state();
-
-    let wanted = chosen
-        .0
-        .lock()
-        .map(|settings| settings.sharing)
-        .unwrap_or(false);
-
-    if !wanted {
-        return;
-    }
-
-    let held: State<'_, Held> = app.state();
-    let _ = start_sharing(held, chosen);
-}
-
+/// Fails if a grant the session needs is missing, which also turns the switch off; if the
+/// address to listen on cannot be parsed; if this machine's identity cannot be read; or if the
+/// session's thread cannot be spawned. Each is worth showing rather than swallowing: each one
+/// leaves a machine that looks shared and is not.
 #[tauri::command]
-pub fn start_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<Snapshot, String> {
-    // Before anything else, because a machine that may not record its screen shares perfectly:
-    // it registers, it is found, it accepts a session, it agrees a codec, and it sends nothing
-    // at all. What somebody sees at the other end is a black window and no reason for it — and
-    // the reason was knowable here, one call, before any of it started.
-    //
-    // Screen recording only. Accessibility missing means a session nobody can type into, which
-    // is a screen share and a thing somebody may well want; this one means there is nothing to
-    // share.
-    may_record(true)?;
+pub fn start_sharing(
+    app: tauri::AppHandle,
+    held: State<'_, Held>,
+    chosen: State<'_, Chosen>,
+) -> Result<Snapshot, String> {
+    // Before anything else, and refused rather than started halfway: a session without the
+    // grants it needs registers, is found, accepts a client, and then sends nothing or ignores
+    // everything it is sent. The window asks first and shows what is missing; this is where a
+    // start that got past it — a launch, a second window — is turned back and the switch with it.
+    if !holds_what_it_needs(&chosen) {
+        remember(&chosen, false)?;
+
+        return Err("Prism needs permission before this machine can be shared.".to_owned());
+    }
 
     let mut session = held
         .0
@@ -346,6 +371,7 @@ pub fn start_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result
     drop(session);
 
     remember(&chosen, true)?;
+    watch_grants(app);
 
     Ok(snapshot)
 }

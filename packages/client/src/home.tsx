@@ -24,7 +24,7 @@ import type {
 import { ago, latency, span, when } from './format.js';
 import { Preferences, SharingTerms } from './preferences.js';
 import { speak, t } from './i18n.js';
-import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
+import { Backdrop, GRANTS, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
   interface Window {
@@ -147,13 +147,21 @@ function Home(): JSX.Element {
   const [everything, setEverything] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
   /**
-   * What this machine still needs before it can be shared, and how far along asking has got.
+   * The grants sharing is waiting on, while the window is showing them, by id. Null when it is
+   * not showing them.
    *
-   * `ask` while there is a settings pane to open, `restart` once it has been opened — screen
-   * recording is read once for the life of a process, so a grant given now is one this run goes
-   * on calling missing. Null when nothing is in the way.
+   * Asked when somebody turns sharing on and something is missing, rather than said as an error
+   * afterwards: the switch does nothing until these are allowed, so the window names each one
+   * and opens the way to it.
    */
-  const [needsScreen, setNeedsScreen] = useState<'ask' | 'restart' | null>(null);
+  const [asking, setAsking] = useState<readonly string[] | null>(null);
+  /**
+   * Which of those have already been sent to System Settings.
+   *
+   * Screen recording is read once for the life of a process, so once it has been allowed the
+   * only thing left to offer for it is starting Prism again.
+   */
+  const [asked, setAsked] = useState<ReadonlySet<string>>(new Set());
   /** Whether the settings are open over the window. */
   const [tuning, setTuning] = useState(false);
   /** Whether the terms this machine is shared on are open beside the switch. */
@@ -296,53 +304,60 @@ function Home(): JSX.Element {
     [settings],
   );
 
+  /**
+   * Shows the grants sharing is waiting on, or starts sharing when there are none.
+   *
+   * Asked of the system rather than read out of an error message, which is text and would tie
+   * this to its wording.
+   *
+   * @async
+   * @returns {Promise<boolean>} Whether sharing started.
+   */
+  const shareOrAsk = useCallback(async (): Promise<boolean> => {
+    const held = await prism.permissions();
+
+    if (held.missing.length > 0) {
+      setAsking(held.missing.map((grant) => grant.id));
+
+      return false;
+    }
+
+    setAsking(null);
+    setMine(await prism.startSharing());
+
+    return true;
+  }, []);
+
   /** Starts or stops handing this machine's screen out. */
   const flip = useCallback((): void => {
     void (async () => {
       setTrouble(null);
-      setNeedsScreen(null);
 
       try {
-        setMine(shared ? await prism.stopSharing() : await prism.startSharing());
+        if (shared) {
+          setMine(await prism.stopSharing());
+        } else {
+          setAsked(new Set());
+          await shareOrAsk();
+        }
       } catch (error) {
         setTrouble(reason(error));
-
-        // A refusal that names a permission is one somebody can act on, so the window offers
-        // the way there rather than the name of a settings pane to go and find. Asked of the
-        // system rather than read out of the message, which is text and would tie this to its
-        // wording.
-        try {
-          const held = await prism.permissions();
-
-          setNeedsScreen(held.screen ? null : 'ask');
-        } catch {
-          setNeedsScreen(null);
-        }
       }
     })();
-  }, [shared]);
+  }, [shared, shareOrAsk]);
 
   // Allowing happens in System Settings, which is to say while this window is not the one being
-  // looked at. Read again when it comes back, so a machine that may now record its screen stops
-  // saying it may not.
+  // looked at. Asked again when it comes back, so the list shrinks as switches are turned on and
+  // sharing starts by itself once the last one is — which is what the button was pressed for.
   useEffect(() => {
-    if (!needsScreen) {
+    if (!asking) {
       return;
     }
 
     const again = (): void => {
-      void (async () => {
-        try {
-          const held = await prism.permissions();
-
-          if (held.screen) {
-            setNeedsScreen(null);
-            setTrouble(null);
-          }
-        } catch {
-          // Nothing to say. The answer is the one it already had.
-        }
-      })();
+      void shareOrAsk().catch((error: unknown) => {
+        setTrouble(reason(error));
+      });
     };
 
     window.addEventListener('focus', again);
@@ -350,7 +365,7 @@ function Home(): JSX.Element {
     return () => {
       window.removeEventListener('focus', again);
     };
-  }, [needsScreen]);
+  }, [asking, shareOrAsk]);
 
   /** Adds a machine to the front of the list, or takes it back out. */
   const pin = (key: string): void => {
@@ -751,39 +766,80 @@ function Home(): JSX.Element {
           className="mt-3 flex-none"
         />
 
-        {/* Naming the pane and leaving somebody to find it is most of the work still to do, so
-            the window does that part. What it cannot do is the last step: screen recording is
-            read once for the life of a process, and a grant given to a running Prism is one it
-            goes on calling missing until it starts again. */}
-        {needsScreen && (
-          <div className="mt-3 flex flex-none items-center gap-3">
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => {
-                void (async () => {
-                  if (needsScreen === 'restart') {
-                    await prism.restart();
+        {/* What sharing is waiting on, one row a grant, each with the way to it. The window
+            does the finding; the one step it cannot take is the switch in System Settings, and
+            for screen recording a restart after it, because a running Prism goes on calling a
+            grant given to it missing until it starts again. No dismissing it by clicking the
+            backdrop: nothing is shared until these are allowed, and a modal that vanishes on a
+            stray click is one that says nothing. */}
+        {asking && (
+          <div className="fixed inset-0 z-[4] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
+            <div className="w-full max-w-[460px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
+              <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+                {t('Allow these to share this machine')}
+              </h2>
+              <p className="mt-3 mb-0 text-ui text-dim">
+                {t('Turn each one on in System Settings, then come back.')}
+              </p>
 
-                    return;
-                  }
+              <div className="mt-4">
+                {GRANTS.filter((grant) => asking.includes(grant.id)).map((grant) => {
+                  const restart = grant.id === 'screen' && asked.has(grant.id);
 
-                  try {
-                    const held = await prism.requestPermission('screen');
+                  return (
+                    <div
+                      key={grant.id}
+                      className="flex items-center gap-3 py-3 not-first:border-t not-first:border-line-1"
+                    >
+                      <span
+                        className={`flex size-[34px] flex-none items-center justify-center rounded-badge border text-ui font-medium ${grant.tint}`}
+                      >
+                        {grant.glyph}
+                      </span>
+                      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <span className="text-ui font-medium text-ink">{t(grant.name)}</span>
+                        <span className="text-fine text-muted-2">{t(grant.why)}</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="btn-secondary flex-none"
+                        onClick={() => {
+                          void (async () => {
+                            if (restart) {
+                              await prism.restart();
 
-                    setNeedsScreen(held.screen ? null : 'restart');
+                              return;
+                            }
 
-                    if (held.screen) {
-                      setTrouble(null);
-                    }
-                  } catch (error) {
-                    setTrouble(reason(error));
-                  }
-                })();
-              }}
-            >
-              {needsScreen === 'restart' ? t('Restart PRISM') : t('Open System Settings')}
-            </button>
+                            try {
+                              await prism.requestPermission(grant.id);
+                              setAsked((was) => new Set(was).add(grant.id));
+                              await shareOrAsk();
+                            } catch (error) {
+                              setTrouble(reason(error));
+                            }
+                          })();
+                        }}
+                      >
+                        {restart ? t('Restart PRISM') : t('Open System Settings')}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setAsking(null);
+                  }}
+                >
+                  {t('Close')}
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

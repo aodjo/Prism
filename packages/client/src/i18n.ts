@@ -36,6 +36,17 @@ const KO: Record<string, string> = {
     '이 컴퓨터의 화면을 보내고 조작하려면 필요합니다.',
   'Nothing is sent outside your own network.': '내 네트워크 밖으로 나가지 않습니다.',
   Granted: '허용됨',
+  'Screen Recording': '화면 기록',
+  Accessibility: '손쉬운 사용',
+  'Local Network': '로컬 네트워크',
+  'Capture this display so it can be streamed.': '이 화면을 캡처해서 보냅니다.',
+  'Pass keyboard and mouse input to this machine.':
+    '다른 기기의 키보드와 마우스 입력을 이 컴퓨터에 전달합니다.',
+  'Discover your other devices on this network.': '같은 네트워크에 있는 내 기기를 찾습니다.',
+  'Allow these to share this machine': '이 컴퓨터를 공유하려면 허용하세요',
+  'Turn each one on in System Settings, then come back.':
+    '시스템 설정에서 각각 켠 뒤 돌아오세요.',
+  Close: '닫기',
   'Restart PRISM': 'PRISM 다시 시작',
   Allow: '허용',
   'Open System Settings': '시스템 설정 열기',

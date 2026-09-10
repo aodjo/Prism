@@ -22,7 +22,17 @@ import type {
   Settings,
 } from './api.js';
 import { speak, t } from './i18n.js';
-import { Backdrop, Primary, STEP_SKY, Trouble, WELCOME_SKY, Wordmark, reason, short } from './ui.js';
+import {
+  Backdrop,
+  GRANTS,
+  Primary,
+  STEP_SKY,
+  Trouble,
+  WELCOME_SKY,
+  Wordmark,
+  reason,
+  short,
+} from './ui.js';
 
 declare global {
   interface Window {
@@ -66,30 +76,6 @@ const AFTER: readonly Marker[] = ['intro', 'permissions', 'ready'];
  */
 const HAS_NEXT: ReadonlySet<Step> = new Set<Step>(['intro', 'permissions']);
 
-/** How the three permission rows read, in the order the design puts them. */
-const GRANTS = [
-  {
-    id: 'screen',
-    glyph: '▣',
-    name: 'Screen Recording',
-    why: 'Capture this display so it can be streamed.',
-    tint: 'border-[rgba(124,92,255,0.28)] bg-[rgba(124,92,255,0.16)] text-violet',
-  },
-  {
-    id: 'input',
-    glyph: '⌘',
-    name: 'Accessibility',
-    why: 'Pass keyboard and mouse input to this machine.',
-    tint: 'border-[rgba(53,214,255,0.28)] bg-[rgba(53,214,255,0.16)] text-cyan',
-  },
-  {
-    id: 'network',
-    glyph: '⇄',
-    name: 'Local Network',
-    why: 'Discover your other devices on this network.',
-    tint: 'border-[rgba(77,232,176,0.28)] bg-[rgba(77,232,176,0.16)] text-mint',
-  },
-] as const;
 
 /** How many characters a pairing code has. */
 const CODE_LENGTH = 6;
@@ -868,8 +854,8 @@ function Setup(): JSX.Element {
                     {grant.glyph}
                   </span>
                   <span className="flex min-w-0 flex-1 flex-col gap-1">
-                    <span className="text-body-2 font-medium">{grant.name}</span>
-                    <span className="text-note text-muted-2">{grant.why}</span>
+                    <span className="text-body-2 font-medium">{t(grant.name)}</span>
+                    <span className="text-note text-muted-2">{t(grant.why)}</span>
                   </span>
                   {has ? (
                     <span className="tag-granted">
