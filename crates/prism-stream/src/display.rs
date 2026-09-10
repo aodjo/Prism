@@ -581,7 +581,9 @@ pub fn run(
                 // Asked for on a session that is only watching. Said rather than ignored,
                 // because a control that does nothing when pressed is a fault to look for.
                 toolbar::Tool::Control => {
-                    say.note("display: this session is watching only, so there is nothing to control");
+                    say.note(
+                        "display: this session is watching only, so there is nothing to control",
+                    );
                 }
                 toolbar::Tool::Fit => {
                     if let Some((across, down)) = picture {

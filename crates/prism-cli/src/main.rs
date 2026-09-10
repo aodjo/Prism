@@ -902,7 +902,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         }
                         prism_core::net::transfer::Landed::Listing(listing) => {
                             for file in listing.files {
-                                println!("files  : the host has {} ({} bytes)", file.name, file.size);
+                                println!(
+                                    "files  : the host has {} ({} bytes)",
+                                    file.name, file.size
+                                );
                             }
                         }
                     }

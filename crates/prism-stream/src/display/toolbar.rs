@@ -66,7 +66,10 @@ impl Tool {
 
     /// The tool an identifier names, if it is one of these.
     fn named(identifier: &str) -> Option<Self> {
-        TOOLS.iter().copied().find(|one| one.identifier() == identifier)
+        TOOLS
+            .iter()
+            .copied()
+            .find(|one| one.identifier() == identifier)
     }
 
     /// What the item is called underneath its picture.
