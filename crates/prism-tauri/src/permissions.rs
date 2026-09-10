@@ -113,6 +113,19 @@ pub fn request_permission(
 /// refused, which is why it is not `-> !`.
 #[tauri::command]
 pub fn restart(app: tauri::AppHandle) {
+    relaunch(&app);
+}
+
+/// Starts Prism again the way the system starts it, and lets this copy go.
+///
+/// Every restart goes through here — the one a missing grant asks for, and the one after an
+/// update is installed. The second used Tauri's own restart until a copy started that way was
+/// found unable to reach the machine it was trying to watch on the local network, for as long
+/// as it ran, while the same bundle opened from the Dock reached it at once.
+///
+/// Returns once the relaunch has been handed over and this copy told to exit, or not at all
+/// where there is no such hand-over and Tauri's own restart is the only one left.
+pub(crate) fn relaunch(app: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     if reopen() {
         app.exit(0);
