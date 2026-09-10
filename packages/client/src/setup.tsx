@@ -601,7 +601,7 @@ function Setup(): JSX.Element {
           {signedIn === null && (
             <button
               type="button"
-              className="btn-ghost no-drag mt-7 text-ink-3 hover:text-ink"
+              className="btn-ghost mt-7 text-ink-3 hover:text-ink"
               onClick={() => {
                 setJoining(false);
                 advance();
@@ -694,7 +694,7 @@ function Setup(): JSX.Element {
               </code>
               <button
                 type="button"
-                className="btn-primary-sm no-drag mx-auto mt-5 block"
+                className="btn-primary-sm mx-automt-5 block"
                 onClick={() => {
                   setEnrolment(null);
                   setJoining(false);
@@ -787,7 +787,7 @@ function Setup(): JSX.Element {
 
               <button
                 type="button"
-                className="btn-primary-sm no-drag mt-2 justify-center"
+                className="btn-primary-sm mt-2justify-center"
                 disabled={working}
                 onClick={
                   joining
@@ -808,7 +808,7 @@ function Setup(): JSX.Element {
           {askingCode && (
             <button
               type="button"
-              className="btn-ghost no-drag mt-5"
+              className="btn-ghost mt-5"
               onClick={() => {
                 setAccountTrouble(null);
                 setAskingCode(false);
@@ -821,7 +821,7 @@ function Setup(): JSX.Element {
           {enrolment === null && !greeted && !askingCode && (
             <button
               type="button"
-              className="btn-ghost no-drag mt-5"
+              className="btn-ghost mt-5"
               onClick={() => {
                 setAccountTrouble(null);
                 setConfirm('');
@@ -887,7 +887,7 @@ function Setup(): JSX.Element {
                     // offering to restart for it would be advice that fixes nothing.
                     <button
                       type="button"
-                      className="btn-secondary no-drag"
+                      className="btn-secondary"
                       onClick={() => {
                         void prism.restart();
                       }}
@@ -897,7 +897,7 @@ function Setup(): JSX.Element {
                   ) : (
                     <button
                       type="button"
-                      className="btn-secondary no-drag"
+                      className="btn-secondary"
                       onClick={() => {
                         void (async () => {
                           try {
@@ -1027,7 +1027,7 @@ function Setup(): JSX.Element {
 
   return (
     <>
-      <div className="drag fixed inset-x-0 top-0 z-[3] h-11" />
+      <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-[3] h-11" />
       {/* Both skies are always on the page and one of them is faded out. Swapping the images
           instead would pop the whole backdrop at the moment the screens are halfway through
           moving, which is the one moment nobody is looking at the aurora. */}
@@ -1268,7 +1268,7 @@ function CodeBoxes({
           // The line box is the height of the box it is in, so the digit and the caret sit in
           // the middle of it. Left to the type scale it inherits a line height of one and a
           // half, which in a box this tall puts both of them near the top.
-          className={`no-drag h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit leading-[70px] font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none transition-[transform,opacity,background-color,border-color,box-shadow] duration-[340ms] ease-[cubic-bezier(0.4,0,0.2,1)] focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)] ${
+          className={`h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit leading-[70px] font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none transition-[transform,opacity,background-color,border-color,box-shadow] duration-[340ms] ease-[cubic-bezier(0.4,0,0.2,1)] focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)] ${
             character === ''
               ? 'border-line-4 bg-wash-1 animate-[code-in_380ms_cubic-bezier(0.22,1.2,0.36,1)_both]'
               : 'border-[rgba(124,92,255,0.45)] bg-wash-4'

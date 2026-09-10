@@ -27,7 +27,7 @@ createRoot(document.getElementById('root') as HTMLElement).render(
     <Backdrop sky={HOME_SKY} />
 
     <div className="relative z-[1]">
-      <div className="drag h-[34px]" />
+      <div data-tauri-drag-region className="h-[34px]" />
 
       <header className="px-5 pb-4">
         <Wordmark size="sm" />

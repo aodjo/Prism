@@ -447,13 +447,19 @@ function Home(): JSX.Element {
     <div className="relative h-full w-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <Backdrop sky={HOME_SKY} />
 
+      {/* The strip the window is carried by. It has to be a band of its own rather than a
+          class on the header, because the shell moves the window for the element under the
+          pointer and never for its children — so a header holding a search field and two
+          buttons would drag from three narrow gaps. */}
+      <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-[3] h-[46px]" />
+
       <div className="relative z-[1] mx-auto flex w-full max-w-[1440px] flex-col px-[72px] pt-[46px] pb-[52px]">
-        <header className="drag flex h-10 flex-none items-center gap-4">
+        <header className="flex h-10 flex-none items-center gap-4">
           <Wordmark size="sm" />
-          <div className="flex-1" />
+          <div data-tauri-drag-region className="h-full flex-1" />
           <div
             hidden={alone}
-            className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-pill border border-line-1 bg-wash-3 py-2.5 pr-4 pl-5"
+            className="flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-pill border border-line-1 bg-wash-3 py-2.5 pr-4 pl-5"
           >
             <input
               ref={search}
@@ -472,7 +478,7 @@ function Home(): JSX.Element {
               of them open the only place there is to change anything. */}
           <button
             type="button"
-            className="no-drag flex-none rounded-pill"
+            className="flex-none rounded-pill"
             title={account.email ?? 'Not signed in'}
             aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
             onClick={() => {
@@ -483,7 +489,7 @@ function Home(): JSX.Element {
           </button>
         </header>
 
-        <div className="drag mt-[30px] flex h-9 flex-none items-center gap-3">
+        <div className="mt-[30px] flex h-9 flex-none items-center gap-3">
           <h1 className="m-0 text-[26px] leading-none font-semibold tracking-[-0.5px] text-ink">
             {t('Devices')}
           </h1>
@@ -493,10 +499,10 @@ function Home(): JSX.Element {
           >
             {machines.length + 1}
           </span>
-          <div className="flex-1" />
+          <div data-tauri-drag-region className="h-full flex-1" />
           <div
             hidden={alone}
-            className="no-drag flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]"
+            className="flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]"
           >
             {WHICH.map((one) => (
               <button
@@ -520,7 +526,7 @@ function Home(): JSX.Element {
             type="button"
             hidden={alone}
             onClick={prism.openSettings}
-            className="no-drag inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
+            className="inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
           >
             <span className="text-ui">+</span>
             <span>{t('Add device')}</span>
@@ -753,7 +759,7 @@ function Home(): JSX.Element {
           <div className="mt-3 flex flex-none items-center gap-3">
             <button
               type="button"
-              className="btn-secondary no-drag"
+              className="btn-secondary"
               onClick={() => {
                 void (async () => {
                   if (needsScreen === 'restart') {

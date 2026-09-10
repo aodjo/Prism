@@ -173,7 +173,7 @@ export function Primary({
   return (
     <button
       type="button"
-      className={small ? 'btn-primary-sm no-drag' : 'btn-primary no-drag'}
+      className={small ? 'btn-primary-sm' : 'btn-primary'}
       disabled={disabled}
       onClick={onClick}
     >
