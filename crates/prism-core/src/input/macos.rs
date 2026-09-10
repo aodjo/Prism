@@ -11,9 +11,11 @@
 //! previous synthesised event pressed, so every event has to be told which modifiers are
 //! held.
 
+use std::time::{Duration, Instant};
+
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
-    CGDisplayBounds, CGEvent, CGEventFlags, CGEventSource, CGEventSourceStateID,
+    CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID,
     CGEventTapLocation, CGEventType, CGMainDisplayID, CGMouseButton,
 };
 
@@ -27,6 +29,26 @@ use crate::net::packet::{InputEvent, MouseButton};
 /// games.
 const TAP: CGEventTapLocation = CGEventTapLocation::HIDEventTap;
 
+/// How soon a second press has to follow the first to count as a double click.
+///
+/// The system's own default. A person who has changed theirs gets this one from a remote
+/// session, which is the same double click they would get from any other pointing device the
+/// system does not know about.
+const DOUBLE_CLICK_TIME: Duration = Duration::from_millis(500);
+
+/// How far apart, in points, two presses can be and still be one double click.
+const DOUBLE_CLICK_DISTANCE: f64 = 4.0;
+
+/// The last press, which is what decides whether the next one is a double click.
+#[derive(Debug, Clone, Copy)]
+struct Press {
+    button: MouseButton,
+    at: CGPoint,
+    when: Instant,
+    /// Which click of a run this was: one for a single click, two for a double.
+    count: i64,
+}
+
 /// Injects input events onto this machine.
 pub struct MacInjector {
     source: objc2_core_foundation::CFRetained<CGEventSource>,
@@ -35,6 +57,13 @@ pub struct MacInjector {
     buttons: [bool; 3],
     keys: HeldKeys,
     flags: CGEventFlags,
+    /// The last press, or `None` before the first.
+    ///
+    /// A mouse event the system builds is not told which click of a run it is, so this is
+    /// written onto every button and drag event. Left to the default, a press says one and its
+    /// release says zero — and a release that says it ends no click is one web content, and
+    /// anything else that reads the count, does not treat as a click at all.
+    press: Option<Press>,
 }
 
 impl MacInjector {
@@ -75,14 +104,24 @@ impl MacInjector {
         {
             CGEvent::set_integer_value_field(
                 Some(&event),
-                objc2_core_graphics::CGEventField::MouseEventDeltaX,
+                CGEventField::MouseEventDeltaX,
                 dx as i64,
             );
             CGEvent::set_integer_value_field(
                 Some(&event),
-                objc2_core_graphics::CGEventField::MouseEventDeltaY,
+                CGEventField::MouseEventDeltaY,
                 dy as i64,
             );
+
+            // A drag belongs to the click that started it, as it does from a real mouse.
+            if kind != CGEventType::MouseMoved {
+                CGEvent::set_integer_value_field(
+                    Some(&event),
+                    CGEventField::MouseEventClickState,
+                    self.press.map_or(1, |press| press.count),
+                );
+            }
+
             CGEvent::set_flags(Some(&event), self.flags);
             CGEvent::post(TAP, Some(&event));
         }
@@ -92,6 +131,21 @@ impl MacInjector {
 
     /// Presses or releases a pointer button.
     fn press_button(&mut self, button: MouseButton, pressed: bool) -> Result<(), InputError> {
+        // A release says the same count as the press it ends. That is what a real mouse sends,
+        // and what an application pairing the two expects to see.
+        if pressed {
+            let now = Instant::now();
+
+            self.press = Some(Press {
+                button,
+                at: self.position,
+                when: now,
+                count: next_click(self.press, button, self.position, now),
+            });
+        }
+
+        let count = self.press.map_or(1, |press| press.count);
+
         self.buttons[button as usize] = pressed;
 
         let (kind, cg_button) = match (button, pressed) {
@@ -109,6 +163,11 @@ impl MacInjector {
             })?;
 
         {
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                CGEventField::MouseEventClickState,
+                count,
+            );
             CGEvent::set_flags(Some(&event), self.flags);
             CGEvent::post(TAP, Some(&event));
         }
@@ -250,6 +309,7 @@ impl Injector for MacInjector {
             buttons: [false; 3],
             keys: HeldKeys::default(),
             flags: CGEventFlags::empty(),
+            press: None,
         })
     }
 
@@ -262,10 +322,19 @@ impl Injector for MacInjector {
             // Posted as the motion from here to there, so everything a relative move gets —
             // a drag while a button is held, the delta a game reads — an absolute one gets
             // too, and the position this keeps ends up where the client pointed.
+            //
+            // Nothing is posted when the pointer is already there. The client names the place
+            // of every click on both edges of it, and a motion of nothing between a press and
+            // its release is a drag of nothing, which is not what the person did.
             InputEvent::MouseTo { x, y } => {
                 let target = place_on(self.bounds, x, y);
+                let (dx, dy) = (target.x - self.position.x, target.y - self.position.y);
 
-                self.move_pointer(target.x - self.position.x, target.y - self.position.y)
+                if dx == 0.0 && dy == 0.0 {
+                    return Ok(());
+                }
+
+                self.move_pointer(dx, dy)
             }
         }
     }
@@ -304,6 +373,24 @@ impl Injector for MacInjector {
         };
 
         (actual.x - self.position.x).abs() < 2.0 && (actual.y - self.position.y).abs() < 2.0
+    }
+}
+
+/// Returns which click of a run a press made at `at` and `now` would be, after `last`.
+///
+/// The same button again, soon enough and near enough, is the next click of the run the last
+/// one began; anything else starts a new run at one.
+fn next_click(last: Option<Press>, button: MouseButton, at: CGPoint, now: Instant) -> i64 {
+    match last {
+        Some(last)
+            if last.button == button
+                && now.duration_since(last.when) <= DOUBLE_CLICK_TIME
+                && (last.at.x - at.x).abs() <= DOUBLE_CLICK_DISTANCE
+                && (last.at.y - at.y).abs() <= DOUBLE_CLICK_DISTANCE =>
+        {
+            last.count + 1
+        }
+        _ => 1,
     }
 }
 
@@ -534,12 +621,86 @@ pub fn hid_to_virtual_key(usage: u16) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
-    use super::{MacInjector, hid_to_virtual_key, place_on};
+    use super::{MacInjector, Press, hid_to_virtual_key, next_click, place_on};
     use crate::input::{Injector, InputError};
-    use crate::net::packet::InputEvent;
+    use crate::net::packet::{InputEvent, MouseButton};
+
+    /// A left press at the origin, a moment ago, as the first click of a run.
+    fn pressed_at(when: Instant) -> Press {
+        Press {
+            button: MouseButton::Left,
+            at: CGPoint { x: 100.0, y: 100.0 },
+            when,
+            count: 1,
+        }
+    }
+
+    #[test]
+    fn a_first_press_is_the_first_click() {
+        let now = Instant::now();
+
+        assert_eq!(
+            next_click(None, MouseButton::Left, CGPoint { x: 1.0, y: 1.0 }, now),
+            1
+        );
+    }
+
+    #[test]
+    fn a_second_press_soon_and_near_is_a_double_click() {
+        let then = Instant::now();
+        let now = then + Duration::from_millis(200);
+
+        assert_eq!(
+            next_click(
+                Some(pressed_at(then)),
+                MouseButton::Left,
+                CGPoint { x: 102.0, y: 99.0 },
+                now
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn a_press_too_late_too_far_or_on_another_button_starts_again() {
+        let then = Instant::now();
+        let near = CGPoint { x: 101.0, y: 101.0 };
+
+        assert_eq!(
+            next_click(
+                Some(pressed_at(then)),
+                MouseButton::Left,
+                near,
+                then + Duration::from_millis(900)
+            ),
+            1,
+            "too late"
+        );
+        assert_eq!(
+            next_click(
+                Some(pressed_at(then)),
+                MouseButton::Left,
+                CGPoint { x: 140.0, y: 100.0 },
+                then + Duration::from_millis(100)
+            ),
+            1,
+            "too far"
+        );
+        assert_eq!(
+            next_click(
+                Some(pressed_at(then)),
+                MouseButton::Right,
+                near,
+                then + Duration::from_millis(100)
+            ),
+            1,
+            "another button"
+        );
+    }
 
     #[test]
     fn a_fraction_of_the_screen_lands_on_the_point_it_names() {
