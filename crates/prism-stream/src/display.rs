@@ -53,7 +53,7 @@ const HUD_INTERVAL: Duration = Duration::from_millis(100);
 const HUD_WIDTH: usize = 340;
 
 /// How tall the statistics panel is, in pixels.
-const HUD_HEIGHT: usize = 118;
+const HUD_HEIGHT: usize = 140;
 
 /// How large the statistics panel's text is, in pixels.
 const HUD_FONT_SIZE: f64 = 13.0;
@@ -77,6 +77,54 @@ fn is_quit(event: &Event) -> bool {
         }
         _ => false,
     }
+}
+
+/// Returns whether an event is the chord that takes the pointer, or hands it back.
+///
+/// Control and option together, pressed with nothing else, which is what every other machine
+/// on a desk uses for the same thing. Shift is excluded so that reaching for the quit chord
+/// does not release the pointer on the way.
+///
+/// Read from the modifiers rather than from the key, so it does not matter which of the two
+/// went down first or whether they are the left or the right one.
+fn is_grab_toggle(event: &Event) -> bool {
+    let Event::KeyDown {
+        keycode: Some(key),
+        keymod,
+        repeat: false,
+        ..
+    } = event
+    else {
+        return false;
+    };
+
+    if !matches!(
+        key,
+        Keycode::LCtrl | Keycode::RCtrl | Keycode::LAlt | Keycode::RAlt
+    ) {
+        return false;
+    }
+
+    keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD)
+        && keymod.intersects(Mod::LALTMOD | Mod::RALTMOD)
+        && !keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD)
+}
+
+/// Returns whether an event is a key being let go.
+///
+/// Sent on whether or not the pointer is the host's, because the chord that hands it back is
+/// two keys held down: the host saw them pressed and would go on holding them if the release
+/// stayed on this machine.
+fn is_release(event: &Event) -> bool {
+    matches!(event, Event::KeyUp { .. })
+}
+
+/// Returns whether an event is a click inside the picture.
+///
+/// What takes the pointer without a chord, the way a machine on the desk is used: somebody
+/// who clicks the screen they are watching means to be working on it.
+fn is_click(event: &Event) -> bool {
+    matches!(event, Event::MouseButtonDown { .. })
 }
 
 /// Translates one SDL event into an input event for the host, if it is one.
@@ -162,8 +210,9 @@ fn hud_lines(
     shown: u64,
     missed: u64,
     clock_offset_us: i64,
+    control: Option<bool>,
 ) -> Vec<String> {
-    let mut lines = Vec::with_capacity(5);
+    let mut lines = Vec::with_capacity(6);
 
     match latency.summarize() {
         Some(summary) => lines.push(format!(
@@ -196,6 +245,14 @@ fn hud_lines(
             "clock    host {:+.2} ms",
             clock_offset_us as f64 / 1000.0
         ));
+    }
+
+    // Last, and only where there is something to say: a session that is watching and nothing
+    // else has no chord to be told about.
+    match control {
+        Some(true) => lines.push("control  on, control option to let go".to_owned()),
+        Some(false) => lines.push("control  off, click to take it".to_owned()),
+        None => {}
     }
 
     lines
@@ -343,15 +400,29 @@ pub fn run(
     let mut hud_frames = 0u64;
     let mut sent_input = 0u64;
 
+    // Whether the pointer and keyboard are the host's right now. Off to begin with: a window
+    // that seized the mouse the moment it opened would be one somebody had to know a chord to
+    // escape from before they had seen the screen they came for.
+    let mut grabbed = false;
+
     if capture_input {
-        sdl.mouse().set_relative_mouse_mode(&window, true);
-        say.note("display: forwarding input, control alt shift Q to quit");
+        say.note("display: click to control this machine, control option to let go");
     }
 
     'main: loop {
         for event in events.poll_iter() {
             if is_quit(&event) {
                 break 'main;
+            }
+            if capture_input && (is_grab_toggle(&event) || (!grabbed && is_click(&event))) {
+                grabbed = !grabbed;
+                sdl.mouse().set_relative_mouse_mode(&window, grabbed);
+                say.note(if grabbed {
+                    "display: controlling this machine, control option to let go"
+                } else {
+                    "display: watching only, click to control this machine"
+                });
+                continue;
             }
             if resized(&event) {
                 let (width, height) = window.size_in_pixels();
@@ -362,7 +433,7 @@ pub fn run(
                 drawable_width = width;
                 drawable_height = height;
             }
-            if capture_input {
+            if capture_input && (grabbed || is_release(&event)) {
                 if let Some(sender) = input_slot.get() {
                     if let Some(input) = to_input_event(&event) {
                         if let Ok(stamped) = sender.send(input) {
@@ -415,6 +486,7 @@ pub fn run(
                         shown,
                         missed,
                         clock_offset,
+                        capture_input.then_some(grabbed),
                     ));
                     last_hud = Instant::now();
                     hud_frames = 0;
