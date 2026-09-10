@@ -49,6 +49,8 @@ export interface AccountDeviceView {
   readonly label: string;
   /** Whether it is the machine this window is running on. */
   readonly isThisMachine: boolean;
+  /** Whether it is shared right now, which is what makes it somewhere to connect to. */
+  readonly shared: boolean;
 }
 
 /**

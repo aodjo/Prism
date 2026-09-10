@@ -33,6 +33,25 @@ use tauri::{Emitter, Manager};
 /// The settings as they stand, read once at launch and written when somebody changes something.
 struct Held(Mutex<Settings>);
 
+/// How often the account is asked again while the home window is on screen.
+///
+/// The home screen lists the machines that are shared, and a machine turning sharing on somewhere
+/// else is something only the account knows. Fifteen seconds is how long somebody waits for it
+/// to turn up; it is also one small request, a few times a minute, from one window.
+const ACCOUNT_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Tells every window what the account says now, when that is different from before.
+fn refresh_account(app: &tauri::AppHandle) {
+    let account = app.state::<account::Held>();
+    let chosen = app.state::<Held>();
+
+    if account::refresh(&account, &chosen).unwrap_or(false)
+        && let Ok(state) = account::account_state(account, chosen)
+    {
+        let _ = app.emit("account:state", state);
+    }
+}
+
 /// Turns a failure into the sentence a window should show.
 ///
 /// Commands return `Result<_, String>` rather than a typed error because what reaches the
@@ -275,16 +294,28 @@ fn main() {
 
                 // On its own thread: this runs on the one drawing the window, and asking a
                 // server across the internet from here would freeze the window it is redrawing.
-                std::thread::spawn(move || {
-                    let account = asking.state::<account::Held>();
-                    let chosen = asking.state::<Held>();
+                std::thread::spawn(move || refresh_account(&asking));
+            });
 
-                    if account::refresh(&account, &chosen).unwrap_or(false)
-                        && let Ok(state) = account::account_state(account, chosen)
-                    {
-                        let _ = asking.emit("account:state", state);
+            // And every so often while the home window is showing, focused or not. What it
+            // lists is the machines that are shared right now, and one that starts sharing
+            // while somebody is looking at the list should turn up without their having to
+            // click somewhere else and back.
+            let polling = app.handle().clone();
+
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(ACCOUNT_POLL);
+
+                    let showing = polling
+                        .get_webview_window("home")
+                        .and_then(|home| home.is_visible().ok())
+                        .unwrap_or(false);
+
+                    if showing {
+                        refresh_account(&polling);
                     }
-                });
+                }
             });
 
             harness::run(&window);
@@ -340,7 +371,7 @@ fn main() {
 
                     let _ = held.stop();
 
-                    sharing::leave(&app.state::<sharing::Held>());
+                    sharing::leave(app);
                 }
                 // No windows left is not a reason to stop. The exit somebody asked for carries
                 // a code — `exit` and `restart` both set one — and that is the one that goes

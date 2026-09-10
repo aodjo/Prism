@@ -17,6 +17,8 @@
 //! [`prism_core::control::host`] with nothing in between.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use prism_core::control::host::{self, HostConfig, HostKeys, HostService, Phase};
 use prism_core::identity;
@@ -41,13 +43,30 @@ const BITRATE_BPS: (u32, u32) = (500_000, 200_000_000);
 /// One session at a time. A second session on the same machine would mean two capture streams
 /// and two encoders competing for one GPU, which is slower than either alone and gives both
 /// viewers a worse picture than one would have had.
-pub struct Held(Mutex<Option<HostService>>);
+///
+/// The number counts the times sharing has been turned on, so that what watches one of them can
+/// tell it apart from the next: sharing stopped and started again inside one of its checks would
+/// otherwise look to it like the same sharing still running, and two would go on watching.
+pub struct Held(Mutex<Option<HostService>>, AtomicU64);
 
 impl Held {
     /// Builds the sharing state of a machine that is not shared.
     #[must_use]
     pub fn new() -> Self {
-        Self(Mutex::new(None))
+        Self(Mutex::new(None), AtomicU64::new(0))
+    }
+
+    /// Whether this machine is shared.
+    fn is_sharing(&self) -> bool {
+        self.0
+            .lock()
+            .map(|session| session.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Whether the sharing turned on as `turn` is the sharing still running.
+    fn still(&self, turn: u64) -> bool {
+        self.1.load(Ordering::Relaxed) == turn && self.is_sharing()
     }
 }
 
@@ -243,41 +262,71 @@ fn holds_what_it_needs(chosen: &State<'_, Chosen>) -> bool {
 ///
 /// Accessibility can be taken away while Prism runs and the answer changes at once, so a session
 /// that goes on after it would be one that looks controllable and is not.
-const GRANT_CHECK: std::time::Duration = std::time::Duration::from_secs(3);
+const GRANT_CHECK: Duration = Duration::from_secs(3);
 
-/// Stops sharing the moment a grant a session needs goes away.
+/// How often a machine that is shared tells its account so.
 ///
-/// Runs for as long as a session does. A machine left shared without what sharing needs is the
-/// worst of both: it is listed, it answers, and whoever connects gets a picture they cannot use.
-fn watch_grants(app: tauri::AppHandle) {
+/// A third of the ninety seconds the account believes it for, so one announcement lost on the
+/// way does not take the machine off the others' home screens.
+const PRESENCE_EVERY: Duration = Duration::from_secs(30);
+
+/// Keeps watch over one turn of sharing, for as long as it runs.
+///
+/// Two things, on one thread because they end together. It stops sharing the moment a grant a
+/// session needs goes away — a machine left shared without what sharing needs is the worst of
+/// both: it is listed, it answers, and whoever connects gets a picture they cannot use. And it
+/// tells the account this machine is shared, as it starts and every half minute after, which is
+/// what puts it on the home screen of the others; once sharing ends, it says that too.
+fn keep_watch(app: tauri::AppHandle, turn: u64) {
     use tauri::Manager as _;
 
     std::thread::spawn(move || {
+        let mut announced: Option<Instant> = None;
+
         loop {
-            std::thread::sleep(GRANT_CHECK);
-
             let held: State<'_, Held> = app.state();
-            let running = held
-                .0
-                .lock()
-                .map(|session| session.is_some())
-                .unwrap_or(false);
 
-            if !running {
+            if !held.still(turn) {
+                // Unless sharing has already been turned on again, whose own watch is saying
+                // the opposite. A machine that ends up listed as not shared while it is would be
+                // missing from the others until this is next said.
+                if !held.is_sharing() {
+                    announce(&app, false);
+                }
+
                 return;
             }
 
             let chosen: State<'_, Chosen> = app.state();
 
-            if holds_what_it_needs(&chosen) {
+            if !holds_what_it_needs(&chosen) {
+                // Round the loop rather than out of it, so that ending it is said like any other.
+                let _ = stop_sharing(held, chosen);
+
                 continue;
             }
 
-            let _ = stop_sharing(held, chosen);
+            if announced.is_none_or(|at| at.elapsed() >= PRESENCE_EVERY) {
+                announce(&app, true);
+                announced = Some(Instant::now());
+            }
 
-            return;
+            std::thread::sleep(GRANT_CHECK);
         }
     });
+}
+
+/// Tells the account whether this machine is shared, and gives up quietly if it cannot.
+///
+/// Nothing to show for a failure: the next announcement is half a minute away, and a machine the
+/// account stops hearing from drops off the others' lists on its own.
+fn announce(app: &tauri::AppHandle, shared: bool) {
+    use tauri::Manager as _;
+
+    let account: State<'_, crate::account::Held> = app.state();
+    let chosen: State<'_, Chosen> = app.state();
+
+    let _ = crate::account::announce_sharing(&account, &chosen, shared);
 }
 
 /// Puts a machine back to sharing, if that is how it was left.
@@ -365,13 +414,14 @@ pub fn start_sharing(
     let snapshot = describe(&service.snapshot());
 
     *session = Some(service);
+    let turn = held.1.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Let go of the session before the settings are written, so a window polling for a
     // snapshot in that moment is answered rather than held behind a disk write.
     drop(session);
 
     remember(&chosen, true)?;
-    watch_grants(app);
+    keep_watch(app, turn);
 
     Ok(snapshot)
 }
@@ -410,18 +460,41 @@ pub fn stop_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<
 ///
 /// Long enough for the session to notice between frames and say goodbye to whoever is
 /// watching, which is what closes their window at once instead of after its idle timeout.
-const LEAVING_PATIENCE: std::time::Duration = std::time::Duration::from_millis(1500);
+const LEAVING_PATIENCE: Duration = Duration::from_millis(1500);
+
+/// How long quitting waits for the account to hear that this machine is no longer shared.
+///
+/// A second, against the twenty any other request is given. Somebody quitting is not waiting on
+/// the network, and a machine the account is not told about drops off the others' lists within a
+/// minute and a half anyway.
+const TELLING_PATIENCE: Duration = Duration::from_secs(1);
 
 /// Ends sharing as Prism quits, without forgetting that it was on.
 ///
 /// Not [`stop_sharing`]: that is somebody turning sharing off, and it is remembered so. This is
 /// the application going away with the machine still meant to be shared, which it will be again
 /// the next time Prism starts.
-pub fn leave(held: &Held) {
+pub fn leave(app: &tauri::AppHandle) {
+    use tauri::Manager as _;
+
+    let held: State<'_, Held> = app.state();
     let running = held.0.lock().ok().and_then(|mut slot| slot.take());
 
-    if let Some(service) = running {
-        let _ = service.join_within(LEAVING_PATIENCE);
+    let Some(service) = running else {
+        return;
+    };
+
+    let _ = service.join_within(LEAVING_PATIENCE);
+
+    let telling = {
+        let app = app.clone();
+
+        std::thread::spawn(move || announce(&app, false))
+    };
+
+    let deadline = Instant::now() + TELLING_PATIENCE;
+    while !telling.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

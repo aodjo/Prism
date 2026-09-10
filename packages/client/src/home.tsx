@@ -49,6 +49,22 @@ const prism = window.prism;
 /** The phases where a stream is running or on its way to running. */
 const RUNNING: ReadonlySet<string> = new Set(['connecting', 'streaming']);
 
+/**
+ * The machines this one can watch: the account's others that are shared right now.
+ *
+ * One that is not shared is not somewhere to connect to, whatever the reason — switched off,
+ * never turned on in Prism, or missing a permission sharing needs — so it is not offered.
+ *
+ * @param {readonly AccountDeviceView[]} devices - Every machine on the account.
+ * @param {string} mine - This machine's public key.
+ * @returns {string[]} The public keys of the ones to list.
+ */
+function watchable(devices: readonly AccountDeviceView[], mine: string): string[] {
+  return devices
+    .filter((device) => device.shared && device.publicKey !== mine)
+    .map((device) => device.publicKey);
+}
+
 /** Nothing is happening, and nothing has happened yet. */
 const NOTHING: StreamState = {
   phase: 'idle',
@@ -246,11 +262,7 @@ function Home(): JSX.Element {
       // The account's machines, and only those. What this machine happens to trust locally is
       // not the same question: that file is a cache of the account's answer, and anything in
       // it that the account does not name is something nobody may reach from here.
-      setMachines(
-        signedIn.devices
-          .map((device) => device.publicKey)
-          .filter((key) => key !== identity.publicKey),
-      );
+      setMachines(watchable(signedIn.devices, identity.publicKey));
     })();
   }, []);
 
@@ -267,16 +279,13 @@ function Home(): JSX.Element {
       }
     });
 
-    // The account is asked again whenever this window comes forward, so a machine signed in
-    // somewhere else turns up here without anybody restarting anything.
+    // The account is asked again whenever this window comes forward and every so often while it
+    // is showing, so a machine that starts sharing somewhere else turns up here without anybody
+    // restarting anything — and one that stops goes.
     prism.onAccount((state) => {
       setDevices(state.devices);
       setAccount({ email: state.email });
-      setMachines(
-        state.devices
-          .map((device) => device.publicKey)
-          .filter((key) => key !== state.publicKey),
-      );
+      setMachines(watchable(state.devices, state.publicKey));
     });
 
     prism.onUpdate(setUpdate);
@@ -903,23 +912,18 @@ function Home(): JSX.Element {
 
         {alone ? (
           /* The one thing left to do, said once. Every other machine on the account turns up
-             here by itself, so what is missing is not a button but a second installation —
-             and a window that offered a button instead would be offering the wrong thing. */
+             here by itself once it is shared, so what is missing is not a button here but a
+             switch over there — or, before that, a second installation. */
           <div className="mt-12 flex-none">
             <h2 className="m-0 text-[19px] leading-none font-semibold tracking-[-0.3px] text-ink-2">
               {t('Nothing to watch yet')}
             </h2>
             <p className="mt-3 mb-0 max-w-[46ch] text-note leading-relaxed text-muted-2">
-              Install Prism on the machine you want to watch and sign in
-              {account.email ? (
-                <>
-                  {' as '}
-                  <span className="text-ink-3">{account.email}</span>
-                </>
-              ) : (
-                ' to the same account'
-              )}
-              . It turns up here on its own.
+              {devices.some((device) => !device.isThisMachine)
+                ? t('Turn on sharing on the machine you want to watch, and it turns up here.')
+                : t(
+                    'Install PRISM on the machine you want to watch, sign in to the same account, and turn on sharing.',
+                  )}
             </p>
           </div>
         ) : (

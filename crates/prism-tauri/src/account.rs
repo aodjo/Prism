@@ -84,6 +84,12 @@ struct Device {
     public_key: String,
     /// What its owner calls it.
     label: String,
+    /// Whether it is shared right now, or `None` from a server that does not keep track.
+    ///
+    /// A server older than this build, or the one `prism-rendezvous` serves, says nothing about
+    /// it. Every machine is offered then, as every machine was before any server said.
+    #[serde(default)]
+    shared: Option<bool>,
 }
 
 /// The salt to hash a password with.
@@ -195,6 +201,13 @@ struct DevicesBody {
     devices: Vec<Device>,
 }
 
+/// What saying whether this machine is shared sends.
+#[derive(Debug, Serialize)]
+struct SharingBody {
+    /// Whether it is.
+    shared: bool,
+}
+
 // ── What a window is given ──────────────────────────────────────────────────────────────────
 
 /// One machine on the account, as a window shows it.
@@ -210,6 +223,8 @@ pub struct DeviceView {
     pub label: String,
     /// Whether it is the machine showing this.
     pub is_this_machine: bool,
+    /// Whether it is shared right now, which is what makes it somewhere to connect to.
+    pub shared: bool,
 }
 
 /// What is known about the account right now.
@@ -272,14 +287,16 @@ impl Refusal {
 
 /// Which verb a request uses.
 ///
-/// Three, because three is all this API has. A general HTTP client would take the method as a
-/// string; this one takes the three it can actually send, so a typo is a build failure.
+/// Four, because four is all this API has. A general HTTP client would take the method as a
+/// string; this one takes the four it can actually send, so a typo is a build failure.
 #[derive(Debug, Clone, Copy)]
 enum Verb {
     /// Read something.
     Get,
     /// Create or replace something.
     Post,
+    /// Set one thing about something that exists.
+    Put,
     /// Remove something.
     Delete,
 }
@@ -472,6 +489,19 @@ impl Client {
         Ok(reply.read::<DevicesBody>()?.devices)
     }
 
+    /// Tells the account whether a machine is shared.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the session has expired, or the machine is not on the account.
+    fn say_shared(&mut self, public_key: &str, shared: bool) -> Result<(), Refusal> {
+        let path = format!("/v1/devices/{}/sharing", escape(public_key));
+
+        self.send(Verb::Put, &path, Some(&SharingBody { shared }))?;
+
+        Ok(())
+    }
+
     /// Removes a machine from the account and returns what is left.
     ///
     /// # Errors
@@ -555,6 +585,14 @@ impl Client {
             Verb::Delete => authorised(self.agent.delete(&url), token).call(),
             Verb::Post => {
                 let request = authorised(self.agent.post(&url), token);
+
+                match body {
+                    Some(value) => request.send_json(value),
+                    None => request.send_empty(),
+                }
+            }
+            Verb::Put => {
+                let request = authorised(self.agent.put(&url), token);
 
                 match body {
                     Some(value) => request.send_json(value),
@@ -774,6 +812,43 @@ impl Holder {
         })
     }
 
+    /// Tells the account whether this machine is shared.
+    ///
+    /// Nothing to tell when nobody is signed in: a machine off any account is reached by its
+    /// address, and there is no list for it to be on.
+    ///
+    /// # Errors
+    ///
+    /// Fails if this machine's identity cannot be read or the server refuses.
+    fn announce(&mut self, chosen: &Chosen, shared: bool) -> Result<(), String> {
+        // Sharing is put back at launch, before any window has asked about the account, so
+        // this can be the first thing a run says to the server.
+        if !self.tried_resume {
+            self.tried_resume = true;
+            self.resume(chosen);
+        }
+
+        if self.email.is_none() {
+            return Ok(());
+        }
+
+        let mine = identity::to_hex(&mine()?);
+
+        self.client_mut()?
+            .say_shared(&mine, shared)
+            .map_err(|refusal| refusal.message)?;
+
+        if let Some(me) = self
+            .devices
+            .iter_mut()
+            .find(|device| device.is_this_machine)
+        {
+            me.shared = shared;
+        }
+
+        Ok(())
+    }
+
     /// Asks the account again who its machines are, and says whether they changed.
     ///
     /// The list is not a thing this machine decides, so it goes stale the moment somebody signs
@@ -986,10 +1061,13 @@ impl Holder {
     }
 
     /// The account's machines as one comparable value.
-    fn listed(&self) -> Vec<String> {
+    ///
+    /// Whether each is shared is part of it: a machine turning sharing on somewhere else is the
+    /// change that puts it on this one's home screen.
+    fn listed(&self) -> Vec<(String, bool)> {
         self.devices
             .iter()
-            .map(|device| device.public_key.clone())
+            .map(|device| (device.public_key.clone(), device.shared))
             .collect()
     }
 
@@ -1140,6 +1218,7 @@ fn views(devices: &[Device], mine: &str) -> Vec<DeviceView> {
             public_key: device.public_key.clone(),
             label: device.label.clone(),
             is_this_machine: device.public_key == mine,
+            shared: device.shared.unwrap_or(true),
         })
         .collect()
 }
@@ -1592,6 +1671,18 @@ pub fn refresh(held: &Held, settings: &Chosen) -> Result<bool, String> {
     held.with(|holder| holder.refresh(settings))
 }
 
+/// Tells the account whether this machine is shared.
+///
+/// Not a command either: sharing says this as it starts, again every so often while it runs,
+/// and once more when it stops. A window has no part in it.
+///
+/// # Errors
+///
+/// Fails if the server refuses or cannot be reached, or a thread panicked holding the account.
+pub fn announce_sharing(held: &Held, settings: &Chosen, shared: bool) -> Result<(), String> {
+    held.with(|holder| holder.announce(settings, shared))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1601,7 +1692,22 @@ mod tests {
         Device {
             public_key: public_key.to_owned(),
             label: label.to_owned(),
+            shared: None,
         }
+    }
+
+    #[test]
+    fn a_server_that_keeps_no_track_of_sharing_offers_every_machine() {
+        let older: DevicesBody =
+            serde_json::from_str(r#"{"devices":[{"public_key":"ab12","label":"Studio"}]}"#)
+                .expect("an older server's answer still reads");
+        assert!(views(&older.devices, "cd34")[0].shared);
+
+        let newer: DevicesBody = serde_json::from_str(
+            r#"{"devices":[{"public_key":"ab12","label":"Studio","shared":false}]}"#,
+        )
+        .expect("reads");
+        assert!(!views(&newer.devices, "cd34")[0].shared);
     }
 
     #[test]
