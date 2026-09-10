@@ -328,6 +328,17 @@ export interface PrismApi {
   requestPermission(id: string): Promise<HostPermissions>;
 
   /**
+   * Starts Prism again.
+   *
+   * For a grant the system reads only once per process, which on macOS is screen recording: a
+   * grant given while Prism is running is one it goes on reporting as missing.
+   *
+   * @async
+   * @returns {Promise<null>} Nothing, and only where the platform refused to restart.
+   */
+  restart(): Promise<null>;
+
+  /**
    * Starts sharing this machine's screen.
    *
    * @async

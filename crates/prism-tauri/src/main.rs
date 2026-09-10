@@ -288,6 +288,7 @@ fn main() {
             set_settings,
             permissions::permissions,
             permissions::request_permission,
+            permissions::restart,
             sharing::start_sharing,
             sharing::stop_sharing,
             sharing::sharing_state,
