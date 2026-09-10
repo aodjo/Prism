@@ -18,7 +18,10 @@ use prism_core::decode::{NAL_IDR, NAL_PPS, NAL_SPS, nal_type, nal_units};
 /// software encodes of ninety frames each starve one another well past that. Measured on
 /// GitHub's Intel macOS runner, which is a virtual machine with no media engine — eight of the
 /// nine passed and the ninth timed out.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// Gated to match the two modules that use it. Both are macOS-only — VideoToolbox is the only
+/// session either end of this round trip can be — and a constant compiled where nothing reads
+/// it is dead code that `-D warnings` stops the Windows build on.
+#[cfg(target_os = "macos")]
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[test]
