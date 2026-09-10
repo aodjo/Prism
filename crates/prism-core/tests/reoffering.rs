@@ -12,7 +12,7 @@
 //! does not answer the handshake.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use prism_core::net::handshake::Identity;
@@ -60,7 +60,7 @@ fn spare_port() -> u16 {
 ///
 /// Returns once both ends have finished with it, which is the moment the next turn of a real
 /// host's loop would come round and bind the same port again.
-fn one_session(at: SocketAddr, host: &Identity, client: &Identity) {
+fn one_session(at: SocketAddr, host: &Identity, client: &Identity) -> std::sync::Arc<AtomicBool> {
     let dialling = {
         let client = client.clone();
         let host_key = *host.public();
@@ -104,8 +104,12 @@ fn one_session(at: SocketAddr, host: &Identity, client: &Identity) {
 
     dialling.join().expect("the client thread does not panic");
 
+    let alive = sender.alive();
+
     // The session is over. Everything it took has to go with it.
     drop(sender);
+
+    alive
 }
 
 #[test]
@@ -118,7 +122,16 @@ fn a_second_session_can_bind_the_port_the_first_one_used() {
     let host = Identity::generate().expect("a key pair");
     let client = Identity::generate().expect("a key pair");
 
-    one_session(at, &host, &client);
+    let alive = one_session(at, &host, &client);
+
+    // Every thread a session starts on a duplicate of its socket watches this, so a session
+    // that has ended and still reads as alive is one none of them will let go of. The audio
+    // thread read the wrong flag once — the one meaning "somebody unshared this machine" —
+    // and so stayed until that happened, which is to say until the application was quit.
+    assert!(
+        !alive.load(Ordering::Relaxed),
+        "the session still reads as running after it ended"
+    );
 
     // The return path is a thread, and a thread told to stop is not a thread that has stopped.
     // A real host takes far longer than this to come round to binding again.

@@ -787,6 +787,16 @@ impl SliceSender {
         self.audio_frames
     }
 
+    /// Returns whether this session is still going, for a thread that has to stop when it ends.
+    ///
+    /// Cleared when this sender is dropped, which is the end of the turn. Anything holding a
+    /// duplicate of the session's socket has to watch it: a thread that outlives the session
+    /// keeps the port, and the next turn binds the same one.
+    #[must_use]
+    pub fn alive(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.alive)
+    }
+
     /// Returns the connected client's public key, as the handshake proved it.
     #[must_use]
     pub fn peer(&self) -> [u8; KEY_LEN] {

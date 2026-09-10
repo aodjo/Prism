@@ -796,6 +796,12 @@ pub fn spawn_audio(
         return Ok(None);
     }
 
+    // Two reasons to stop, and both are needed. `stop` is somebody unsharing the machine, which
+    // ends every turn of the loop; `alive` is this turn ending on its own, which is what happens
+    // every time a client hangs up. Watching only the first is a thread that outlives its
+    // session holding a duplicate of its socket — and since the turn after it binds the same
+    // port, that is a machine which can never be watched again until it is restarted.
+    let alive = sender.alive();
     let mut sender = sender.audio_sender()?;
     let sent = Arc::clone(sent);
     let stop = Arc::clone(stop);
@@ -823,7 +829,7 @@ pub fn spawn_audio(
             let mut heard = false;
             let mut mute_warned = false;
 
-            while !stop.load(Ordering::Relaxed) {
+            while !stop.load(Ordering::Relaxed) && alive.load(Ordering::Relaxed) {
                 // A silent machine may deliver nothing at all, not zeroes. Sending silence in
                 // its place keeps the stream continuous, which is what stops the client's
                 // jitter buffer from having to fill from empty the moment something makes a
