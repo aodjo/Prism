@@ -296,6 +296,14 @@ enum Command {
         #[arg(long)]
         synthetic_input: bool,
 
+        /// Print where the host says its pointer is, each time that changes.
+        ///
+        /// With --synthetic-input, this is how a run with no window finds out whether the host
+        /// is injecting at all: one that cannot — no Accessibility grant, most often — says so
+        /// only on its own terminal, and from here its pointer simply never moves.
+        #[arg(long)]
+        watch_pointer: bool,
+
         /// Accept files into this folder, and send them from it.
         ///
         /// Off unless named, for the same reason the host's is.
@@ -814,6 +822,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
             no_input,
             audio,
             synthetic_input,
+            watch_pointer,
             share,
             send,
             fetch,
@@ -914,6 +923,37 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 drop(watching);
             });
 
+            // Where the host says its pointer is. Read on a timer rather than per report,
+            // because the host sends one with every frame and the question is whether it moves.
+            let pointer: Option<client::CursorSink> =
+                watch_pointer.then(|| std::sync::Arc::new(std::sync::Mutex::new(None)));
+
+            if let Some(sink) = pointer.clone() {
+                std::thread::spawn(move || {
+                    let mut last = None;
+
+                    loop {
+                        std::thread::sleep(Duration::from_millis(100));
+
+                        let now = sink.lock().ok().and_then(|reading| *reading);
+                        let place = now.map(|reading| (reading.x, reading.y));
+
+                        if place != last {
+                            if let Some(reading) = now {
+                                println!(
+                                    "pointer: {},{} on a {}x{} screen",
+                                    reading.x,
+                                    reading.y,
+                                    reading.screen_width,
+                                    reading.screen_height
+                                );
+                            }
+                            last = place;
+                        }
+                    }
+                });
+            }
+
             #[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
             {
                 let _ = (window_width, window_height, pacing_us, no_input);
@@ -932,6 +972,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     client::ClientHooks {
                         offset: Some(offset),
                         input: synthetic_input.then(windowless_input),
+                        cursor: pointer,
                         report: Some(printing()),
                         files: moving,
                         landed: Some(landed_tx),
@@ -958,6 +999,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                         client::ClientHooks {
                             offset: Some(offset),
                             input: synthetic_input.then(windowless_input),
+                            cursor: pointer,
                             report: Some(printing()),
                             files: moving,
                             landed: Some(landed_tx),
