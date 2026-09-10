@@ -92,10 +92,14 @@ const PUBLISH_GRANT_SECONDS = 10 * 60;
 /**
  * How long the session a publish grant opens is good for.
  *
- * Half an hour: enough to build and upload, and not enough to be worth keeping. It is an
- * ordinary session, so it can also be ended from the dashboard like any other.
+ * An hour, which is a run of builds rather than one. Approving in a browser is cheap but it is
+ * not free, and somebody fixing one thing publishes four times before they are done — asking
+ * again between each is asking about a decision they have already made.
+ *
+ * It is an ordinary session, so it can be ended from the dashboard like any other, which is
+ * faster than any expiry.
  */
-const PUBLISH_SESSION_SECONDS = 30 * 60;
+const PUBLISH_SESSION_SECONDS = 60 * 60;
 
 /** How many bytes the second factor's shared secret is. */
 const TOTP_BYTES = 20;

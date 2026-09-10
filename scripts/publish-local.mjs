@@ -24,13 +24,14 @@
  * - A Developer ID on macOS, which it finds in the keychain. `APPLE_SIGNING_IDENTITY` names
  *   another one where there is a choice. Without any, every rebuild carries a different
  *   ad-hoc identity — a keychain prompt each time, and a screen recording grant to give again.
- * - An operator to say yes in a browser, which it opens. Nothing is typed here.
+ * - An operator to say yes in a browser, which it opens. Nothing is typed here, and the
+ *   answer is kept for an hour so that a run of four builds is one approval.
  *
  * @module
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +40,14 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Where the account server lives. */
 const SERVER = process.env.PRISM_ACCOUNT_SERVER ?? 'https://accounts.presm.kr';
+
+/**
+ * Where the token from the last approval is kept.
+ *
+ * Beside this machine's identity, which is the other credential that is about this machine
+ * rather than about the repository. Never in the working tree.
+ */
+const TOKEN_FILE = join(homedir(), '.prism/publish.json');
 
 /** Where the updater's signing key is kept, unless something says otherwise. */
 const DEFAULT_KEY = join(homedir(), 'Documents/prism-keys/prism-update.key');
@@ -146,6 +155,84 @@ function run(command, args, env = {}) {
 }
 
 /**
+ * The token this machine was last given, if it is still worth anything.
+ *
+ * Kept so that publishing four times while fixing one thing does not mean approving four times
+ * in a browser. Beside the identity key rather than in the repository: it is about this machine
+ * and it is a credential, and neither belongs in a working tree.
+ *
+ * Checked against the server rather than trusted for its expiry alone. A session can be ended
+ * from the dashboard at any moment, and finding that out here costs one request — finding it out
+ * after the build costs three minutes.
+ *
+ * @async
+ * @returns {Promise<string>} The token, or an empty string if there is not a usable one.
+ */
+async function kept() {
+  let held = null;
+
+  try {
+    held = JSON.parse(readFileSync(TOKEN_FILE, 'utf8'));
+  } catch {
+    return '';
+  }
+
+  if (!held?.token || (held.until ?? 0) * 1000 <= Date.now()) {
+    return '';
+  }
+
+  const still = await fetch(`${SERVER}/v1/session`, {
+    headers: { authorization: `Bearer ${held.token}` },
+  }).catch(() => null);
+
+  if (!still?.ok) {
+    rmSync(TOKEN_FILE, { force: true });
+
+    return '';
+  }
+
+  const who = await still.json().catch(() => ({}));
+
+  if (!who.operator) {
+    rmSync(TOKEN_FILE, { force: true });
+
+    return '';
+  }
+
+  console.log(`Still allowed as ${who.email}.`);
+
+  return held.token;
+}
+
+/**
+ * Writes down a token so the next run does not have to ask again.
+ *
+ * Readable by this account and nobody else. A failure is not reported: the token in hand still
+ * works, and the only cost of not keeping it is approving again next time.
+ *
+ * @param {string} token - What the server issued.
+ * @returns {void}
+ */
+function keep(token) {
+  try {
+    mkdirSync(dirname(TOKEN_FILE), { recursive: true });
+    writeFileSync(TOKEN_FILE, JSON.stringify({ token, until: SESSION_UNTIL() }), { mode: 0o600 });
+  } catch {
+    // Nothing to do about it, and nothing lost.
+  }
+}
+
+/**
+ * When a freshly issued token stops being worth trying.
+ *
+ * A little short of the hour the server gives it, so that a run which starts just inside the
+ * window does not find the session gone halfway through its upload.
+ *
+ * @returns {number} A unix time.
+ */
+const SESSION_UNTIL = () => Math.floor(Date.now() / 1000) + 55 * 60;
+
+/**
  * Asks a browser for permission to publish, and waits until somebody answers.
  *
  * A password typed at a shell prompt is the one credential that decides what every machine runs,
@@ -204,7 +291,8 @@ async function allowed(what) {
 
     const { token, email } = await waited.json();
 
-    console.log(`Allowed by ${email}.`);
+    console.log(`Allowed by ${email}. This machine will not have to ask again for an hour.`);
+    keep(token);
 
     return token;
   }
@@ -252,7 +340,7 @@ if (process.platform === 'darwin' && !identity) {
   process.exit(2);
 }
 
-const token = await allowed(`prism · ${target} · ${arch}`);
+const token = (await kept()) || (await allowed(`prism · ${target} · ${arch}`));
 
 console.log(`\nbuilding 1.0.0-local.${build} for ${target}/${arch}\n`);
 
