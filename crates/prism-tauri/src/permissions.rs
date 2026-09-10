@@ -113,7 +113,68 @@ pub fn request_permission(
 /// refused, which is why it is not `-> !`.
 #[tauri::command]
 pub fn restart(app: tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    if reopen() {
+        app.exit(0);
+
+        return;
+    }
+
     app.restart();
+}
+
+/// Asks the system to open this application again, once this copy of it has gone.
+///
+/// Tauri's own restart runs the binary inside the bundle directly. That produces a process which
+/// happens to live in an application rather than a running application: the system launched
+/// nothing, so it has nothing recorded against it, and the privacy grants that belong to the
+/// bundle are not offered to it. Which is exactly what this restart exists to collect — so it
+/// would restart, ask again, and be told no a second time.
+///
+/// The wait is a shell holding on until this process is gone. `open` on a bundle that is still
+/// running brings the old copy forward instead of starting a new one, and the old copy is the
+/// one on its way out.
+///
+/// # Returns
+///
+/// Whether the relaunch was handed over. False leaves the caller to restart the other way, which
+/// is better than not restarting.
+#[cfg(target_os = "macos")]
+fn reopen() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+
+    // `…/Prism.app/Contents/MacOS/prism-tauri` — three steps up is the bundle.
+    let Some(bundle) = exe.ancestors().nth(3) else {
+        return false;
+    };
+
+    if bundle.extension().is_none_or(|kind| kind != "app") {
+        return false;
+    }
+
+    let waiting = format!(
+        "while kill -0 {} 2>/dev/null; do sleep 0.2; done; open {}",
+        std::process::id(),
+        shell_quoted(&bundle.display().to_string()),
+    );
+
+    std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(waiting)
+        .spawn()
+        .is_ok()
+}
+
+/// Wraps a path so a shell reads it as one word.
+///
+/// Single quotes, with any single quote in the path closed and reopened around an escaped one.
+/// The path comes from the running executable rather than from anybody's typing, but a command
+/// line assembled without quoting is a command line that breaks on the first space.
+#[cfg(target_os = "macos")]
+fn shell_quoted(path: &str) -> String {
+    format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 /// Returns whether the session will accept the client's input.
