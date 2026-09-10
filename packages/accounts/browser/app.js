@@ -1304,13 +1304,15 @@ async function drawBuilds(column) {
               href:
                 build.source === 'github'
                   ? build.url
-                  : `/v1/builds/${build.version}/${build.target}/${build.arch}`,
+                  : `/v1/builds/${build.version}/${build.target}/${build.arch}` +
+                    (build.kind === 'installer' ? '/installer' : ''),
               title: '내려받기',
               download: '',
             }, [icon('download', 15)]),
             // Only what this server is keeping. A release belongs to the repository that cut it
             // and a button here that appeared to delete one would be lying about what it does.
             build.source !== 'github' &&
+              build.kind !== 'installer' &&
               el('button.icon-button', {
                 type: 'button',
                 title: '내리기',

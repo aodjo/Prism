@@ -190,6 +190,16 @@ CREATE TABLE IF NOT EXISTS builds (
   filename      TEXT NOT NULL DEFAULT '',
   -- How many bytes the object is, so a listing can be read without opening the bucket.
   bytes         INTEGER NOT NULL,
+  -- The installer beside it, where the platform has one that is a different file.
+  --
+  -- macOS is the only one that does: the updater takes a `.app.tar.gz` and a person takes a
+  -- `.dmg`, and they are not the same bytes. On Windows and Linux the installer *is* the thing
+  -- the updater fetches, so these stay empty and the row describes one file.
+  --
+  -- Two columns rather than a second row, because this is not an open-ended set of kinds. A
+  -- version on a platform has one artifact the updater uses and at most one a person downloads.
+  installer_filename TEXT NOT NULL DEFAULT '',
+  installer_bytes    INTEGER NOT NULL DEFAULT 0,
   -- When it was published, by this server's clock.
   uploaded_unix INTEGER NOT NULL,
   -- Which account published it, for the same reason every other change here is attributed.

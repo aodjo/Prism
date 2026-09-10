@@ -31,7 +31,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,19 +58,23 @@ const DEFAULT_KEY = join(homedir(), 'Documents/prism-keys/prism-update.key');
  * The names Rust uses for a target, which is what Tauri asks the endpoint with — not the ones
  * Node uses for the same two things.
  *
- * @returns {{target: string, arch: string, bundle: string}} The platform, and what its bundle
- *   file is called under `target/release/bundle`.
+ * @returns {{target: string, arch: string, bundle: string, installer: string}} The platform,
+ *   what its bundle file is called under `target/release/bundle`, and the directory holding
+ *   the installer where that is a different file.
  */
 function platform() {
   const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
 
   switch (process.platform) {
+    // macOS is the only one with two artifacts. The updater takes the archive; a person opens
+    // the disk image, and they are not the same bytes. Elsewhere the installer is the file the
+    // updater fetches, so there is nothing else to send.
     case 'darwin':
-      return { target: 'darwin', arch, bundle: 'macos/Prism.app.tar.gz' };
+      return { target: 'darwin', arch, bundle: 'macos/Prism.app.tar.gz', installer: 'dmg' };
     case 'win32':
-      return { target: 'windows', arch, bundle: 'nsis/Prism_x64-setup.exe' };
+      return { target: 'windows', arch, bundle: 'nsis/Prism_x64-setup.exe', installer: '' };
     case 'linux':
-      return { target: 'linux', arch, bundle: 'appimage/prism.AppImage' };
+      return { target: 'linux', arch, bundle: 'appimage/prism.AppImage', installer: '' };
     default:
       throw new Error(`nothing is published for ${process.platform}`);
   }
@@ -161,15 +165,7 @@ function asked(argv) {
     }
   }
 
-  // Counted from the wall clock rather than from anything in the repository, and deliberately
-  // large. A published build has to sort above whatever CI last released or the machine that
-  // installs it is offered the release straight back — and CI counts its own runs, which this
-  // has no way to know.
-  if (!Number.isInteger(build) || build <= 0) {
-    build = 100_000 + Math.floor((Date.now() - Date.UTC(2026, 0, 1)) / 60_000);
-  }
-
-  return { build, notes };
+  return { build: Number.isInteger(build) && build > 0 ? build : 0, notes };
 }
 
 /**
@@ -186,6 +182,36 @@ function run(command, args, env = {}) {
     stdio: 'inherit',
     env: { ...process.env, ...env },
   });
+}
+
+/**
+ * The number after the highest one on the local line.
+ *
+ * Asked of the server rather than counted here, so the line has one sequence however many
+ * machines publish to it. Counting locally would give two machines the same number and a version
+ * that means one thing on one of them and another on the other.
+ *
+ * @async
+ * @param {string} token - An operator session.
+ * @returns {Promise<number>} What this build should be called.
+ */
+async function nextNumber(token) {
+  const listed = await fetch(`${SERVER}/v1/admin/builds?channel=local`, {
+    headers: { authorization: `Bearer ${token}` },
+  }).catch(() => null);
+
+  if (!listed?.ok) {
+    return 1;
+  }
+
+  const { builds } = await listed.json().catch(() => ({ builds: [] }));
+  const highest = (builds ?? []).reduce((most, one) => {
+    const found = /-local\.(\d+)$/u.exec(one.version ?? '');
+
+    return found ? Math.max(most, Number(found[1])) : most;
+  }, 0);
+
+  return highest + 1;
 }
 
 /**
@@ -353,7 +379,7 @@ function open(link) {
   }
 }
 
-const { target, arch, bundle } = platform();
+const { target, arch, bundle, installer } = platform();
 const { build, notes } = asked(process.argv.slice(2));
 const key = process.env.PRISM_UPDATE_KEY ?? DEFAULT_KEY;
 
@@ -386,18 +412,20 @@ if (process.platform === 'darwin' && !identity) {
 
 const token = (await kept()) || (await allowed(`prism · ${target} · ${arch}`));
 
-console.log(`\nbuilding 1.0.0-local.${build} for ${target}/${arch}\n`);
+const numbered = build || (await nextNumber(token));
+
+console.log(`\nbuilding 1.0.0-local.${numbered} for ${target}/${arch}\n`);
 
 run('pnpm', ['package'], {
   PATH: path,
   APPLE_SIGNING_IDENTITY: identity,
   PRISM_CHANNEL: 'local',
-  PRISM_BUILD: String(build),
+  PRISM_BUILD: String(numbered),
   TAURI_SIGNING_PRIVATE_KEY: readFileSync(key, 'utf8').trim(),
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: process.env.PRISM_UPDATE_KEY_PASSWORD ?? '',
 });
 
-const version = `1.0.0-local.${build}`;
+const version = `1.0.0-local.${numbered}`;
 const made = join(ROOT, 'target/release/bundle', bundle);
 const signature = readFileSync(`${made}.sig`, 'utf8').trim();
 const body = readFileSync(made);
@@ -425,5 +453,37 @@ if (!put.ok) {
   process.exit(1);
 }
 
-console.log(`${version} is on the local line for ${target}/${arch}.`);
+// The disk image, where there is one. Sent after the archive because the archive is what a
+// machine updates from: a version that exists at all should be one the updater can serve, and
+// an installer with nothing behind it would be a download that installs an update nobody can
+// receive.
+if (installer) {
+  const folder = join(ROOT, 'target/release/bundle', installer);
+  const image = readdirSync(folder).find((each) => each.endsWith('.dmg'));
+
+  if (image) {
+    const bytes = readFileSync(join(folder, image));
+
+    console.log(`publishing ${image} — ${(bytes.byteLength / 1e6).toFixed(1)} MB`);
+
+    const sent = await fetch(
+      `${SERVER}/v1/admin/builds/${version}/${target}/${arch}/installer`,
+      {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/octet-stream',
+          'x-prism-filename': image,
+        },
+        body: bytes,
+      },
+    );
+
+    if (!sent.ok) {
+      console.error('the archive went up but the disk image did not');
+    }
+  }
+}
+
+console.log(`\n${version} is on the local line for ${target}/${arch}.`);
 console.log('Machines following it will be offered it within half an hour, or at their next launch.');

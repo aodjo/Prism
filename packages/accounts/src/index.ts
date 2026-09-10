@@ -232,7 +232,7 @@ async function decoy(env: Env): Promise<Uint8Array> {
 const DASHBOARD_POLICY =
   "default-src 'none'; script-src 'self' 'wasm-unsafe-eval';" +
   " style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:;" +
-  " form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
+  " font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 /**
  * The dashboard's files, by the path a browser asks for them at.
@@ -261,7 +261,31 @@ const DASHBOARD: Record<string, { body: string | ArrayBuffer; type: string }> = 
  * @param {string} path - What was asked for.
  * @returns {Response} The file, or a refusal.
  */
-function dashboard(path: string): Response {
+async function dashboard(path: string, env: Env): Promise<Response> {
+  // The typeface, which is two megabytes and therefore not in the module. Everything else this
+  // page needs is carried in the Worker's own script; a font that size would be most of what a
+  // deployment is, uploaded again on every change to a line of CSS.
+  //
+  // Served from here rather than from a CDN because the content policy this page is under names
+  // no other origin, and naming one to get a font would be naming one for everything.
+  if (path === '/admin/pretendard.woff2') {
+    const object = await env.prism_builds.get('assets/pretendard.woff2');
+
+    if (!object) {
+      return fail(404, 'There is nothing at that address.');
+    }
+
+    return new Response(object.body, {
+      headers: {
+        'content-type': 'font/woff2',
+        'content-length': String(object.size),
+        // A version of a typeface is never rewritten, and this one is asked for on every first
+        // visit. Cached for a year, which is the longest anything is allowed to claim.
+        'cache-control': 'public, max-age=31536000, immutable',
+      },
+    });
+  }
+
   const file = DASHBOARD[path];
 
   if (!file) {
@@ -1583,11 +1607,30 @@ export default {
             const { results } = await env.prism_accounts
               .prepare(
                 'SELECT version, target, arch, notes, filename, bytes, uploaded_unix,' +
-                  ' published_by FROM builds ORDER BY uploaded_unix DESC LIMIT 500',
+                  ' published_by, installer_filename, installer_bytes FROM builds' +
+                  ' ORDER BY uploaded_unix DESC LIMIT 500',
               )
-              .all();
+              .all<Record<string, string | number>>();
 
-            return json({ builds: (results ?? []).map((row) => ({ ...row, source: 'server' })) });
+            // One entry per file rather than per build, because the page is a list of files and
+            // a version on macOS holds two of them: the archive the updater fetches and the
+            // disk image a person opens.
+            const files = (results ?? []).flatMap((row) => [
+              { ...row, source: 'server', kind: 'update' },
+              ...(row.installer_filename
+                ? [
+                    {
+                      ...row,
+                      source: 'server',
+                      kind: 'installer',
+                      filename: row.installer_filename,
+                      bytes: row.installer_bytes,
+                    },
+                  ]
+                : []),
+            ]);
+
+            return json({ builds: files });
           }
 
           return json({ builds: await releasedBuilds(line === 'development') });
@@ -1626,7 +1669,7 @@ export default {
         // here could not make a machine run their code; they could make every machine on that
         // line download eight megabytes of nothing, repeatedly, which is enough reason.
         if (path.startsWith('/v1/admin/builds/') && method === 'PUT') {
-          const [version = '', target = '', arch = ''] = path
+          const [version = '', target = '', arch = '', kind = ''] = path
             .slice('/v1/admin/builds/'.length)
             .split('/');
 
@@ -1634,16 +1677,39 @@ export default {
             return malformed('build path');
           }
 
-          const signature = (request.headers.get('x-prism-signature') ?? '').trim();
-
-          if (!signature) {
-            return fail(400, 'That upload carried no signature.');
-          }
-
           const body = await request.arrayBuffer();
 
           if (body.byteLength === 0) {
             return fail(400, 'That upload was empty.');
+          }
+
+          // The file a person downloads, which on macOS is not the file the updater fetches.
+          // It carries no signature because nothing checks one: what checks a `.dmg` is
+          // Gatekeeper, against the Developer ID it was signed with before it got here.
+          if (kind === 'installer') {
+            await env.prism_builds.put(`${buildKey(version, target, arch)}.installer`, body);
+
+            await env.prism_accounts
+              .prepare(
+                'UPDATE builds SET installer_filename = ?, installer_bytes = ?' +
+                  ' WHERE version = ? AND target = ? AND arch = ?',
+              )
+              .bind(
+                (request.headers.get('x-prism-filename') ?? '').trim(),
+                body.byteLength,
+                version,
+                target,
+                arch,
+              )
+              .run();
+
+            return json({ version, target, arch, bytes: body.byteLength });
+          }
+
+          const signature = (request.headers.get('x-prism-signature') ?? '').trim();
+
+          if (!signature) {
+            return fail(400, 'That upload carried no signature.');
           }
 
           // The object first. A row pointing at a bundle that is not there is an update every
@@ -1988,13 +2054,18 @@ export default {
       // machine on the development line is about to download. A gate here would protect a file
       // that is already handed to anybody who asks for an update.
       if (path.startsWith('/v1/builds/') && method === 'GET') {
-        const [version = '', target = '', arch = ''] = path.slice('/v1/builds/'.length).split('/');
+        const [version = '', target = '', arch = '', kind = ''] = path
+          .slice('/v1/builds/'.length)
+          .split('/');
 
         if (!version || !target || !arch) {
           return malformed('build path');
         }
 
-        const object = await env.prism_builds.get(buildKey(version, target, arch));
+        const key = buildKey(version, target, arch);
+        const object = await env.prism_builds.get(
+          kind === 'installer' ? `${key}.installer` : key,
+        );
 
         if (!object) {
           return fail(404, 'There is no such build.');
@@ -2019,7 +2090,9 @@ export default {
 
       // The dashboard itself, which is the same API with somewhere to click.
       if (path === '/' || path === '/admin' || path.startsWith('/admin/')) {
-        return method === 'GET' ? dashboard(path) : fail(405, 'That is not a method for this.');
+        return method === 'GET'
+          ? dashboard(path, env)
+          : fail(405, 'That is not a method for this.');
       }
 
       return fail(404, 'There is nothing at that address.');

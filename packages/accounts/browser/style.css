@@ -8,14 +8,23 @@
  *
  * The type scale is not shared. This page is in Korean and the applications are in English, and
  * Hangul at ten pixels with the tracking small Latin capitals want is a row of grey smudges.
+ * Nor is the typeface: Pretendard is drawn for Hangul beside Latin at the same optical size,
+ * which is what every line on this page is.
  */
 
+/*
+ * Pretendard, served from this origin because the policy above names no other one.
+ *
+ * The variable cut rather than six static weights: two megabytes once, cached for a year, and
+ * every weight this page uses comes out of it. `LICENSE.txt` beside this file is the SIL Open
+ * Font License it is under.
+ */
 @font-face {
-  font-family: 'IBM Plex Sans KR';
+  font-family: 'Pretendard';
   font-style: normal;
-  font-weight: 400 600;
+  font-weight: 45 920;
   font-display: swap;
-  src: local('IBM Plex Sans KR');
+  src: url('/admin/pretendard.woff2') format('woff2-variations');
 }
 
 :root {
@@ -53,7 +62,7 @@
   --radius-tile: 10px;
   --radius-field: 10px;
 
-  --sans: 'IBM Plex Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+  --sans: 'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
   --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
   color-scheme: dark;
