@@ -1388,7 +1388,7 @@ button:disabled {
 .explorer-head,
 .explorer-file {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 82px 76px 72px;
+  grid-template-columns: 34px minmax(0, 1fr) 84px 82px 76px 72px;
   align-items: center;
   gap: 14px;
 }
@@ -1446,8 +1446,8 @@ button:disabled {
 
 /* Numbers under the words that name them, which means right-aligned: a column of figures is
    read down its last digit, not its first. */
-.explorer-head > .label:nth-child(3),
 .explorer-head > .label:nth-child(4),
+.explorer-head > .label:nth-child(5),
 .explorer-figure {
   text-align: right;
 }
@@ -1480,4 +1480,49 @@ button:disabled {
 
 .icon-button:hover {
   background: var(--wash-4);
+}
+
+/* Where a build came from. Two words rather than a colour, because "GitHub" and "직접 올림" are
+   the whole of what somebody needs and a legend for two dots is not. */
+.explorer-source {
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--wash-3);
+  color: var(--muted-2);
+  font-size: 11.5px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.explorer-source.is-github {
+  background: none;
+  color: var(--dim);
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────────────────── */
+
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  margin-bottom: 18px;
+  padding: 3px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+}
+
+.tab {
+  padding: 6px 16px;
+  border-radius: var(--radius-pill);
+  color: var(--muted-2);
+  font-size: 13px;
+}
+
+.tab:hover {
+  color: var(--ink-3);
+}
+
+.tab.is-open {
+  background: var(--wash-4);
+  color: var(--ink);
 }

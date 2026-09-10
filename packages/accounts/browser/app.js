@@ -1140,6 +1140,9 @@ async function drawRelay(column) {
 /** Which version's files are open, kept across redraws so a refresh does not close it. */
 let openVersion = null;
 
+/** Which line is being looked at: `development` or `production`. */
+let openLine = 'development';
+
 /**
  * What a target and architecture are called where somebody reads them.
  *
@@ -1169,7 +1172,7 @@ function platformName(target, arch) {
  * @returns {Promise<void>}
  */
 async function drawBuilds(column) {
-  const { builds } = await call('/v1/admin/builds');
+  const { builds } = await call(`/v1/admin/builds?channel=${openLine}`);
 
   // Grouped in the order the rows arrived, which is newest first: the table is ordered by when
   // each was published and a version's folder belongs where its newest file puts it.
@@ -1202,10 +1205,16 @@ async function drawBuilds(column) {
     if (!folder) {
       files.replaceChildren(
         el('div.nothing', {}, [
-          el('p.row-text.muted', { style: 'margin:0', text: '아직 올린 빌드가 없습니다.' }),
+          el('p.row-text.muted', {
+            style: 'margin:0',
+            text: openLine === 'development' ? '개발 빌드가 없습니다.' : '릴리즈가 없습니다.',
+          }),
           el('p.note.dim', {
             style: 'margin:8px 0 0',
-            text: '저장소에서 pnpm publish-dev 를 실행하면 여기에 나타납니다.',
+            text:
+              openLine === 'development'
+                ? '저장소에서 pnpm publish-dev 를 실행하면 여기에 나타납니다.'
+                : 'release 브랜치를 main에 병합하고 v 태그를 붙이면 여기에 나타납니다.',
           }),
         ]),
       );
@@ -1219,6 +1228,7 @@ async function drawBuilds(column) {
       el('div.explorer-head', {}, [
         el('span'),
         el('span.label', { text: '파일' }),
+        el('span.label', { text: '출처' }),
         el('span.label', { text: '크기' }),
         el('span.label', { text: '올린 때' }),
         el('span'),
@@ -1230,25 +1240,35 @@ async function drawBuilds(column) {
             el('span.row-text.ink-2', { text: platformName(build.target, build.arch) }),
             el('span.note.muted', { text: build.notes || `${build.target}/${build.arch}` }),
           ]),
+          el('span.explorer-source', {
+            class: build.source === 'github' ? 'is-github' : '',
+            text: build.source === 'github' ? 'GitHub' : '직접 올림',
+          }),
           el('span.mono.ink-3.explorer-figure', { text: size(build.bytes) }),
           el('span.note.muted.explorer-figure', {
             text: since(Math.max(0, Math.floor(Date.now() / 1000) - build.uploaded_unix)),
           }),
           el('span.explorer-actions', {}, [
             el('a.icon-button', {
-              href: `/v1/builds/${build.version}/${build.target}/${build.arch}`,
+              href:
+                build.source === 'github'
+                  ? build.url
+                  : `/v1/builds/${build.version}/${build.target}/${build.arch}`,
               title: '내려받기',
               download: '',
             }, [icon('download', 15, '#8a8a99')]),
-            el('button.icon-button', {
-              type: 'button',
-              title: '내리기',
-              on: {
-                click: () => {
-                  void withdraw(build);
+            // Only what this server is keeping. A release belongs to the repository that cut it
+            // and a button here that appeared to delete one would be lying about what it does.
+            build.source !== 'github' &&
+              el('button.icon-button', {
+                type: 'button',
+                title: '내리기',
+                on: {
+                  click: () => {
+                    void withdraw(build);
+                  },
                 },
-              },
-            }, [icon('trash', 15, '#ff8a96')]),
+              }, [icon('trash', 15, '#ff8a96')]),
           ]),
         ]),
       ),
@@ -1257,9 +1277,29 @@ async function drawBuilds(column) {
 
   showFiles();
 
+  /**
+   * Moves to the other line, keeping nothing from this one.
+   *
+   * The open version is cleared rather than carried over: the two lines share no versions, so a
+   * folder that was open on one names nothing on the other.
+   *
+   * @param {string} line - `development` or `production`.
+   * @returns {void}
+   */
+  const showLine = (line) => {
+    if (line === openLine) {
+      return;
+    }
+
+    openLine = line;
+    openVersion = null;
+
+    void drawPage();
+  };
+
   column.append(
     header(
-      '개발 빌드',
+      '빌드',
       [
         el('span.note.muted', {
           text: folders.length
@@ -1269,10 +1309,29 @@ async function drawBuilds(column) {
       ],
     ),
     el('div.page-body', { style: 'padding-top:22px' }, [
-      // What this page is for, said once. Everything under it is the line between releases, and
-      // somebody who lands here having only ever cut releases would otherwise be looking at an
-      // empty folder with no idea what fills it.
-      el('p.note.muted', { style: 'margin:0 0 18px', text: '개발 채널을 따르는 기계가 받는 빌드입니다. 맨 위의 것이 지금 나가고 있습니다.' }),
+      el('div.tabs', {}, [
+        el('button', {
+          class: `tab${openLine === 'development' ? ' is-open' : ''}`,
+          type: 'button',
+          text: '개발',
+          on: { click: () => showLine('development') },
+        }),
+        el('button', {
+          class: `tab${openLine === 'production' ? ' is-open' : ''}`,
+          type: 'button',
+          text: '정식',
+          on: { click: () => showLine('production') },
+        }),
+      ]),
+      // What this line is for, said once. Somebody who lands here having only ever cut releases
+      // would otherwise be looking at an empty folder with no idea what fills it.
+      el('p.note.muted', {
+        style: 'margin:0 0 18px',
+        text:
+          openLine === 'development'
+            ? '개발 채널을 따르는 기계가 받는 빌드입니다. 직접 올린 것과 CI가 만든 것이 함께 있고, 맨 위의 것이 지금 나가고 있습니다.'
+            : '태그를 붙여 낸 릴리즈입니다. 기본 채널을 따르는 모든 기계가 이 중 맨 위의 것을 받습니다.',
+      }),
       el('div.explorer', {}, [
         el('div.explorer-tree', {}, [
           el('div.explorer-tree-head', {}, [el('span.label', { text: '버전' })]),

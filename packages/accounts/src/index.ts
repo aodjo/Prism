@@ -303,25 +303,11 @@ async function update(env: Env, path: string, channel: string): Promise<Response
     }
   }
 
-  const answer = await fetch(`${RELEASES}?per_page=30`, {
-    headers: { 'user-agent': 'prism-accounts', accept: 'application/vnd.github+json' },
-    // Releases change when one is cut and not otherwise, so asking GitHub on every launch of
-    // every machine would be spending somebody's rate limit on an answer that did not move.
-    cf: { cacheTtl: 300, cacheEverything: true },
-  }).catch(() => null);
+  const releases = await published();
 
-  if (!answer?.ok) {
+  if (releases === null) {
     return new Response(null, { status: 204 });
   }
-
-  const releases = (await answer.json().catch(() => [])) as {
-    tag_name: string;
-    body: string | null;
-    published_at: string;
-    draft: boolean;
-    prerelease: boolean;
-    assets: { name: string; browser_download_url: string }[];
-  }[];
 
   // A development build is a prerelease of the version being worked toward, so the two lines
   // are the same list read with different eyes: production takes releases, development takes
@@ -361,6 +347,92 @@ async function update(env: Env, path: string, channel: string): Promise<Response
     url: found.url,
     signature,
   });
+}
+
+/** One release as GitHub describes it, in the fields anything here reads. */
+interface Release {
+  tag_name: string;
+  body: string | null;
+  published_at: string;
+  draft: boolean;
+  prerelease: boolean;
+  assets: { name: string; browser_download_url: string; size: number }[];
+}
+
+/**
+ * Every release this repository has, newest first.
+ *
+ * Cached, because releases change when one is cut and not otherwise: asking GitHub on every
+ * launch of every machine would spend somebody's rate limit on an answer that did not move.
+ *
+ * @async
+ * @returns {Promise<Release[] | null>} The releases, or null if GitHub could not be reached.
+ */
+async function published(): Promise<Release[] | null> {
+  const answer = await fetch(`${RELEASES}?per_page=30`, {
+    headers: { 'user-agent': 'prism-accounts', accept: 'application/vnd.github+json' },
+    cf: { cacheTtl: 300, cacheEverything: true },
+  }).catch(() => null);
+
+  if (!answer?.ok) {
+    return null;
+  }
+
+  return (await answer.json().catch(() => [])) as Release[];
+}
+
+/** Every platform the update endpoint knows how to answer for. */
+const PLATFORM_PAIRS: readonly (readonly [string, string])[] = [
+  ['darwin', 'aarch64'],
+  ['darwin', 'x86_64'],
+  ['windows', 'x86_64'],
+  ['windows', 'aarch64'],
+  ['linux', 'x86_64'],
+  ['linux', 'aarch64'],
+];
+
+/**
+ * What GitHub is carrying for one line, in the shape the dashboard's list uses.
+ *
+ * Found through the same `assetFor` the updater goes through rather than by taking a file name
+ * apart, so a list that shows a build is a list of builds a machine could actually be given. An
+ * artifact whose signature is missing is not offered by the updater and is not shown here.
+ *
+ * @async
+ * @param {boolean} prerelease - Development when true, released when false.
+ * @returns {Promise<object[]>} One entry per platform per release.
+ */
+async function releasedBuilds(prerelease: boolean): Promise<Record<string, unknown>[]> {
+  const releases = (await published()) ?? [];
+  const found: Record<string, unknown>[] = [];
+
+  for (const release of releases) {
+    if (release.draft || release.prerelease !== prerelease) {
+      continue;
+    }
+
+    for (const [target, arch] of PLATFORM_PAIRS) {
+      const asset = assetFor(release.assets, target, arch);
+
+      if (!asset) {
+        continue;
+      }
+
+      found.push({
+        version: release.tag_name.replace(/^v/u, ''),
+        target,
+        arch,
+        notes: (release.body ?? '').split('\n')[0] ?? '',
+        bytes: asset.bytes,
+        uploaded_unix: Math.floor(new Date(release.published_at).getTime() / 1000),
+        published_by: 'GitHub',
+        url: asset.url,
+        source: 'github',
+      });
+    }
+  }
+
+  return found;
 }
 
 /**
@@ -491,10 +563,10 @@ const UPDATABLE: Record<string, string> = {
  * @returns {{url: string, signatureUrl: string} | null} Where each of the two is, or null.
  */
 function assetFor(
-  assets: { name: string; browser_download_url: string }[],
+  assets: { name: string; browser_download_url: string; size: number }[],
   target: string,
   arch: string,
-): { url: string; signatureUrl: string } | null {
+): { url: string; signatureUrl: string; bytes: number } | null {
   const os = PLATFORMS[target];
   const machine = PLATFORMS[arch];
   const extension = UPDATABLE[target];
@@ -515,7 +587,11 @@ function assetFor(
   const signature = assets.find((asset) => asset.name === `${wanted.name}.sig`);
 
   return signature
-    ? { url: wanted.browser_download_url, signatureUrl: signature.browser_download_url }
+    ? {
+        url: wanted.browser_download_url,
+        signatureUrl: signature.browser_download_url,
+        bytes: wanted.size,
+      }
     : null;
 }
 
@@ -1412,20 +1488,39 @@ export default {
         // What the strip along the top is: the few numbers an operator would otherwise open a
         // terminal for. Every one of them is measured here rather than remembered, so a stale
         // answer is not possible — only a slow one.
-        // Everything on the development line, newest first.
+        // Everything on one line, newest first, wherever it came from.
         //
-        // From the table rather than by listing the bucket. The bucket holds bytes; what a build
-        // is — which version, which platform, who published it and when — is here, and a listing
-        // that read the objects would have to guess all of it back out of the key.
+        // Both sources, because both are real: a machine following the development line is
+        // offered whichever of the two is newer, so a page showing only one of them would be
+        // showing half of what its readers are running.
+        //
+        // The published half comes from the table rather than from listing the bucket. The
+        // bucket holds bytes; what a build *is* — which version, which platform, who put it
+        // there and when — is here, and a listing that read the objects would have to guess all
+        // of it back out of a key.
         if (path === '/v1/admin/builds' && method === 'GET') {
-          const { results } = await env.prism_accounts
-            .prepare(
-              'SELECT version, target, arch, notes, bytes, uploaded_unix, published_by,' +
-                ' length(signature) AS signed FROM builds ORDER BY uploaded_unix DESC LIMIT 500',
-            )
-            .all();
+          const line = url.searchParams.get('channel') === 'production' ? 'production' : 'development';
 
-          return json({ builds: results ?? [] });
+          const mine =
+            line === 'development'
+              ? (
+                  await env.prism_accounts
+                    .prepare(
+                      'SELECT version, target, arch, notes, bytes, uploaded_unix, published_by' +
+                        " FROM builds ORDER BY uploaded_unix DESC LIMIT 500",
+                    )
+                    .all()
+                ).results ?? []
+              : [];
+
+          const theirs = await releasedBuilds(line === 'development');
+
+          return json({
+            builds: [
+              ...mine.map((row) => ({ ...row, source: 'server' })),
+              ...theirs,
+            ],
+          });
         }
 
         // Taking one off the line.
