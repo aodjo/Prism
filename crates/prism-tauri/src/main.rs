@@ -20,6 +20,7 @@ mod sessions;
 mod settings;
 mod sharing;
 mod stream;
+mod tray;
 mod updates;
 mod windows;
 
@@ -240,6 +241,10 @@ fn main() {
             // so it comes before one is staged rather than after.
             updates::check_in_background(app.handle());
 
+            // Before the window, so that a window which fails to build still leaves something
+            // to reach the application by.
+            tray::install(app.handle())?;
+
             let (label, page) = opening();
             let window = windows::stage(app.handle(), label, page)?;
 
@@ -305,6 +310,25 @@ fn main() {
             updates::install_update,
             harness::drive_result
         ])
-        .run(tauri::generate_context!())
-        .expect("the shell could not start");
+        .build(tauri::generate_context!())
+        .expect("the shell could not start")
+        .run(|app, event| match event {
+            // No windows left is not a reason to stop. The exit somebody asked for carries a
+            // code — `exit` and `restart` both set one — and that is the one that goes through.
+            tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } => {
+                api.prevent_exit();
+            }
+            // Clicking the icon in the dock, which on macOS is how somebody asks for a window
+            // back without going to the menu bar for it.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => {
+                tray::surface(app);
+            }
+            _ => {}
+        });
 }

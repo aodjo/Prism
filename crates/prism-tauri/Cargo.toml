@@ -17,7 +17,7 @@ prism-core.workspace = true
 prism-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["unstable"] }
+tauri = { version = "2", features = ["unstable", "tray-icon"] }
 tauri-plugin-updater = "2.11.0"
 # The smallest thing that does blocking HTTPS. The account is control plane — a request here is
 # a function call on its own thread, and an async runtime would be a scheduler this shell has no
