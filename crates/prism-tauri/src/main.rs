@@ -319,13 +319,16 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("the shell could not start")
         .run(|app, event| {
-            // Only the arm below wants it, and that arm is macOS's. Everywhere else this is a
-            // binding nothing reads, which `-D warnings` counts as an error rather than a
-            // nicety — and no local check compiles this crate for those targets to say so.
-            #[cfg(not(target_os = "macos"))]
-            let _ = app;
-
             match event {
+                // The stream is a process of its own, and a process of its own outlives the
+                // one that started it. One left behind goes on holding the session it opened,
+                // so the host it is watching stays busy and every later attempt to watch that
+                // machine is told there is nobody there.
+                tauri::RunEvent::Exit => {
+                    let held: tauri::State<'_, stream::Held> = app.state();
+
+                    let _ = held.stop();
+                }
                 // No windows left is not a reason to stop. The exit somebody asked for carries
                 // a code — `exit` and `restart` both set one — and that is the one that goes
                 // through.
