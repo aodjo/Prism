@@ -1356,6 +1356,14 @@ button:disabled {
   border-radius: var(--radius-tile);
 }
 
+/* A rule between files rather than around each one. What separates two rows here is that they
+   are two files; a box around each would say they are two things of different kinds. */
+.explorer-file + .explorer-file {
+  border-top: 1px solid var(--line-1);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
 .explorer-file:hover {
   background: var(--wash-1);
 }
@@ -1404,15 +1412,4 @@ button:disabled {
 
 .icon-button:hover {
   background: var(--wash-4);
-}
-
-/* A build the updater would download in full and then refuse. Said here rather than at the far
-   end of somebody's connection. */
-.tag-bad {
-  display: inline-block;
-  padding: 3px 8px;
-  border-radius: var(--radius-pill);
-  background: rgba(255, 92, 110, 0.14);
-  color: var(--danger-ink);
-  font-size: 11.5px;
 }

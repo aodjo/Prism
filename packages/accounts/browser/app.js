@@ -1222,10 +1222,9 @@ async function drawBuilds(column) {
             el('span.note.muted', { text: build.notes || `${build.target}/${build.arch}` }),
           ]),
           el('span.mono.dim', { text: size(build.bytes) }),
-          // A build without one is a build the updater downloads in full and then refuses, so
-          // it is worth saying here rather than at the far end of somebody's connection.
-          !build.signed && el('span.tag-bad', { text: '서명 없음' }),
-          el('span.note.dim', { text: since(Math.max(0, Math.floor(Date.now() / 1000) - build.uploaded_unix)) }),
+          el('span.note.dim', {
+            text: since(Math.max(0, Math.floor(Date.now() / 1000) - build.uploaded_unix)),
+          }),
           el('a.icon-button', {
             href: `/v1/builds/${build.version}/${build.target}/${build.arch}`,
             title: '내려받기',
