@@ -236,6 +236,40 @@ fn remember(chosen: &State<'_, Chosen>, on: bool) -> Result<(), String> {
 /// parsed, if this machine's identity cannot be read, or if the session's thread cannot be
 /// spawned. All four are worth showing rather than swallowing: each one leaves a machine that
 /// looks shared and is not.
+/// Whether this machine may record its screen, asking the system if nobody has been asked yet.
+///
+/// A machine that may not record its screen shares perfectly: it registers, it is found, it
+/// accepts a session, it agrees a codec, and it sends nothing at all. What somebody sees at the
+/// other end is a black window and no reason for it — and the reason is knowable here, in one
+/// call, before any of it starts.
+///
+/// Screen recording only. Accessibility missing means a session nobody can type into, which is
+/// a screen share and a thing somebody may well want; this one means there is nothing to share.
+///
+/// # Errors
+///
+/// Says what to do when the answer is no. `ask` decides whether the system is put the question:
+/// `check` cannot tell a refusal from a question nobody has put yet, so somewhere has to ask or
+/// the dialog is never raised and the one thing that would fix it cannot happen. But that dialog
+/// belongs to somebody pressing a button, not to a launch.
+fn may_record(ask: bool) -> Result<(), String> {
+    let held = prism_core::control::permissions::check().screen
+        || (ask
+            && prism_core::control::permissions::request(
+                prism_core::control::permissions::Grant::Screen,
+            ));
+
+    if held {
+        return Ok(());
+    }
+
+    Err(
+        "Prism may not record this screen yet. Allow Screen Recording for Prism in \
+         System Settings, then start Prism again."
+            .to_owned(),
+    )
+}
+
 /// Puts a machine back to sharing, if that is how it was left.
 ///
 /// Somebody who turned this machine on for another one of theirs meant it to stay on. Without
@@ -249,6 +283,12 @@ fn remember(chosen: &State<'_, Chosen>, on: bool) -> Result<(), String> {
 /// is exactly what fixes.
 pub fn resume(app: &tauri::AppHandle) {
     use tauri::Manager as _;
+
+    // Looked at rather than asked for. A launch that raises a system dialog is a launch nobody
+    // asked anything of, and a machine coming back to what it was left doing has asked nothing.
+    if may_record(false).is_err() {
+        return;
+    }
 
     let chosen: State<'_, Chosen> = app.state();
 
@@ -276,13 +316,7 @@ pub fn start_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result
     // Screen recording only. Accessibility missing means a session nobody can type into, which
     // is a screen share and a thing somebody may well want; this one means there is nothing to
     // share.
-    if !prism_core::control::permissions::check().screen {
-        return Err(
-            "Prism may not record this screen yet. Allow Screen Recording for Prism in \
-             System Settings, then start Prism again."
-                .to_owned(),
-        );
-    }
+    may_record(true)?;
 
     let mut session = held
         .0
