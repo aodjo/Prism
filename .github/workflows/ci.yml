@@ -112,6 +112,15 @@ jobs:
           # an untested binary.
           - name: windows-arm64
             os: windows-11-arm
+          # TEMPORARY — remove before merging.
+          #
+          # On 21 September 2026 the `windows-11-arm` label changes to Visual Studio 2026,
+          # replacing 2022, and after the 30th the old image cannot be pinned. This crate links
+          # with MSVC and builds SDL from source through CMake, which is where a whole-toolchain
+          # change is most likely to land. Running the new image now costs one job and turns a
+          # deadline into a known answer.
+          - name: windows-arm64-vs2026
+            os: windows-11-vs2026-arm
           - name: linux-x64
             os: ubuntu-latest
           # Same reasoning as Windows on arm64, one milestone early: the Linux backends are
@@ -391,7 +400,10 @@ jobs:
           done
           exit "$missing"
 
-      - uses: softprops/action-gh-release@v2
+      # v3 moved the action's runtime from Node 20 to Node 24. GitHub already forces it onto 24
+      # and warns on every run; this is taking the version that actually targets it rather than
+      # waiting for the day the forcing stops.
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.name.outputs.version) }}
           name: ${{ steps.name.outputs.version }}
