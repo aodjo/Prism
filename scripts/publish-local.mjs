@@ -108,6 +108,40 @@ function developerId() {
 }
 
 /**
+ * A `PATH` that can reach `cargo`, or an empty string if nothing here can.
+ *
+ * Tauri shells out to `cargo metadata` before it builds anything, so a `PATH` without it fails a
+ * minute in with a message about workspace directories. Rustup installs to `~/.cargo/bin` and
+ * puts it on the path from a file the shell sources — which an interactive shell has read and
+ * something launched another way may not have.
+ *
+ * Found rather than demanded, for the same reason the signing identity is: it is already
+ * installed, and asking somebody to arrange their environment before running a command is asking
+ * them to do what the command could have done.
+ *
+ * @returns {string} What `PATH` should be, or an empty string when there is no cargo to find.
+ */
+function reachingCargo() {
+  const path = process.env.PATH ?? '';
+
+  try {
+    execFileSync('cargo', ['--version'], { stdio: 'ignore' });
+
+    return path;
+  } catch {
+    // Not on the path as it stands, which is what the rest of this is for.
+  }
+
+  const rustup = join(homedir(), '.cargo/bin');
+
+  if (!existsSync(join(rustup, 'cargo'))) {
+    return '';
+  }
+
+  return `${rustup}:${path}`;
+}
+
+/**
  * Reads the arguments this takes, which are few.
  *
  * @param {string[]} argv - What was passed.
@@ -329,6 +363,16 @@ if (!existsSync(key)) {
 }
 
 const identity = process.env.APPLE_SIGNING_IDENTITY ?? developerId();
+const path = reachingCargo();
+
+if (!path) {
+  console.error(
+    'cargo is not on the path and there is none at ~/.cargo/bin. Tauri asks it where the\n' +
+      'workspace is before it builds anything, so this would fail a minute in. Install Rust,\n' +
+      'or open a shell that has sourced ~/.cargo/env.',
+  );
+  process.exit(2);
+}
 
 if (process.platform === 'darwin' && !identity) {
   console.error(
@@ -345,6 +389,7 @@ const token = (await kept()) || (await allowed(`prism · ${target} · ${arch}`))
 console.log(`\nbuilding 1.0.0-local.${build} for ${target}/${arch}\n`);
 
 run('pnpm', ['package'], {
+  PATH: path,
   APPLE_SIGNING_IDENTITY: identity,
   PRISM_CHANNEL: 'local',
   PRISM_BUILD: String(build),
