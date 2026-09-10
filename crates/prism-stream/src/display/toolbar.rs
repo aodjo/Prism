@@ -122,8 +122,6 @@ struct Held {
     /// `RefCell` rather than a lock: the class is main-thread only, and every path that
     /// reaches this is the window's own.
     items: RefCell<Vec<(Tool, Retained<NSToolbarItem>)>>,
-    /// The window the controls are in, so a menu can be opened in its coordinates.
-    window: RefCell<Option<Retained<NSWindow>>>,
 }
 
 define_class!(
@@ -238,7 +236,6 @@ impl Toolbar {
             pressed: Arc::clone(&pressed),
             chosen: Arc::clone(&chosen),
             items: RefCell::new(Vec::new()),
-            window: RefCell::new(Some(ns_window.clone())),
         });
         // SAFETY: `init` on `NSObject` takes no arguments and returns the object it was sent
         // to, and the instance variables it needs were set on the allocation above.
@@ -343,16 +340,9 @@ impl Toolbar {
             }
         }
 
-        let at = NSEvent::mouseLocation();
-        let Some(window) = self.controls.ivars().window.borrow().clone() else {
-            return;
-        };
-
-        // Below the pointer, in the window's own coordinates, so it opens under the control
-        // that was pressed rather than wherever the screen's origin happens to be.
-        let inside = window.convertPointFromScreen(at);
-
-        menu.popUpMenuPositioningItem_atLocation_inView(None, inside, None);
+        // Where the pointer is, which is over the control that was just pressed. In screen
+        // coordinates, which is what this takes when it is given no view to measure against.
+        menu.popUpMenuPositioningItem_atLocation_inView(None, NSEvent::mouseLocation(), None);
     }
 
     /// Redraws the control item to say whether the far machine is being controlled.

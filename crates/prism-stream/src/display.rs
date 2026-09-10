@@ -60,7 +60,10 @@ const HUD_INTERVAL: Duration = Duration::from_millis(100);
 const HUD_WIDTH: usize = 340;
 
 /// How tall the statistics panel is, in pixels.
-const HUD_HEIGHT: usize = 140;
+///
+/// Room for the four numbers, the line saying whether the far machine is being controlled, and
+/// a line for each direction a file may be moving in.
+const HUD_HEIGHT: usize = 184;
 
 /// How large the statistics panel's text is, in pixels.
 const HUD_FONT_SIZE: f64 = 13.0;
@@ -205,6 +208,20 @@ fn to_button(button: SdlMouseButton) -> Option<MouseButton> {
     }
 }
 
+/// What the overlay says about the session, gathered where each number is counted.
+struct Showing {
+    /// Pictures a second, over the last overlay interval.
+    fps: f64,
+    /// Pictures drawn since the session opened.
+    shown: u64,
+    /// Pictures dropped to stay in time.
+    missed: u64,
+    /// How far this machine's clock is from the host's, in microseconds.
+    clock_offset_us: i64,
+    /// Whether the far machine is being controlled, or `None` where it cannot be.
+    control: Option<bool>,
+}
+
 /// Builds the lines the overlay shows.
 ///
 /// Latency first, because it is what every milestone is judged on, and the pacing line
@@ -213,13 +230,17 @@ fn to_button(button: SdlMouseButton) -> Option<MouseButton> {
 fn hud_lines(
     latency: &mut LatencyRecorder,
     pacer: &mut PresentPacer,
-    fps: f64,
-    shown: u64,
-    missed: u64,
-    clock_offset_us: i64,
-    control: Option<bool>,
+    session: &Showing,
+    moving: &[transfer::Progress],
 ) -> Vec<String> {
-    let mut lines = Vec::with_capacity(6);
+    let &Showing {
+        fps,
+        shown,
+        missed,
+        clock_offset_us,
+        control,
+    } = session;
+    let mut lines = Vec::with_capacity(8);
 
     match latency.summarize() {
         Some(summary) => lines.push(format!(
@@ -260,6 +281,28 @@ fn hud_lines(
         Some(true) => lines.push("control  on, control option to let go".to_owned()),
         Some(false) => lines.push("control  off, click to take it".to_owned()),
         None => {}
+    }
+
+    // A file is the one thing here somebody started by hand, so it is the one thing that has
+    // to say it is happening. Without this, choosing a file and watching nothing change is
+    // indistinguishable from a button that does not work.
+    for one in moving {
+        let share = if one.size == 0 {
+            100.0
+        } else {
+            one.moved as f64 * 100.0 / one.size as f64
+        };
+
+        lines.push(format!(
+            "{}  {} {}",
+            if one.sending { "sending" } else { "getting" },
+            one.name,
+            if one.done {
+                "done".to_owned()
+            } else {
+                format!("{share:.0}%")
+            },
+        ));
     }
 
     lines
@@ -638,14 +681,23 @@ pub fn run(
 
                 if last_hud.elapsed() >= HUD_INTERVAL {
                     let rate = hud_frames as f64 / last_hud.elapsed().as_secs_f64();
+                    let underway = moving
+                        .as_ref()
+                        .and_then(|files| files.lock().ok())
+                        .map(|files| files.progress())
+                        .unwrap_or_default();
+
                     surface.update_hud(&hud_lines(
                         &mut latency,
                         &mut pacer,
-                        rate,
-                        shown,
-                        missed,
-                        clock_offset,
-                        capture_input.then_some(grabbed),
+                        &Showing {
+                            fps: rate,
+                            shown,
+                            missed,
+                            clock_offset_us: clock_offset,
+                            control: capture_input.then_some(grabbed),
+                        },
+                        &underway,
                     ));
                     last_hud = Instant::now();
                     hud_frames = 0;
