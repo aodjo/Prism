@@ -51,8 +51,16 @@ use std::time::Duration;
 /// overlap with.
 pub const IN_FLIGHT: usize = 2;
 
-/// How long to wait for the compositor before counting the frame as missing.
-pub(crate) const CAPTURE_TIMEOUT: Duration = Duration::from_millis(500);
+/// How often a screen that is not changing is sent anyway.
+///
+/// No compositor here delivers frames for a still screen, so without this a session goes
+/// silent the moment somebody stops moving: a client that connected to a motionless machine
+/// would wait for a picture that only a mouse could produce, and one that lost a packet while
+/// nothing was happening would keep the hole until something did.
+///
+/// Twice a second, because nothing in the picture changed and a frame that repeats one the
+/// encoder has already seen is a few hundred bytes.
+pub(crate) const REPEAT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long to wait for the encoder before giving up on a frame.
 ///
@@ -94,10 +102,17 @@ pub enum Pumped {
     Sent,
     /// A frame went in and the pipeline is still filling, so none came out yet.
     Filling,
-    /// The compositor delivered nothing within the timeout.
+    /// The screen is not changing and there was nothing left to send this turn.
     ///
-    /// Ordinary on a still screen, which no compositor here sends frames for. A caller that
-    /// sees many in a row is looking at a compositor that has stopped.
+    /// Ordinary, and not a fault: the last frame has already gone out and the next repeat of
+    /// it is not due yet. A session spends most of a quiet minute here.
+    Still,
+    /// The compositor delivered nothing within the timeout, and there was nothing to repeat.
+    ///
+    /// A still screen is not this: no compositor here sends frames for one, so the pipeline
+    /// sends the last frame again and reports what that produced. This is the narrower case
+    /// of a session where no frame has ever arrived, which means the capture never started
+    /// producing rather than that nothing is moving.
     Idle,
     /// A frame went in and nothing came out of the encoder in time.
     Dropped,

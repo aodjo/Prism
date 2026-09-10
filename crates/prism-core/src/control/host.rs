@@ -946,6 +946,14 @@ fn keep_going(config: &HostConfig, stop: &AtomicBool, frames: u64) -> bool {
         .is_none_or(|budget| frames < u64::from(budget))
 }
 
+/// How long a capture that has produced nothing at all is given before the session gives up.
+///
+/// Not the same thing as a still screen, which produces nothing and is sent anyway. This is a
+/// capture that never started: the stream is running, the compositor is answering, and no
+/// frame has ever come out of it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const CAPTURE_PATIENCE: Duration = Duration::from_secs(10);
+
 /// Captures, encodes and sends until the session ends.
 ///
 /// One function for every platform that can host, because the pipeline underneath it is
@@ -975,27 +983,28 @@ fn stream(
 
     let started = Instant::now();
     let mut frames = 0u64;
-    let mut idle = 0u32;
+    let mut waiting: Option<Instant> = None;
 
     while keep_going(config, stop, frames) {
         match pump.pump(&mut sender, config.adaptive)? {
             Pumped::Idle => {
-                // A still screen produces no frames at all, so this is ordinary. Twenty in a
-                // row is ten seconds of a compositor that has stopped, which is not.
-                idle += 1;
-                if idle > 20 {
-                    return Err("the compositor stopped delivering frames".into());
+                // Not a still screen: that sends its last frame again. This is a capture that
+                // has never produced one, which after ten seconds is one that never will.
+                let since = *waiting.get_or_insert_with(Instant::now);
+
+                if since.elapsed() > CAPTURE_PATIENCE {
+                    return Err("the screen was never delivered to be sent".into());
                 }
                 continue;
             }
-            Pumped::Filling | Pumped::Dropped => {
-                idle = 0;
+            Pumped::Filling | Pumped::Dropped | Pumped::Still => {
+                waiting = None;
                 continue;
             }
             // Ordinary: somebody closed their client. Ending here rather than reporting a
             // failure is what stops the tray showing an error after most sessions.
             Pumped::PeerGone => return Ok(()),
-            Pumped::Sent => idle = 0,
+            Pumped::Sent => waiting = None,
         }
 
         frames += 1;

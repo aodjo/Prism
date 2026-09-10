@@ -376,6 +376,13 @@ pub fn run_encoded(
 #[cfg(target_os = "macos")]
 const ENCODE_IN_FLIGHT: usize = 2;
 
+/// How long a capture that has produced nothing at all is given before this gives up.
+///
+/// Not a still screen, which produces nothing and is sent again anyway. This is a capture that
+/// never started.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const CAPTURE_PATIENCE: Duration = Duration::from_secs(10);
+
 /// Sends one finished frame, and says whether there was one.
 ///
 /// Split out because the loop drains one frame per iteration and then drains what is still
@@ -477,25 +484,28 @@ pub fn run_captured(
 
     let start = Instant::now();
     let mut dropped = 0u32;
-    let mut idle = 0u32;
+    let mut waiting: Option<Instant> = None;
 
     while pump.sent() < budget {
         match pump.pump(&mut sender, config.adaptive)? {
+            // A still screen is sent again rather than reported, so this is the narrower
+            // case: a capture that has never produced a frame at all.
             Pumped::Idle => {
-                idle += 1;
-                if idle > 20 {
-                    return Err("the compositor stopped delivering frames".into());
+                let since = *waiting.get_or_insert_with(Instant::now);
+
+                if since.elapsed() > CAPTURE_PATIENCE {
+                    return Err("the screen was never delivered to be sent".into());
                 }
             }
             Pumped::Dropped => {
-                idle = 0;
+                waiting = None;
                 dropped += 1;
             }
             Pumped::PeerGone => {
                 println!("host: the client disconnected");
                 break;
             }
-            Pumped::Filling | Pumped::Sent => idle = 0,
+            Pumped::Filling | Pumped::Sent | Pumped::Still => waiting = None,
         }
     }
 

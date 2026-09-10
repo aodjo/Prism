@@ -41,7 +41,10 @@ const NV12: u32 = u32::from_be_bytes(*b"420v");
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A captured screen frame, ready to hand to the encoder.
-#[derive(Debug)]
+///
+/// Cloning retains the same pixel buffer rather than copying the picture, which is what makes
+/// it cheap enough to keep the newest frame beside the ones the encoder is still reading.
+#[derive(Debug, Clone)]
 pub struct CapturedFrame {
     /// Host clock when the frame was captured, in microseconds.
     pub capture_ts_us: u64,
