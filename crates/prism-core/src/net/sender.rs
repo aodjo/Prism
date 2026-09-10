@@ -27,10 +27,10 @@ use crate::net::packet::{
     InputPacket, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD, channel_of,
 };
 use crate::net::packetize::SlicePacketizer;
-use crate::net::transfer::{Files, Landed};
 use crate::net::seal::Opener;
 use crate::net::secure::SecureSender;
 use crate::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
+use crate::net::transfer::{Files, Landed};
 use crate::net::transport::UdpTransport;
 use crate::stats::LatencyRecorder;
 
