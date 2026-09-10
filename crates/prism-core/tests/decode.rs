@@ -13,16 +13,20 @@ use prism_core::decode::{NAL_IDR, NAL_PPS, NAL_SPS, nal_type, nal_units};
 /// is that the picture survives the round trip, never that it survives it quickly. The
 /// pipeline's real deadlines are measured against a running session, not here.
 ///
-/// Five seconds was enough while every machine running this had a hardware encoder. It is not
-/// enough on one that does not: the tests in this file run in parallel, and several concurrent
-/// software encodes of ninety frames each starve one another well past that. Measured on
-/// GitHub's Intel macOS runner, which is a virtual machine with no media engine — eight of the
-/// nine passed and the ninth timed out.
+/// Ten seconds rather than the five it was, because the tests in this file run in parallel and
+/// several concurrent software encodes starve one another — measured on GitHub's Intel macOS
+/// runner, a virtual machine with no media engine, where this work takes two orders of magnitude
+/// longer than on a machine with one.
+///
+/// It bounds what a *missing* frame costs; it does not promise one arrives. Raising it alone did
+/// not fix that run — at thirty seconds the same test still failed, four minutes later, because
+/// the frame was never coming at all.
+///
 /// Gated to match the two modules that use it. Both are macOS-only — VideoToolbox is the only
 /// session either end of this round trip can be — and a constant compiled where nothing reads
 /// it is dead code that `-D warnings` stops the Windows build on.
 #[cfg(target_os = "macos")]
-const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[test]
 fn nal_units_are_split_on_either_start_code_length() {
@@ -160,7 +164,15 @@ mod round_trip {
                 .encode(source.pixel_buffer(), phase as u64 * 33_333, phase == 0)
                 .expect("frame encodes");
 
-            let encoded = encoder.poll(crate::PATIENCE).expect("frame comes back");
+            // A frame not coming back is allowed, and this insisted otherwise. The session is
+            // configured `RealTime`, which is VideoToolbox being told it may drop a frame
+            // rather than fall behind — a hardware encoder never needs to, and a software one
+            // in a virtual machine does. What this test is actually for is the assertion at the
+            // bottom: three quarters of the frames must come back *and match*. That catches a
+            // broken encoder; demanding every single frame only caught a slow one.
+            let Some(encoded) = encoder.poll(crate::PATIENCE) else {
+                continue;
+            };
             let pts_us = encoded.pts_us;
             let bitstream = encoded.data.clone();
 
