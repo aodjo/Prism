@@ -40,6 +40,7 @@ const PAGES = [
   { id: 'audit', label: '감사 로그', glyph: 'history', group: null },
   { id: 'regions', label: '리전', glyph: 'globe', group: '서버' },
   { id: 'relay', label: '릴레이', glyph: 'radio', group: '서버' },
+  { id: 'builds', label: '빌드', glyph: 'package', group: '서버' },
 ];
 
 /** Which page is showing, and which account is open on the accounts page. */
@@ -1134,6 +1135,197 @@ async function drawRelay(column) {
   );
 }
 
+/* ── Builds ────────────────────────────────────────────────────────────────── */
+
+/** Which version's files are open, kept across redraws so a refresh does not close it. */
+let openVersion = null;
+
+/**
+ * What a target and architecture are called where somebody reads them.
+ *
+ * The updater asks in the names Rust uses for a target. Those are the right thing on the wire
+ * and the wrong thing in a list a person is scanning.
+ *
+ * @param {string} target - `darwin`, `windows` or `linux`.
+ * @param {string} arch - `aarch64` or `x86_64`.
+ * @returns {string} What to show.
+ */
+function platformName(target, arch) {
+  const system = { darwin: 'macOS', windows: 'Windows', linux: 'Linux' }[target] ?? target;
+  const chip = { aarch64: 'Apple Silicon', x86_64: 'Intel' }[arch] ?? arch;
+
+  return target === 'darwin' ? `${system} · ${chip}` : `${system} · ${arch}`;
+}
+
+/**
+ * The development line, as the folders and files it is stored as.
+ *
+ * A version is a folder because that is what it is in the bucket: one version holds one file per
+ * platform, published one at a time by whoever had that machine in front of them. Which is also
+ * why a version with one file in it is the normal case rather than a half-finished one.
+ *
+ * @async
+ * @param {HTMLElement} column - Where to draw.
+ * @returns {Promise<void>}
+ */
+async function drawBuilds(column) {
+  const { builds } = await call('/v1/admin/builds');
+
+  // Grouped in the order the rows arrived, which is newest first: the table is ordered by when
+  // each was published and a version's folder belongs where its newest file puts it.
+  const versions = new Map();
+
+  for (const build of builds ?? []) {
+    const found = versions.get(build.version) ?? { version: build.version, files: [], bytes: 0 };
+
+    found.files.push(build);
+    found.bytes += build.bytes;
+    versions.set(build.version, found);
+  }
+
+  const folders = [...versions.values()];
+
+  if (openVersion === null || !versions.has(openVersion)) {
+    openVersion = folders[0]?.version ?? null;
+  }
+
+  const files = el('div.explorer-files');
+
+  /**
+   * Draws the files inside whichever version is open.
+   *
+   * @returns {void}
+   */
+  const showFiles = () => {
+    const folder = versions.get(openVersion);
+
+    if (!folder) {
+      files.replaceChildren(
+        el('div.nothing', {}, [
+          el('p.row-text.muted', { style: 'margin:0', text: '아직 올린 빌드가 없습니다.' }),
+          el('p.note.dim', {
+            style: 'margin:8px 0 0',
+            text: '저장소에서 pnpm publish-dev 를 실행하면 여기에 나타납니다.',
+          }),
+        ]),
+      );
+
+      return;
+    }
+
+    files.replaceChildren(
+      ...folder.files.map((build) =>
+        el('div.explorer-file', {}, [
+          el('span.explorer-glyph', {}, [icon('file', 15, '#8a8a99')]),
+          el('div.explorer-what', {}, [
+            el('span.row-text.ink-2', { text: platformName(build.target, build.arch) }),
+            el('span.note.muted', { text: build.notes || `${build.target}/${build.arch}` }),
+          ]),
+          el('span.mono.dim', { text: size(build.bytes) }),
+          // A build without one is a build the updater downloads in full and then refuses, so
+          // it is worth saying here rather than at the far end of somebody's connection.
+          !build.signed && el('span.tag-bad', { text: '서명 없음' }),
+          el('span.note.dim', { text: since(Math.max(0, Math.floor(Date.now() / 1000) - build.uploaded_unix)) }),
+          el('a.icon-button', {
+            href: `/v1/builds/${build.version}/${build.target}/${build.arch}`,
+            title: '내려받기',
+            download: '',
+          }, [icon('download', 15, '#8a8a99')]),
+          el('button.icon-button', {
+            type: 'button',
+            title: '내리기',
+            on: {
+              click: () => {
+                void withdraw(build);
+              },
+            },
+          }, [icon('trash', 15, '#ff8a96')]),
+        ]),
+      ),
+    );
+  };
+
+  showFiles();
+
+  column.append(
+    header(
+      '빌드',
+      [
+        el('span.note.muted', {
+          text: folders.length
+            ? `버전 ${folders.length}개 · 파일 ${(builds ?? []).length}개`
+            : '',
+        }),
+      ],
+    ),
+    el('div.page-body', { style: 'padding-top:22px' }, [
+      // What this page is for, said once. Everything under it is the line between releases, and
+      // somebody who lands here having only ever cut releases would otherwise be looking at an
+      // empty folder with no idea what fills it.
+      el('p.note.muted', { style: 'margin:0 0 18px' }, [
+        el('span', { text: '개발 채널을 따르는 기계가 받는 빌드입니다. 가장 위의 것이 지금 나가고 있습니다.' }),
+      ]),
+      el('div.explorer', {}, [
+        el('div.explorer-tree', {},
+          folders.length
+            ? folders.map((folder) =>
+                el('button', {
+                  class: `explorer-folder${folder.version === openVersion ? ' is-open' : ''}`,
+                  type: 'button',
+                  on: {
+                    click: () => {
+                      openVersion = folder.version;
+
+                      for (const each of column.querySelectorAll('.explorer-folder')) {
+                        each.classList.toggle(
+                          'is-open',
+                          each.dataset.version === openVersion,
+                        );
+                      }
+
+                      showFiles();
+                    },
+                  },
+                  'data-version': folder.version,
+                }, [
+                  icon('folder', 15, '#8a8a99'),
+                  el('span.explorer-name', { text: folder.version }),
+                  el('span.mono.dim', { text: `${folder.files.length}` }),
+                ]),
+              )
+            : [el('p.note.dim', { style: 'margin:12px 14px', text: '비어 있습니다.' })],
+        ),
+        files,
+      ]),
+    ]),
+  );
+}
+
+/**
+ * Takes one build off the line, once somebody has said so twice.
+ *
+ * @async
+ * @param {object} build - The row being withdrawn.
+ * @returns {Promise<void>}
+ */
+async function withdraw(build) {
+  const yes = await confirmed(
+    `${build.version} · ${platformName(build.target, build.arch)}`,
+    '이 빌드를 내립니다. 이미 받은 기계는 그대로 두고, 앞으로 제안되지 않습니다.',
+    '내리기',
+  );
+
+  if (!yes) {
+    return;
+  }
+
+  await call(`/v1/admin/builds/${build.version}/${build.target}/${build.arch}`, {
+    method: 'DELETE',
+  });
+
+  await drawPage();
+}
+
 /* ── Audit ─────────────────────────────────────────────────────────────────── */
 
 /** How an action token reads, and how loud it is. */
@@ -1193,11 +1385,17 @@ async function drawAudit(column) {
  * Opens a modal and resolves when it closes.
  *
  * @param {(close: () => void) => HTMLElement} build - Given a way to close, returns the card.
+ * @param {() => void} [closed] - Run whichever way it closes, including the veil and Escape.
+ *   Somebody who dismisses a sheet has answered it, and a caller waiting on that answer would
+ *   otherwise wait forever.
  * @returns {void}
  */
-function modal(build) {
+function modal(build, closed = () => {}) {
   const veil = el('div.veil');
-  const close = () => veil.remove();
+  const close = () => {
+    veil.remove();
+    closed();
+  };
 
   veil.addEventListener('click', (event) => {
     if (event.target === veil) {
@@ -1217,6 +1415,56 @@ function modal(build) {
 
   veil.append(build(close));
   document.body.append(veil);
+}
+
+/**
+ * Asks once, and answers whether it was agreed to.
+ *
+ * For a change that is worth stopping over and not worth typing a name out for. Removing an
+ * account is the other kind and has its own sheet, where the address has to be typed: what makes
+ * that one different is that nothing brings it back.
+ *
+ * @async
+ * @param {string} title - What is about to happen to.
+ * @param {string} detail - What happens, in one line.
+ * @param {string} verb - What the button says.
+ * @returns {Promise<boolean>} Whether to go ahead.
+ */
+function confirmed(title, detail, verb) {
+  return new Promise((settle) => {
+    let answer = false;
+
+    modal(
+      (close) => {
+        /**
+         * Records what was chosen and closes, which is what settles this.
+         *
+         * @param {boolean} yes - What was chosen.
+         * @returns {void}
+         */
+        const done = (yes) => {
+          answer = yes;
+          close();
+        };
+
+        return el('div.modal', {}, [
+          el('h2.heading', { text: title }),
+          el('p.note.muted', { style: 'margin:14px 0 0', text: detail }),
+          el('div.modal-actions', { style: 'padding-top:24px' }, [
+            el('button.pill', { type: 'button', text: '취소', on: { click: () => done(false) } }),
+            el('button.pill.danger', {
+              type: 'button',
+              text: verb,
+              on: { click: () => done(true) },
+            }),
+          ]),
+        ]);
+      },
+      // Whichever way it closed. Dismissing it with the veil or with Escape leaves `answer`
+      // where it started, which is no.
+      () => settle(answer),
+    );
+  });
 }
 
 /**
@@ -1478,6 +1726,7 @@ async function drawPage() {
     sessions: drawSessions,
     regions: drawRegions,
     relay: drawRelay,
+    builds: drawBuilds,
     audit: drawAudit,
   }[view.page];
 

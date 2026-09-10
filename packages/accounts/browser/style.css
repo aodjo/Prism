@@ -1281,3 +1281,138 @@ button:disabled {
     width: auto;
   }
 }
+
+/* ── Builds ───────────────────────────────────────────────────────────────── */
+
+/* Two panes, because that is the shape of the thing: a version is a folder holding one file per
+   platform, and one of the two lists is short while the other is shorter. A single flat list
+   would repeat the version on every row and still not say which of them is a folder. */
+.explorer {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  min-height: 320px;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-card);
+  background: var(--wash-1);
+}
+
+.explorer-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-right: 1px solid var(--line-2);
+  background: var(--sunk);
+  overflow-y: auto;
+}
+
+.explorer-folder {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-tile);
+  color: var(--muted-2);
+  text-align: left;
+}
+
+.explorer-folder:hover {
+  background: var(--wash-1);
+  color: var(--ink-3);
+}
+
+.explorer-folder.is-open {
+  background: var(--wash-3);
+  color: var(--ink);
+}
+
+/* The version, which is the only part of a row that has to be readable at a glance. It is also
+   the only part that can be long, so it is the part that gives way. */
+.explorer-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer-files {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.explorer-file {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 12px;
+  border-radius: var(--radius-tile);
+}
+
+.explorer-file:hover {
+  background: var(--wash-1);
+}
+
+.explorer-glyph {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-tile);
+  background: var(--wash-3);
+}
+
+.explorer-what {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.explorer-what > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Shown only on the row being pointed at. Two of these on every row, always visible, would make
+   a list of four builds look like a list of twelve controls. */
+.icon-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-tile);
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.explorer-file:hover .icon-button,
+.icon-button:focus-visible {
+  opacity: 1;
+}
+
+.icon-button:hover {
+  background: var(--wash-4);
+}
+
+/* A build the updater would download in full and then refuse. Said here rather than at the far
+   end of somebody's connection. */
+.tag-bad {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 92, 110, 0.14);
+  color: var(--danger-ink);
+  font-size: 11.5px;
+}

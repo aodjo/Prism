@@ -1412,6 +1412,47 @@ export default {
         // What the strip along the top is: the few numbers an operator would otherwise open a
         // terminal for. Every one of them is measured here rather than remembered, so a stale
         // answer is not possible — only a slow one.
+        // Everything on the development line, newest first.
+        //
+        // From the table rather than by listing the bucket. The bucket holds bytes; what a build
+        // is — which version, which platform, who published it and when — is here, and a listing
+        // that read the objects would have to guess all of it back out of the key.
+        if (path === '/v1/admin/builds' && method === 'GET') {
+          const { results } = await env.prism_accounts
+            .prepare(
+              'SELECT version, target, arch, notes, bytes, uploaded_unix, published_by,' +
+                ' length(signature) AS signed FROM builds ORDER BY uploaded_unix DESC LIMIT 500',
+            )
+            .all();
+
+          return json({ builds: results ?? [] });
+        }
+
+        // Taking one off the line.
+        //
+        // The object first and the row second, in that order for the same reason publishing does
+        // them the other way round: what must never exist is a row promising a bundle that is
+        // gone. A few orphaned megabytes are the harmless failure.
+        if (path.startsWith('/v1/admin/builds/') && method === 'DELETE') {
+          const [version = '', target = '', arch = ''] = path
+            .slice('/v1/admin/builds/'.length)
+            .split('/');
+
+          if (!version || !target || !arch) {
+            return malformed('build path');
+          }
+
+          await env.prism_builds.delete(buildKey(version, target, arch));
+          await env.prism_accounts
+            .prepare('DELETE FROM builds WHERE version = ? AND target = ? AND arch = ?')
+            .bind(version, target, arch)
+            .run();
+
+          await record(env, acting, 'build.withdraw', `${version} ${target}/${arch}`);
+
+          return json({ ok: true });
+        }
+
         // Publishing a development build: the bundle as the body, the signature as a header.
         //
         // Behind the operator gate, which is where it belongs — this is the one call on this
