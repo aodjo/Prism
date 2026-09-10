@@ -40,7 +40,7 @@ const PAGES = [
   { id: 'audit', label: '감사 로그', glyph: 'history', group: null },
   { id: 'regions', label: '리전', glyph: 'globe', group: '서버' },
   { id: 'relay', label: '릴레이', glyph: 'radio', group: '서버' },
-  { id: 'builds', label: '빌드', glyph: 'package', group: '서버' },
+  { id: 'builds', label: '개발 빌드', glyph: 'package', group: '서버' },
 ];
 
 /** Which page is showing, and which account is open on the accounts page. */
@@ -1214,6 +1214,15 @@ async function drawBuilds(column) {
     }
 
     files.replaceChildren(
+      // Column names, because the two figures on the right are a size and an age and neither
+      // says which it is. One row of them at the top costs less than a unit on every line.
+      el('div.explorer-head', {}, [
+        el('span'),
+        el('span.label', { text: '파일' }),
+        el('span.label', { text: '크기' }),
+        el('span.label', { text: '올린 때' }),
+        el('span'),
+      ]),
       ...folder.files.map((build) =>
         el('div.explorer-file', {}, [
           el('span.explorer-glyph', {}, [icon('file', 15, '#8a8a99')]),
@@ -1221,24 +1230,26 @@ async function drawBuilds(column) {
             el('span.row-text.ink-2', { text: platformName(build.target, build.arch) }),
             el('span.note.muted', { text: build.notes || `${build.target}/${build.arch}` }),
           ]),
-          el('span.mono.dim', { text: size(build.bytes) }),
-          el('span.note.dim', {
+          el('span.mono.ink-3.explorer-figure', { text: size(build.bytes) }),
+          el('span.note.muted.explorer-figure', {
             text: since(Math.max(0, Math.floor(Date.now() / 1000) - build.uploaded_unix)),
           }),
-          el('a.icon-button', {
-            href: `/v1/builds/${build.version}/${build.target}/${build.arch}`,
-            title: '내려받기',
-            download: '',
-          }, [icon('download', 15, '#8a8a99')]),
-          el('button.icon-button', {
-            type: 'button',
-            title: '내리기',
-            on: {
-              click: () => {
-                void withdraw(build);
+          el('span.explorer-actions', {}, [
+            el('a.icon-button', {
+              href: `/v1/builds/${build.version}/${build.target}/${build.arch}`,
+              title: '내려받기',
+              download: '',
+            }, [icon('download', 15, '#8a8a99')]),
+            el('button.icon-button', {
+              type: 'button',
+              title: '내리기',
+              on: {
+                click: () => {
+                  void withdraw(build);
+                },
               },
-            },
-          }, [icon('trash', 15, '#ff8a96')]),
+            }, [icon('trash', 15, '#ff8a96')]),
+          ]),
         ]),
       ),
     );
@@ -1248,7 +1259,7 @@ async function drawBuilds(column) {
 
   column.append(
     header(
-      '빌드',
+      '개발 빌드',
       [
         el('span.note.muted', {
           text: folders.length
@@ -1261,13 +1272,12 @@ async function drawBuilds(column) {
       // What this page is for, said once. Everything under it is the line between releases, and
       // somebody who lands here having only ever cut releases would otherwise be looking at an
       // empty folder with no idea what fills it.
-      el('p.note.muted', { style: 'margin:0 0 18px' }, [
-        el('span', { text: '개발 채널을 따르는 기계가 받는 빌드입니다. 가장 위의 것이 지금 나가고 있습니다.' }),
-      ]),
+      el('p.note.muted', { style: 'margin:0 0 18px', text: '개발 채널을 따르는 기계가 받는 빌드입니다. 맨 위의 것이 지금 나가고 있습니다.' }),
       el('div.explorer', {}, [
-        el('div.explorer-tree', {},
-          folders.length
-            ? folders.map((folder) =>
+        el('div.explorer-tree', {}, [
+          el('div.explorer-tree-head', {}, [el('span.label', { text: '버전' })]),
+          ...(folders.length
+            ? folders.map((folder, at) =>
                 el('button', {
                   class: `explorer-folder${folder.version === openVersion ? ' is-open' : ''}`,
                   type: 'button',
@@ -1276,10 +1286,7 @@ async function drawBuilds(column) {
                       openVersion = folder.version;
 
                       for (const each of column.querySelectorAll('.explorer-folder')) {
-                        each.classList.toggle(
-                          'is-open',
-                          each.dataset.version === openVersion,
-                        );
+                        each.classList.toggle('is-open', each.dataset.version === openVersion);
                       }
 
                       showFiles();
@@ -1287,13 +1294,20 @@ async function drawBuilds(column) {
                   },
                   'data-version': folder.version,
                 }, [
-                  icon('folder', 15, '#8a8a99'),
-                  el('span.explorer-name', { text: folder.version }),
-                  el('span.mono.dim', { text: `${folder.files.length}` }),
+                  el('span.explorer-glyph.small', {}, [icon('folder', 14, '#8a8a99')]),
+                  el('span.explorer-folder-what', {}, [
+                    el('span.explorer-name', { text: folder.version }),
+                    el('span.fine.dim', {
+                      text: `파일 ${folder.files.length}개 · ${size(folder.bytes)}`,
+                    }),
+                  ]),
+                  // Only the newest, and only once. Which build is going out is the question
+                  // this page exists to answer, and answering it on every row answers nothing.
+                  at === 0 && el('span.tag-now', { text: '배포 중' }),
                 ]),
               )
-            : [el('p.note.dim', { style: 'margin:12px 14px', text: '비어 있습니다.' })],
-        ),
+            : [el('p.note.dim', { style: 'margin:12px 14px', text: '비어 있습니다.' })]),
+        ]),
         files,
       ]),
     ]),

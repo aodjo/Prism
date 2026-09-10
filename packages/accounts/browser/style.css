@@ -1282,15 +1282,17 @@ button:disabled {
   }
 }
 
-/* ── Builds ───────────────────────────────────────────────────────────────── */
 
-/* Two panes, because that is the shape of the thing: a version is a folder holding one file per
-   platform, and one of the two lists is short while the other is shorter. A single flat list
-   would repeat the version on every row and still not say which of them is a folder. */
+/* ── Development builds ───────────────────────────────────────────────────── */
+
+/* Capped at the width the map already uses, which is what stops a list of four files from
+   being drawn across two thousand pixels with a canyon between the name and the size. */
 .explorer {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
-  min-height: 320px;
+  grid-template-columns: 268px minmax(0, 1fr);
+  width: 100%;
+  max-width: 1080px;
+  min-height: 340px;
   overflow: hidden;
   border: 1px solid var(--line-2);
   border-radius: var(--radius-card);
@@ -1301,18 +1303,33 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 8px;
+  padding: 0 8px 8px;
   border-right: 1px solid var(--line-2);
   background: var(--sunk);
   overflow-y: auto;
 }
 
+/* The two heads sit at the same height and carry the same rule under them, so the panes read as
+   one table split down the middle rather than two lists that happen to be side by side. */
+.explorer-tree-head,
+.explorer-head {
+  display: flex;
+  align-items: center;
+  height: 42px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.explorer-tree-head {
+  padding: 0 10px;
+}
+
 .explorer-folder {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   width: 100%;
-  padding: 8px 10px;
+  padding: 9px 10px;
   border-radius: var(--radius-tile);
   color: var(--muted-2);
   text-align: left;
@@ -1320,39 +1337,68 @@ button:disabled {
 
 .explorer-folder:hover {
   background: var(--wash-1);
-  color: var(--ink-3);
 }
 
 .explorer-folder.is-open {
   background: var(--wash-3);
-  color: var(--ink);
 }
 
-/* The version, which is the only part of a row that has to be readable at a glance. It is also
-   the only part that can be long, so it is the part that gives way. */
-.explorer-name {
+.explorer-folder-what {
+  display: flex;
   flex: 1;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
+}
+
+/* The version, which is the only part of a row that has to be readable at a glance, and the
+   only part that can be long. So it is the part that gives way. */
+.explorer-name {
   font-family: var(--mono);
   font-size: 12px;
+  color: var(--muted-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.explorer-folder.is-open .explorer-name {
+  color: var(--ink);
+}
+
+.tag-now {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(77, 232, 176, 0.14);
+  color: var(--mint);
+  font-size: 11px;
 }
 
 .explorer-files {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: 8px;
+  padding: 0 10px 10px;
   overflow-y: auto;
 }
 
+/* One grid for the head and every row, so a size and an age line up under the words naming
+   them instead of wherever the text before them happened to end. */
+.explorer-head,
 .explorer-file {
-  display: flex;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 82px 76px 72px;
   align-items: center;
   gap: 14px;
-  padding: 11px 12px;
+}
+
+.explorer-head {
+  padding: 0 6px;
+}
+
+.explorer-file {
+  padding: 11px 6px;
   border-radius: var(--radius-tile);
 }
 
@@ -1372,15 +1418,21 @@ button:disabled {
   display: grid;
   flex: none;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   border-radius: var(--radius-tile);
   background: var(--wash-3);
 }
 
+.explorer-glyph.small {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: none;
+}
+
 .explorer-what {
   display: flex;
-  flex: 1;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
@@ -1392,17 +1444,33 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* Numbers under the words that name them, which means right-aligned: a column of figures is
+   read down its last digit, not its first. */
+.explorer-head > .label:nth-child(3),
+.explorer-head > .label:nth-child(4),
+.explorer-figure {
+  text-align: right;
+}
+
+.explorer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
 /* Shown only on the row being pointed at. Two of these on every row, always visible, would make
    a list of four builds look like a list of twelve controls. */
 .icon-button {
   display: grid;
   flex: none;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: var(--radius-tile);
   opacity: 0;
-  transition: opacity 120ms ease, background 120ms ease;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease;
 }
 
 .explorer-file:hover .icon-button,
