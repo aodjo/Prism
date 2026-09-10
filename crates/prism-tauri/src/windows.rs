@@ -49,7 +49,25 @@ pub fn stage(app: &AppHandle, label: &str, page: &str) -> tauri::Result<WebviewW
         .center()
         .background_color(BASE);
 
-    overlaid(window).build()
+    let window = overlaid(window).build()?;
+    let hiding = window.clone();
+
+    // Closing the window closes the window. This machine is shareable for exactly as long as
+    // Prism runs on it, so ending the application is something asked for in the menu bar and
+    // not something that happens because somebody was done looking at a list of machines.
+    //
+    // Which is why the two places that mean it use `destroy`: this fires for a close asked for
+    // in code as readily as for one asked for with the mouse, and neither of them wants a
+    // window that comes back.
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+
+            let _ = hiding.hide();
+        }
+    });
+
+    Ok(window)
 }
 
 /// Puts the window's content where its title bar would be, where that is a thing windows do.
@@ -81,7 +99,7 @@ pub fn open_home(app: &AppHandle) -> tauri::Result<()> {
     stage(app, "home", "home.html")?;
 
     if let Some(setup) = app.get_webview_window("setup") {
-        setup.close()?;
+        setup.destroy()?;
     }
 
     Ok(())
@@ -101,7 +119,7 @@ pub fn open_setup(app: &AppHandle) -> tauri::Result<()> {
     stage(app, "setup", "setup.html")?;
 
     if let Some(home) = app.get_webview_window("home") {
-        home.close()?;
+        home.destroy()?;
     }
 
     Ok(())
