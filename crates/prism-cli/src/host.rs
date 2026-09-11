@@ -380,7 +380,7 @@ const ENCODE_IN_FLIGHT: usize = 2;
 ///
 /// Not a still screen, which produces nothing and is sent again anyway. This is a capture that
 /// never started.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 const CAPTURE_PATIENCE: Duration = Duration::from_secs(10);
 
 /// Sends one finished frame, and says whether there was one.
