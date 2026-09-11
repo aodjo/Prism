@@ -11,10 +11,10 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::clock::now_us;
-use crate::input::{Injector, PlatformInjector};
+use crate::input::{Injector, LocalHand, PlatformInjector};
 use crate::net::ack::{is_newer, missing_in_history};
 use crate::net::cc::{CongestionConfig, CongestionController, DelaySample};
 use crate::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
@@ -25,7 +25,7 @@ use crate::net::packet::{
     AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition,
     FEEDBACK_WANTS_KEYFRAME, FLAG_IDR, FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, GOODBYE_LEN,
     Goodbye, InputEvent, InputPacket, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD,
-    channel_of,
+    MouseButton, channel_of,
 };
 use crate::net::packetize::SlicePacketizer;
 use crate::net::seal::Opener;
@@ -1145,6 +1145,13 @@ struct HostInput {
     injector: Option<PlatformInjector>,
     complained: bool,
     confirmed: bool,
+    /// Whether the person at this machine has the pointer, which puts the far side's aside.
+    hand: LocalHand,
+    /// The buttons the far side has pressed and not let go of.
+    ///
+    /// Let go of the moment somebody here takes the pointer, so they are not handed a drag they
+    /// did not start.
+    pressed: [bool; 3],
 }
 
 impl HostInput {
@@ -1166,11 +1173,71 @@ impl HostInput {
             injector,
             complained: false,
             confirmed: false,
+            hand: LocalHand::default(),
+            pressed: [false; 3],
         }
     }
 
     /// Injects one event, complaining at most once about a kind of failure that repeats.
+    ///
+    /// Pointer input is set aside while the person at this machine is using its mouse. The
+    /// keyboard is not: two people typing at one machine is a conversation they can have, and
+    /// two hands on one pointer is not.
     fn inject(&mut self, event: InputEvent) {
+        if self.injector.is_none() {
+            return;
+        }
+
+        // A release of a button the far side is not holding goes nowhere: either it was never
+        // pressed, or it was let go of already when somebody here took the pointer.
+        if let InputEvent::MouseButton {
+            button,
+            pressed: false,
+        } = event
+        {
+            if !self.pressed[button as usize] {
+                return;
+            }
+        }
+
+        let takes_the_pointer = matches!(
+            event,
+            InputEvent::MouseMove { .. }
+                | InputEvent::MouseTo { .. }
+                | InputEvent::MouseScroll { .. }
+                | InputEvent::MouseButton { pressed: true, .. }
+        );
+
+        if takes_the_pointer && self.hand.holds(crate::input::pointer(), Instant::now()) {
+            self.let_go();
+
+            return;
+        }
+
+        match event {
+            InputEvent::MouseTo { x, y } => self.hand.placed(x, y),
+            InputEvent::MouseMove { .. } => self.hand.lost_track(),
+            InputEvent::MouseButton { button, pressed } => self.pressed[button as usize] = pressed,
+            _ => {}
+        }
+
+        self.post(event);
+    }
+
+    /// Lets go of every button the far side is holding.
+    fn let_go(&mut self) {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            if std::mem::take(&mut self.pressed[button as usize]) {
+                self.post(InputEvent::MouseButton {
+                    button,
+                    pressed: false,
+                });
+            }
+        }
+    }
+
+    /// Hands one event to the injector.
+    fn post(&mut self, event: InputEvent) {
         let Some(injector) = self.injector.as_mut() else {
             return;
         };

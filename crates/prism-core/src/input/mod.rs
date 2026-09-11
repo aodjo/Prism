@@ -187,6 +187,8 @@ impl HeldKeys {
     }
 }
 
+use std::time::{Duration, Instant};
+
 use crate::net::packet::InputEvent;
 
 /// Where the pointer is on this machine, and how big the screen holding it is.
@@ -268,6 +270,195 @@ impl Injector for Unsupported {
 
     fn injection_is_landing(&self) -> bool {
         false
+    }
+}
+
+/// How long the pointer stays with the person at this machine after they last moved it.
+///
+/// A second: long enough that somebody reaching for their own mouse is not fought for it by
+/// the machine watching, short enough that the far side has it back as soon as they let go.
+pub const LOCAL_HOLD: Duration = Duration::from_secs(1);
+
+/// How far the pointer can be from where it was put and still count as where it was put.
+///
+/// In points on macOS and pixels on Windows. Putting it there rounds one way and reading it
+/// back rounds another, so exactly there is not a test anything passes.
+const LOCAL_SLACK: u16 = 3;
+
+/// How many recent placements count as the far side's own.
+///
+/// More than one, because the system moves the pointer a moment after it is told to, and a
+/// reading taken in between finds it where an earlier placement left it.
+const RECENT_PLACEMENTS: usize = 8;
+
+/// Who has the pointer: the person at this machine, or the machine watching it.
+///
+/// Nothing on either platform says which hand moved a pointer, and an injected event looks to
+/// the system like any other. So this remembers where the far side's input put the pointer,
+/// and a pointer found anywhere else — and somewhere it was not the last time it was looked at
+/// either — was moved by somebody here. For [`LOCAL_HOLD`] after that, the far side's pointer
+/// input is set aside, so the person sitting at the machine is never fought for their own mouse.
+#[derive(Debug, Default)]
+pub struct LocalHand {
+    /// The last few places the far side put the pointer, as fractions of the screen.
+    placed: [Option<(u16, u16)>; RECENT_PLACEMENTS],
+    /// Where the next placement is written in the ring above.
+    next: usize,
+    /// Where the pointer was the last time it was looked at, on the screen.
+    seen: Option<(u16, u16)>,
+    /// Until when the pointer is the person's here, if they have taken it.
+    until: Option<Instant>,
+}
+
+impl LocalHand {
+    /// Records that the far side put the pointer a fraction of the way across and down the
+    /// screen, on the scale the wire carries.
+    pub fn placed(&mut self, x: u16, y: u16) {
+        self.placed[self.next] = Some((x, y));
+        self.next = (self.next + 1) % RECENT_PLACEMENTS;
+    }
+
+    /// Forgets where the pointer was put, after a move whose destination is not known.
+    ///
+    /// Relative motion lands wherever the pointer was, plus the distance. Until the next
+    /// placement nothing here knows where that is, and guessing would be taking the far side's
+    /// own movement for somebody else's.
+    pub fn lost_track(&mut self) {
+        self.placed = [None; RECENT_PLACEMENTS];
+        self.seen = None;
+    }
+
+    /// Returns whether the person at this machine has the pointer, given where it is now.
+    ///
+    /// `now` is the pointer as [`pointer`] reads it, or `None` when it cannot be read, which
+    /// changes nothing. The first look after starting, or after [`LocalHand::lost_track`], has
+    /// nothing to compare against and never counts as somebody here.
+    pub fn holds(&mut self, now: Option<PointerSample>, at: Instant) -> bool {
+        if let Some(sample) = now {
+            let here = (sample.x, sample.y);
+            let first = self.seen.is_none() && self.placed.iter().all(Option::is_none);
+            let put_there = self
+                .placed
+                .iter()
+                .flatten()
+                .any(|&(x, y)| near(here, on_screen(x, y, sample)));
+            let left_there = self.seen.is_some_and(|seen| near(here, seen));
+
+            if !first && !put_there && !left_there {
+                self.until = Some(at + LOCAL_HOLD);
+            }
+
+            self.seen = Some(here);
+        }
+
+        self.until.is_some_and(|until| at < until)
+    }
+}
+
+/// Returns whether two places on the screen are the same place, give or take [`LOCAL_SLACK`].
+fn near(one: (u16, u16), other: (u16, u16)) -> bool {
+    one.0.abs_diff(other.0) <= LOCAL_SLACK && one.1.abs_diff(other.1) <= LOCAL_SLACK
+}
+
+/// Returns where a fraction of the screen lands on the screen a sample was read from.
+///
+/// The last point is the last column and row, as it is where the injectors put it.
+fn on_screen(x: u16, y: u16, screen: PointerSample) -> (u16, u16) {
+    let scale = |fraction: u16, extent: u16| -> u16 {
+        let last = u32::from(extent.saturating_sub(1));
+        let whole = u32::from(u16::MAX);
+
+        // At most `last`, which came from a `u16`.
+        ((u32::from(fraction) * last + whole / 2) / whole) as u16
+    };
+
+    (
+        scale(x, screen.screen_width),
+        scale(y, screen.screen_height),
+    )
+}
+
+#[cfg(test)]
+mod local_hand {
+    use std::time::{Duration, Instant};
+
+    use super::{LOCAL_HOLD, LocalHand, PointerSample};
+
+    /// The pointer at a place on a 1728 × 966 screen, the size the test machine reports.
+    fn at(x: u16, y: u16) -> Option<PointerSample> {
+        Some(PointerSample {
+            x,
+            y,
+            screen_width: 1728,
+            screen_height: 966,
+        })
+    }
+
+    #[test]
+    fn the_first_look_is_never_somebody_here() {
+        let mut hand = LocalHand::default();
+
+        assert!(!hand.holds(at(400, 300), Instant::now()));
+    }
+
+    #[test]
+    fn a_pointer_where_the_far_side_put_it_is_the_far_sides() {
+        let mut hand = LocalHand::default();
+        let now = Instant::now();
+
+        assert!(!hand.holds(at(10, 10), now));
+
+        // Halfway across and down, which on this screen is 863.5 and 482.5.
+        hand.placed(u16::MAX / 2, u16::MAX / 2);
+
+        assert!(!hand.holds(at(863, 482), now));
+    }
+
+    #[test]
+    fn a_pointer_moved_somewhere_else_is_the_persons_here_for_a_while() {
+        let mut hand = LocalHand::default();
+        let now = Instant::now();
+
+        assert!(!hand.holds(at(10, 10), now));
+        hand.placed(u16::MAX / 2, u16::MAX / 2);
+        assert!(!hand.holds(at(863, 482), now));
+
+        assert!(hand.holds(at(1200, 700), now), "moved by somebody here");
+        assert!(
+            hand.holds(at(1200, 700), now + LOCAL_HOLD - Duration::from_millis(1)),
+            "and theirs until the hold runs out"
+        );
+        assert!(
+            !hand.holds(at(1200, 700), now + LOCAL_HOLD),
+            "then the far side's again, once they have stopped moving it"
+        );
+    }
+
+    #[test]
+    fn a_pointer_still_catching_up_with_an_earlier_placement_is_not_somebody_here() {
+        let mut hand = LocalHand::default();
+        let now = Instant::now();
+
+        assert!(!hand.holds(at(0, 0), now));
+        hand.placed(0, 0);
+        hand.placed(u16::MAX / 4, u16::MAX / 4);
+        hand.placed(u16::MAX / 2, u16::MAX / 2);
+
+        assert!(
+            !hand.holds(at(432, 241), now),
+            "where the placement before last put it"
+        );
+    }
+
+    #[test]
+    fn after_a_move_of_unknown_length_the_next_look_starts_over() {
+        let mut hand = LocalHand::default();
+        let now = Instant::now();
+
+        assert!(!hand.holds(at(10, 10), now));
+        hand.lost_track();
+
+        assert!(!hand.holds(at(900, 600), now));
     }
 }
 
