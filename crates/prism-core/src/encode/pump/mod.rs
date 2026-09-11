@@ -135,8 +135,14 @@ pub(crate) fn peer_gone(err: &std::io::Error) -> bool {
 }
 
 /// Turns a failed send into either an ordinary ending or a real error.
+///
+/// The ordinary ending is said on standard error all the same, which the application keeps. It
+/// ends the session for the machine watching too, and when that machine says the host vanished,
+/// this line is what says which of the two let go first.
 pub(crate) fn after_send(err: &std::io::Error) -> Result<Pumped, String> {
     if peer_gone(err) {
+        eprintln!("host: a packet to the client was refused ({err}), so it is taken to have gone");
+
         Ok(Pumped::PeerGone)
     } else {
         Err(err.to_string())

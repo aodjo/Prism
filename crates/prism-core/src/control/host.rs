@@ -507,6 +507,11 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
     // was ending anyway — does not end this one the moment it opens.
     shared.ending.store(false, Ordering::Relaxed);
     shared.set_phase(Phase::Streaming);
+    eprintln!(
+        "host: {} a session opened with {}",
+        seconds_now(),
+        crate::identity::to_hex(&sender.peer())
+    );
 
     // Audio runs on its own thread and its own clock. Interleaving it with the video loop
     // would tie a five millisecond cadence to a sixteen millisecond one, and whichever waited
@@ -519,6 +524,16 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
 
     let outcome = stream(&config, sender, shared, stop);
 
+    // Said on standard error, which the application keeps in its log. Why a session ended is
+    // the one thing about a host anybody asks afterwards, and this is the only place that knows.
+    let why = match &outcome {
+        Err(err) => format!("it failed: {err}"),
+        Ok(()) if stop.load(Ordering::Relaxed) => "sharing was stopped".to_owned(),
+        Ok(()) if shared.ending.load(Ordering::Relaxed) => "it was disconnected here".to_owned(),
+        Ok(()) => "the client went away".to_owned(),
+    };
+    eprintln!("host: {} the session ended because {why}", seconds_now());
+
     if let Some(thread) = audio {
         let _ = thread.join();
     }
@@ -529,6 +544,16 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
     if let Err(err) = outcome {
         shared.fail(err);
     }
+}
+
+/// The time, in whole seconds since the Unix epoch, for a line in the log.
+///
+/// Not a date: the log is read by comparing its lines with each other and with the other
+/// machine's, and a number compares without a time zone getting in the way.
+fn seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Turns a bound address into one somebody could actually type.

@@ -227,10 +227,72 @@ fn opening() -> (&'static str, &'static str) {
     }
 }
 
+/// How large the log may grow before a launch starts it afresh.
+#[cfg(all(unix, not(debug_assertions)))]
+const LOG_CEILING: u64 = 1024 * 1024;
+
+/// Keeps what the application says on standard error, which is otherwise lost.
+///
+/// An application started from the Dock has nowhere for standard error to go, and that is where
+/// every line a host writes about itself ends up — a session opening, why it ended — along with
+/// any panic. So a build not being run from a terminal points it at a file beside this machine's
+/// key, where somebody asked what happened on it can find the answer.
+///
+/// Started afresh at launch once it has grown past [`LOG_CEILING`], so it never becomes the
+/// thing filling the disk.
+#[cfg(all(unix, not(debug_assertions)))]
+fn keep_the_log() {
+    use std::os::fd::AsRawFd as _;
+
+    unsafe extern "C" {
+        fn dup2(from: std::ffi::c_int, to: std::ffi::c_int) -> std::ffi::c_int;
+    }
+
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+
+    let folder = std::path::Path::new(&home).join(".prism");
+    let path = folder.join("prism.log");
+    let _ = std::fs::create_dir_all(&folder);
+
+    let fresh = std::fs::metadata(&path).is_ok_and(|about| about.len() > LOG_CEILING);
+    let file = if fresh {
+        std::fs::File::create(&path)
+    } else {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+    };
+
+    if let Ok(file) = file {
+        // SAFETY: both are open descriptors for the length of the call — the file's own, and
+        // standard error, which every process starts with — and `dup2` only makes the second
+        // refer to what the first does. The file's descriptor can close after; the copy stays.
+        unsafe { dup2(file.as_raw_fd(), 2) };
+    }
+}
+
+/// Leaves standard error where it is: a build run from a terminal is read in that terminal.
+#[cfg(not(all(unix, not(debug_assertions))))]
+fn keep_the_log() {}
+
 fn main() {
+    keep_the_log();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            eprintln!(
+                "prism: {} started at {}, process {}",
+                app.package_info().version,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs()),
+                std::process::id()
+            );
+
             app.manage(Held(Mutex::new(settings::load())));
             app.manage(account::Held::new());
             app.manage(sharing::Held::new());
