@@ -176,6 +176,27 @@ fn shown_in(picture: Option<(u32, u32)>, area: (u32, u32)) -> Fitted {
     picture.map_or_else(|| Fitted::whole(area), |picture| fit(picture, area))
 }
 
+/// Returns the size of the largest screen attached, in pixels, or `None` if none will say.
+///
+/// Largest by area, and in pixels rather than points: a Retina screen of 1728 points across has
+/// 3456 pixels to fill, and it is pixels the far machine is being asked to send.
+fn largest_screen(video: &sdl3::VideoSubsystem) -> Option<(u32, u32)> {
+    video
+        .displays()
+        .ok()?
+        .iter()
+        .filter_map(|display| display.get_mode().ok())
+        .map(|mode| {
+            let density = mode.pixel_density.max(1.0);
+
+            (
+                (mode.w.max(0) as f32 * density).round() as u32,
+                (mode.h.max(0) as f32 * density).round() as u32,
+            )
+        })
+        .max_by_key(|(across, down)| u64::from(*across) * u64::from(*down))
+}
+
 /// Returns where in the window a pointer event happened, when the event is one that has a place.
 fn pointer_at(event: &Event) -> Option<(f32, f32)> {
     match event {
@@ -512,10 +533,16 @@ pub fn run(
     let (mut drawable_width, mut drawable_height) = window.size_in_pixels();
     let scale = f64::from(drawable_width) / f64::from(window.size().0.max(1));
 
-    // The offer is what the host sizes its frames to, and it is only known now: the window is
-    // what decides how many pixels there are to fill. Points would ask for half of them.
-    config.offer.max_width = u16::try_from(drawable_width).unwrap_or(u16::MAX);
-    config.offer.max_height = u16::try_from(drawable_height).unwrap_or(u16::MAX);
+    // The offer is what the host sizes its frames to, for the whole of the session: nothing
+    // asks again when the window changes. So it is the most this window could come to show —
+    // the largest screen here, in pixels — rather than what it happens to open at. Offering the
+    // opening size was a stream sized for a window on whichever monitor it first appeared on,
+    // stretched soft the moment somebody made it larger or filled the screen with it.
+    let (most_across, most_down) =
+        largest_screen(&video).unwrap_or((drawable_width, drawable_height));
+
+    config.offer.max_width = u16::try_from(most_across.max(drawable_width)).unwrap_or(u16::MAX);
+    config.offer.max_height = u16::try_from(most_down.max(drawable_height)).unwrap_or(u16::MAX);
 
     // Declared after the window so it is dropped before it: the surface holds objects the
     // window owns, and releasing them afterwards would be releasing them into nothing.
