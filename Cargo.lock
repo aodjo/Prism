@@ -3186,6 +3186,8 @@ name = "prism-tauri"
 version = "0.0.0"
 dependencies = [
  "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "prism-core",
  "prism-stream",
  "serde",

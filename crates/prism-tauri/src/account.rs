@@ -1671,6 +1671,24 @@ pub fn refresh(held: &Held, settings: &Chosen) -> Result<bool, String> {
     held.with(|holder| holder.refresh(settings))
 }
 
+/// Returns what the account calls a machine, as of the last time it said, or `None` for a key
+/// it does not list.
+///
+/// Asks nothing of the server. Somebody who is watching this machine was on the account a
+/// moment ago, and the list from then is the name to put to them.
+#[cfg(target_os = "macos")]
+pub fn label_of(held: &Held, public_key: &str) -> Option<String> {
+    held.with(|holder| {
+        holder
+            .devices
+            .iter()
+            .find(|device| device.public_key == public_key)
+            .map(|device| device.label.clone())
+    })
+    .ok()
+    .flatten()
+}
+
 /// Tells the account whether this machine is shared.
 ///
 /// Not a command either: sharing says this as it starts, again every so often while it runs,

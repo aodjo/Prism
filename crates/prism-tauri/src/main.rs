@@ -22,6 +22,7 @@ mod sharing;
 mod stream;
 mod tray;
 mod updates;
+mod watched;
 mod windows;
 
 use std::sync::Mutex;
@@ -275,6 +276,9 @@ fn main() {
             // a machine somebody left shared should be reachable from the moment it starts, not
             // from the moment its window finishes drawing.
             sharing::resume(app.handle());
+
+            // And the handle that says so at the edge of the screen while somebody is watching.
+            watched::watch(app.handle());
 
             let (label, page) = opening();
             let window = windows::stage(app.handle(), label, page)?;

@@ -456,6 +456,32 @@ pub fn stop_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<
     remember(&chosen, false)
 }
 
+/// Returns who is watching this machine, by the name their account gives them, or `None` when
+/// nobody is.
+///
+/// A machine the account does not name — renamed to nothing, or off the account since — is
+/// called by the start and end of its key, which is still something to recognise it by.
+#[cfg(target_os = "macos")]
+pub fn watcher(app: &tauri::AppHandle) -> Option<String> {
+    use tauri::Manager as _;
+
+    let held: State<'_, Held> = app.state();
+    let snapshot = held.0.lock().ok()?.as_ref()?.snapshot();
+
+    if snapshot.phase != Phase::Streaming {
+        return None;
+    }
+
+    let key = identity::to_hex(&snapshot.peer?);
+    let account: State<'_, crate::account::Held> = app.state();
+
+    Some(
+        crate::account::label_of(&account, &key)
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| format!("{}…{}", &key[..6], &key[key.len() - 6..])),
+    )
+}
+
 /// Sends away whoever is watching this machine, and goes on sharing it.
 ///
 /// Their window closes and says the host ended it; this machine goes straight back to waiting.
