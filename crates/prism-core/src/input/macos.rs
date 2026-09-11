@@ -29,6 +29,20 @@ use crate::net::packet::{InputEvent, MouseButton};
 /// games.
 const TAP: CGEventTapLocation = CGEventTapLocation::HIDEventTap;
 
+/// What every event this injects carries in its source's user data field.
+///
+/// Looking like hardware is the point, and it leaves nothing to tell the machine's own mouse
+/// from the far one's by. This does: anything on this machine watching the pointer — the
+/// banner that appears when the person here takes hold of it — sets aside what carries it.
+/// The letters of the name, which nothing else is going to have put there.
+pub const INJECTED: i64 = 0x0050_5249_534D;
+
+/// Marks an event as injected and puts it into the system.
+fn post(event: &CGEvent) {
+    CGEvent::set_integer_value_field(Some(event), CGEventField::EventSourceUserData, INJECTED);
+    CGEvent::post(TAP, Some(event));
+}
+
 /// How soon a second press has to follow the first to count as a double click.
 ///
 /// The system's own default. A person who has changed theirs gets this one from a remote
@@ -123,7 +137,7 @@ impl MacInjector {
             }
 
             CGEvent::set_flags(Some(&event), self.flags);
-            CGEvent::post(TAP, Some(&event));
+            post(&event);
         }
 
         Ok(())
@@ -169,7 +183,7 @@ impl MacInjector {
                 count,
             );
             CGEvent::set_flags(Some(&event), self.flags);
-            CGEvent::post(TAP, Some(&event));
+            post(&event);
         }
 
         Ok(())
@@ -193,7 +207,7 @@ impl MacInjector {
 
         {
             CGEvent::set_flags(Some(&event), self.flags);
-            CGEvent::post(TAP, Some(&event));
+            post(&event);
         }
 
         Ok(())
@@ -227,7 +241,7 @@ impl MacInjector {
 
         {
             CGEvent::set_flags(Some(&event), self.flags);
-            CGEvent::post(TAP, Some(&event));
+            post(&event);
         }
 
         Ok(())
