@@ -28,8 +28,8 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::CVPixelBuffer;
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput,
-    SCStreamOutputType,
+    SCContentFilter, SCRunningApplication, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamOutput, SCStreamOutputType,
 };
 
 use crate::capture::{CaptureConfig, CaptureError};
@@ -217,13 +217,32 @@ impl ScreenCapture {
         let (width, height) =
             crate::capture::fit_within(native_pixels(&display), (config.width, config.height));
 
-        let empty: Retained<NSArray<_>> = NSArray::new();
-        // SAFETY: the display and the empty exclusion list both outlive the call.
+        // Everything on the display except this application's own windows. What it puts on the
+        // screen while it is being watched is for the person sitting here — the handle that
+        // ends the session above all — and drawn into the picture it would be a second handle
+        // on the other machine's screen, one that does nothing there.
+        //
+        // Applications rather than windows, because the handle is made after the capture
+        // starts and a list of windows is only the ones that existed when it was taken. A
+        // process with no windows at all, the command line's, is not in the list and leaves
+        // nothing out.
+        let me = std::process::id();
+        // SAFETY: the content object is alive and its application list is immutable.
+        let own: Vec<Retained<SCRunningApplication>> = unsafe { content.applications() }
+            .iter()
+            // SAFETY: each application belongs to the content just fetched.
+            .filter(|app| u32::try_from(unsafe { app.processID() }).is_ok_and(|pid| pid == me))
+            .collect();
+        let own = NSArray::from_retained_slice(&own);
+        let none: Retained<NSArray<_>> = NSArray::new();
+
+        // SAFETY: the display and both lists outlive the call.
         let filter = unsafe {
-            SCContentFilter::initWithDisplay_excludingWindows(
+            SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
                 SCContentFilter::alloc(),
                 &display,
-                &empty,
+                &own,
+                &none,
             )
         };
 
