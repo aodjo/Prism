@@ -123,6 +123,10 @@ impl Surface {
         let mut quads = [self.overlay.quad(target.0, target.1); 2];
         let count = match cursor_at {
             Some(at) => {
+                // A place on the far screen, which is the picture and not the window around it.
+                let whole = (target.0 as f32, target.1 as f32);
+                let at = prism_core::render::fit(size_of(picture), whole).to_target(at, whole);
+
                 quads[1] = self.cursor.quad(at, target.0, target.1);
                 2
             }

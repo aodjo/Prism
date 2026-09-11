@@ -27,6 +27,7 @@ use prism_core::cursor::CursorTracker;
 use prism_core::net::packet::{InputEvent, MouseButton};
 use prism_core::net::transfer::{self, Files, Landed};
 use prism_core::render::pacing::PresentPacer;
+use prism_core::render::{Fitted, fit};
 use prism_core::stats::LatencyRecorder;
 use sdl3::event::Event;
 use sdl3::keyboard::{Keycode, Mod};
@@ -145,24 +146,34 @@ fn is_release(event: &Event) -> bool {
 
 /// Returns where on the far screen a place in the window is, as the wire carries it.
 ///
-/// The picture fills the window, so the fraction of the way across the window the pointer is
-/// is the fraction of the way across the screen it is pointing at. The last point of the
-/// window is the last point of the screen, which is why it divides by one less than the size.
+/// Measured against the picture rather than the window, because the picture keeps its shape
+/// and the window need not: a place on the bars beside it is the nearest place on the far
+/// screen's edge. The last point of the picture is the last point of the screen.
 ///
 /// # Examples
 ///
 /// ```ignore
-/// assert_eq!(to_fraction(0.0, 0.0, (1280, 720)), (0, 0));
-/// assert_eq!(to_fraction(1279.0, 719.0, (1280, 720)), (65535, 65535));
+/// let shown = Fitted::whole((1280.0, 720.0));
+/// assert_eq!(to_fraction(0.0, 0.0, shown), (0, 0));
+/// assert_eq!(to_fraction(1279.0, 719.0, shown), (65535, 65535));
 /// ```
-fn to_fraction(x: f32, y: f32, area: (u32, u32)) -> (u16, u16) {
-    let across = (x / area.0.saturating_sub(1).max(1) as f32).clamp(0.0, 1.0);
-    let down = (y / area.1.saturating_sub(1).max(1) as f32).clamp(0.0, 1.0);
+fn to_fraction(x: f32, y: f32, shown: Fitted) -> (u16, u16) {
+    let (across, down) = shown.to_picture(x, y);
 
     (
         (across * f32::from(u16::MAX)).round() as u16,
         (down * f32::from(u16::MAX)).round() as u16,
     )
+}
+
+/// Returns where the picture is in the window, in the window's own units.
+///
+/// The whole window until a picture has arrived, when there is nothing yet to keep the shape
+/// of — the pointer still goes somewhere sensible in the moment before the first one.
+fn shown_in(picture: Option<(u32, u32)>, area: (u32, u32)) -> Fitted {
+    let area = (area.0 as f32, area.1 as f32);
+
+    picture.map_or_else(|| Fitted::whole(area), |picture| fit(picture, area))
 }
 
 /// Returns where in the window a pointer event happened, when the event is one that has a place.
@@ -180,10 +191,10 @@ fn pointer_at(event: &Event) -> Option<(f32, f32)> {
 /// Sent ahead of the button itself. The host's pointer is wherever the last motion put it,
 /// and a click that arrives with no motion before it — the first after control was taken, or
 /// one made without moving — would otherwise land there rather than where it was made.
-fn where_clicked(event: &Event, area: (u32, u32)) -> Option<InputEvent> {
+fn where_clicked(event: &Event, shown: Fitted) -> Option<InputEvent> {
     match event {
         Event::MouseButtonDown { x, y, .. } | Event::MouseButtonUp { x, y, .. } => {
-            let (x, y) = to_fraction(*x, *y, area);
+            let (x, y) = to_fraction(*x, *y, shown);
 
             Some(InputEvent::MouseTo { x, y })
         }
@@ -200,10 +211,10 @@ fn where_clicked(event: &Event, area: (u32, u32)) -> Option<InputEvent> {
 ///
 /// Key repeats are dropped. The host's own operating system generates repeats from the
 /// key being held, so forwarding the client's as well would double them.
-fn to_input_event(event: &Event, area: (u32, u32)) -> Option<InputEvent> {
+fn to_input_event(event: &Event, shown: Fitted) -> Option<InputEvent> {
     match event {
         Event::MouseMotion { x, y, .. } => {
-            let (x, y) = to_fraction(*x, *y, area);
+            let (x, y) = to_fraction(*x, *y, shown);
 
             Some(InputEvent::MouseTo { x, y })
         }
@@ -729,15 +740,17 @@ pub fn run(
                 .is_some_and(|(x, y)| bar.as_ref().is_some_and(|bar| bar.covers(x, y)));
 
             if capture_input && ((controlling && !over_drawer) || is_release(&event)) {
+                let shown = shown_in(picture, area);
+
                 if let Some(sender) = input_slot.get() {
                     if controlling && !over_drawer {
-                        if let Some(place) = where_clicked(&event, area) {
+                        if let Some(place) = where_clicked(&event, shown) {
                             if sender.send(place).is_ok() {
                                 sent_input += 1;
                             }
                         }
                     }
-                    if let Some(input) = to_input_event(&event, area) {
+                    if let Some(input) = to_input_event(&event, shown) {
                         if let Ok(stamped) = sender.send(input) {
                             sent_input += 1;
                             predict(&mut cursor, stamped, input);
@@ -872,17 +885,22 @@ const SESSION_WIND_DOWN: Duration = Duration::from_millis(1500);
 
 #[cfg(test)]
 mod tests {
-    use super::to_fraction;
+    use super::{shown_in, to_fraction};
+
+    /// A window the shape of the picture in it, so the picture fills it.
+    fn filled() -> prism_core::render::Fitted {
+        shown_in(Some((2560, 1504)), (1280, 752))
+    }
 
     #[test]
     fn the_corners_of_the_window_are_the_corners_of_the_screen() {
-        assert_eq!(to_fraction(0.0, 0.0, (1280, 752)), (0, 0));
-        assert_eq!(to_fraction(1279.0, 751.0, (1280, 752)), (65535, 65535));
+        assert_eq!(to_fraction(0.0, 0.0, filled()), (0, 0));
+        assert_eq!(to_fraction(1279.0, 751.0, filled()), (65535, 65535));
     }
 
     #[test]
     fn the_middle_of_the_window_is_the_middle_of_the_screen() {
-        let (x, y) = to_fraction(639.5, 375.5, (1280, 752));
+        let (x, y) = to_fraction(639.5, 375.5, filled());
 
         assert!(x.abs_diff(u16::MAX / 2) <= 1, "{x}");
         assert!(y.abs_diff(u16::MAX / 2) <= 1, "{y}");
@@ -892,7 +910,28 @@ mod tests {
     fn a_pointer_past_the_edge_stays_on_the_edge() {
         // Motion reported while the pointer is dragged out of the window, which SDL does for
         // as long as a button is held. Wrapping would put the far pointer on the opposite side.
-        assert_eq!(to_fraction(-40.0, 900.0, (1280, 752)), (0, 65535));
-        assert_eq!(to_fraction(5000.0, -1.0, (1280, 752)), (65535, 0));
+        assert_eq!(to_fraction(-40.0, 900.0, filled()), (0, 65535));
+        assert_eq!(to_fraction(5000.0, -1.0, filled()), (65535, 0));
+    }
+
+    #[test]
+    fn the_corners_of_a_letterboxed_picture_are_the_corners_of_the_screen() {
+        // A 16:9 screen in a square window: bars above and below, 218 points each.
+        let shown = shown_in(Some((1920, 1080)), (1000, 1000));
+
+        assert_eq!(to_fraction(0.0, 218.0, shown), (0, 0));
+        assert_eq!(to_fraction(999.0, 780.0, shown), (65535, 65535));
+        assert_eq!(
+            to_fraction(500.0, 20.0, shown).1,
+            0,
+            "a click on the bar above is the top edge"
+        );
+    }
+
+    #[test]
+    fn before_the_first_picture_the_window_is_the_screen() {
+        let shown = shown_in(None, (1280, 752));
+
+        assert_eq!(to_fraction(1279.0, 751.0, shown), (65535, 65535));
     }
 }
