@@ -48,6 +48,15 @@ const PAD: f64 = 12.0;
 /// How tall the line at the top of the column is, when it has one.
 const HEADING: f64 = 30.0;
 
+/// Where along the left edge the drawer sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchor {
+    /// Halfway up, where a handle that is always there is easiest to find.
+    Middle,
+    /// At the top, where a handle that appears when the pointer reaches the top edge is found.
+    Top,
+}
+
 /// One control in the column.
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -81,6 +90,8 @@ struct Parts {
     shown: Cell<bool>,
     /// Whether the window holding this is sized to it, rather than it being laid over a window.
     fits_window: bool,
+    /// Where along the edge it sits.
+    anchor: Anchor,
 }
 
 define_class!(
@@ -125,10 +136,10 @@ impl Target {
 
     /// Puts every view where the current state says it goes.
     ///
-    /// In the coordinates of whatever holds them, which count up from the bottom. Both are
-    /// centred on the height of that view, and told to stay so when it changes size — a window
-    /// going full screen moves the middle, and a handle left where the middle used to be is a
-    /// handle in the wrong place.
+    /// In the coordinates of whatever holds them, which count up from the bottom unless that
+    /// view says it is flipped. Each view is told to stay where it is put relative to the edge
+    /// it is anchored to when the holder changes size — a window going full screen moves the
+    /// middle and the top, and a handle left where either used to be is in the wrong place.
     fn lay_out(&self) {
         let parts = self.ivars();
         let open = parts.open.get() && parts.shown.get();
@@ -150,21 +161,27 @@ impl Target {
             return;
         };
 
-        let middle = holder.bounds().size.height / 2.0;
+        let place = Placing {
+            height: holder.bounds().size.height,
+            flipped: holder.isFlipped(),
+            anchor: parts.anchor,
+        };
         let (across, arrow) = if open {
             (MARGIN + COLUMN + MARGIN, "chevron.left")
         } else {
             (MARGIN, "chevron.right")
         };
 
-        knob.setFrame(rect(across, middle - HANDLE / 2.0, HANDLE, HANDLE));
+        knob.setFrame(rect(across, place.bottom_of(HANDLE), HANDLE, HANDLE));
+        knob.setAutoresizingMask(place.staying());
         knob.setHidden(!parts.shown.get());
         button.setImage(symbol(arrow).as_deref());
 
         if let Some(column) = column.as_ref() {
             column
                 .panel
-                .setFrame(rect(MARGIN, middle - height / 2.0, COLUMN, height));
+                .setFrame(rect(MARGIN, place.bottom_of(height), COLUMN, height));
+            column.panel.setAutoresizingMask(place.staying());
             column.panel.setHidden(!open);
         }
     }
@@ -207,6 +224,43 @@ impl Target {
     }
 }
 
+/// Where along the holder's height a view of some height goes, for one anchor.
+struct Placing {
+    /// How tall the holder is.
+    height: f64,
+    /// Whether the holder counts down from the top rather than up from the bottom.
+    flipped: bool,
+    /// Which edge, or the middle, the views are placed against.
+    anchor: Anchor,
+}
+
+impl Placing {
+    /// Returns the coordinate of the edge a view of `tall` sits on, in the holder's terms.
+    ///
+    /// Its bottom in a holder that counts up and its top in one that counts down, which is
+    /// the coordinate a frame's origin names in each.
+    fn bottom_of(&self, tall: f64) -> f64 {
+        match (self.anchor, self.flipped) {
+            (Anchor::Middle, _) => (self.height - tall) / 2.0,
+            (Anchor::Top, true) => MARGIN,
+            (Anchor::Top, false) => self.height - MARGIN - tall,
+        }
+    }
+
+    /// Returns which margins stretch when the holder changes size, so the view stays put.
+    fn staying(&self) -> NSAutoresizingMaskOptions {
+        match (self.anchor, self.flipped) {
+            (Anchor::Middle, _) => {
+                NSAutoresizingMaskOptions::ViewMinYMargin
+                    | NSAutoresizingMaskOptions::ViewMaxYMargin
+            }
+            // The margin between it and the bottom of the holder, whichever way that counts.
+            (Anchor::Top, true) => NSAutoresizingMaskOptions::ViewMaxYMargin,
+            (Anchor::Top, false) => NSAutoresizingMaskOptions::ViewMinYMargin,
+        }
+    }
+}
+
 /// A handle at the left edge of a view, and the column of controls it opens.
 pub struct Drawer {
     target: Retained<Target>,
@@ -227,6 +281,7 @@ impl Drawer {
         heading: Option<&str>,
         entries: &[Entry],
         fits_window: bool,
+        anchor: Anchor,
         on_press: impl Fn(usize) + 'static,
     ) -> Option<Self> {
         let marker = MainThreadMarker::new()?;
@@ -238,6 +293,7 @@ impl Drawer {
             open: Cell::new(false),
             shown: Cell::new(false),
             fits_window,
+            anchor,
         });
         // SAFETY: `init` on `NSObject` takes no arguments and returns the object it was sent
         // to, and the instance variables it needs were set on the allocation above.
@@ -274,6 +330,20 @@ impl Drawer {
         self.target.set_open(false);
     }
 
+    /// Returns whether the handle is showing.
+    #[must_use]
+    pub fn is_shown(&self) -> bool {
+        self.target.ivars().shown.get()
+    }
+
+    /// Returns whether the column is open beside the handle.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        let parts = self.target.ivars();
+
+        parts.shown.get() && parts.open.get()
+    }
+
     /// Changes the line at the top of the column, where there is one.
     pub fn set_heading(&self, heading: &str) {
         if let Some(line) = self
@@ -303,17 +373,34 @@ impl Drawer {
         }
     }
 
-    /// Returns whether a point in the holding view is over the handle or the open column.
+    /// Returns whether a place is over the handle or the open column.
     ///
-    /// For a window whose clicks would otherwise go somewhere: a stream window sends the ones
-    /// over its picture to the far machine, and the ones over its own controls must not.
+    /// Measured from the holder's top left corner, as a pointer is, whichever way the holder
+    /// counts. For a window whose clicks would otherwise go somewhere: a stream window sends the
+    /// ones over its picture to the far machine, and the ones over its own controls must not.
     #[must_use]
-    pub fn covers(&self, point: NSPoint) -> bool {
+    pub fn covers(&self, x: f64, from_top: f64) -> bool {
         let parts = self.target.ivars();
 
         if !parts.shown.get() {
             return false;
         }
+
+        let knob = parts.knob.borrow();
+        // SAFETY: read on the main thread, of a view this put into its holder itself.
+        let Some(holder) = knob
+            .as_ref()
+            .and_then(|(knob, _)| unsafe { knob.superview() })
+        else {
+            return false;
+        };
+
+        let point = if holder.isFlipped() {
+            NSPoint::new(x, from_top)
+        } else {
+            NSPoint::new(x, holder.bounds().size.height - from_top)
+        };
+        drop(knob);
 
         let over = |frame: NSRect| {
             point.x >= frame.origin.x
@@ -374,10 +461,6 @@ fn knob(target: &Target, marker: MainThreadMarker) -> (Retained<NSBox>, Retained
     if let Some(inside) = disc.contentView() {
         inside.addSubview(&button);
     }
-
-    disc.setAutoresizingMask(
-        NSAutoresizingMaskOptions::ViewMinYMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
-    );
 
     (disc, button)
 }
@@ -452,10 +535,6 @@ fn column(
             button
         })
         .collect();
-
-    panel.setAutoresizingMask(
-        NSAutoresizingMaskOptions::ViewMinYMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
-    );
 
     Column {
         panel,

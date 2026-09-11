@@ -733,6 +733,10 @@ pub fn run(
                 drawable_height = height;
                 area = window.size();
             }
+            if let (Event::MouseMotion { x, y, .. }, Some(bar)) = (&event, bar.as_ref()) {
+                bar.pointer_moved(*x, *y);
+            }
+
             // The drawer's controls are this window's, not the far machine's: a press or a pass
             // over them goes nowhere else. A release still does, so a drag that started on the
             // picture and ended over the drawer does not leave a button held over there.

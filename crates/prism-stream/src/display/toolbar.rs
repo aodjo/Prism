@@ -29,12 +29,12 @@ use objc2_app_kit::{
     NSEvent, NSImage, NSMenu, NSMenuItem, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
     NSToolbarItem, NSToolbarItemIdentifier, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSPoint, NSString};
+use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSString};
 use sdl3::video::Window;
 use sdl3_sys::properties::SDL_GetPointerProperty;
 use sdl3_sys::video::{SDL_GetWindowProperties, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER};
 
-use crate::drawer::{Drawer, Entry};
+use crate::drawer::{Anchor, Drawer, Entry};
 
 /// One control in the title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +127,17 @@ const DRAWN: [Tool; 5] = [
     Tool::Fetch,
     Tool::Disconnect,
 ];
+
+/// How close to the top edge, in points, the pointer has to come for the drawer to appear.
+///
+/// The edge itself, give or take: a window filling the screen has its top at the top of the
+/// screen, and the pointer stops there however far the mouse goes on moving.
+const REVEAL_EDGE: f32 = 3.0;
+
+/// How far down the pointer can go, in points, before the handle it revealed goes away again.
+///
+/// Past the handle and a little more, so reaching for it does not make it vanish on the way.
+const REVEAL_BAND: f32 = 90.0;
 
 /// What a control in the drawer says and shows.
 fn drawn(tool: Tool, controlling: bool) -> Entry {
@@ -330,7 +341,7 @@ impl Toolbar {
         let entries: Vec<Entry> = DRAWN.iter().map(|tool| drawn(*tool, false)).collect();
         let pressed = Arc::clone(&self.pressed);
 
-        self.drawer = Drawer::install(&content, None, &entries, false, move |index| {
+        self.drawer = Drawer::install(&content, None, &entries, false, Anchor::Top, move |index| {
             if let (Some(tool), Ok(mut queue)) = (DRAWN.get(index), pressed.lock()) {
                 queue.push_back(*tool);
             }
@@ -342,6 +353,9 @@ impl Toolbar {
     /// Asked of the window every turn rather than remembered from the control that asked for
     /// it, because that control is not the only way in or out: the green button, the menu and
     /// Escape all change it without a word to anything here.
+    ///
+    /// Filling the screen hides the toolbar and shows nothing in its place but the picture. The
+    /// drawer waits, out of sight, for the pointer to reach the top edge.
     pub fn sync_fullscreen(&self) -> bool {
         let filling = self
             .window
@@ -352,11 +366,37 @@ impl Toolbar {
             self.toolbar.setVisible(!filling);
 
             if let Some(drawer) = self.drawer.as_ref() {
-                drawer.set_shown(filling);
+                drawer.set_shown(false);
             }
         }
 
         filling
+    }
+
+    /// Shows the drawer's handle when the pointer reaches the top edge, and hides it once the
+    /// pointer has gone back down into the picture.
+    ///
+    /// In the window's own coordinates, which count down from the top as the pointer's do. Only
+    /// while the window fills the screen: otherwise the controls are in the toolbar, where
+    /// they always are. An open column keeps the handle where it is until it is closed.
+    pub fn pointer_moved(&self, x: f32, y: f32) {
+        let Some(drawer) = self.drawer.as_ref() else {
+            return;
+        };
+
+        if !self.filling.get() {
+            return;
+        }
+
+        if y <= REVEAL_EDGE {
+            drawer.set_shown(true);
+        } else if drawer.is_shown()
+            && !drawer.is_open()
+            && y > REVEAL_BAND
+            && !drawer.covers(f64::from(x), f64::from(y))
+        {
+            drawer.set_shown(false);
+        }
     }
 
     /// Returns whether a place in the window is over the drawer.
@@ -365,14 +405,9 @@ impl Toolbar {
     /// click there is a click on a control, and must not reach the far machine as well.
     #[must_use]
     pub fn covers(&self, x: f32, y: f32) -> bool {
-        let (Some(drawer), Some(content)) = (self.drawer.as_ref(), self.window.contentView())
-        else {
-            return false;
-        };
-
-        let height = content.bounds().size.height;
-
-        drawer.covers(NSPoint::new(f64::from(x), height - f64::from(y)))
+        self.drawer
+            .as_ref()
+            .is_some_and(|drawer| drawer.covers(f64::from(x), f64::from(y)))
     }
 
     /// Returns the next control that was pressed, or `None` if none was.

@@ -75,6 +75,11 @@ impl Toolbar {
         false
     }
 
+    /// Does nothing, because there is no drawer to show.
+    pub fn pointer_moved(&self, x: f32, y: f32) {
+        let _ = (x, y);
+    }
+
     /// Returns `false`, because there is no drawer for a place to be over.
     #[must_use]
     pub fn covers(&self, x: f32, y: f32) -> bool {

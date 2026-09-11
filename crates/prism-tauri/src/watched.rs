@@ -64,7 +64,7 @@ mod panel {
         NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
-    use prism_stream::drawer::{Drawer, Entry};
+    use prism_stream::drawer::{Anchor, Drawer, Entry};
     use tauri::AppHandle;
 
     /// The panel and the drawer in it, once there has been somebody to show them for.
@@ -158,9 +158,14 @@ mod panel {
         ];
 
         let acting = app.clone();
-        let drawer = Drawer::install(&content, Some(""), &entries, true, move |index| {
-            act(&acting, index);
-        })?;
+        let drawer = Drawer::install(
+            &content,
+            Some(""),
+            &entries,
+            true,
+            Anchor::Middle,
+            move |index| act(&acting, index),
+        )?;
 
         Some(Shown { panel, drawer })
     }
