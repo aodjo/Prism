@@ -334,6 +334,7 @@ fn main() {
             permissions::restart,
             sharing::start_sharing,
             sharing::stop_sharing,
+            sharing::disconnect_viewer,
             sharing::sharing_state,
             stream::stream_connect,
             stream::stream_disconnect,

@@ -369,6 +369,16 @@ export interface PrismApi {
   stopSharing(): Promise<null>;
 
   /**
+   * Sends away whoever is watching this machine, and goes on sharing it.
+   *
+   * Their window closes and says the host ended it; this machine goes back to waiting.
+   *
+   * @async
+   * @returns {Promise<null>} Nothing, once they have been told.
+   */
+  disconnectViewer(): Promise<null>;
+
+  /**
    * Returns what this machine's own session is doing, or `null` when it is not shared.
    *
    * @async

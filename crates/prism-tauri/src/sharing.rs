@@ -456,6 +456,29 @@ pub fn stop_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<
     remember(&chosen, false)
 }
 
+/// Sends away whoever is watching this machine, and goes on sharing it.
+///
+/// Their window closes and says the host ended it; this machine goes straight back to waiting.
+/// Somebody who wants nobody at all to reach it turns sharing off instead — this is for the
+/// person sitting here who wants their machine back now, not for good.
+///
+/// # Errors
+///
+/// Fails only if a thread panicked holding the session.
+#[tauri::command]
+pub fn disconnect_viewer(held: State<'_, Held>) -> Result<(), String> {
+    let session = held
+        .0
+        .lock()
+        .map_err(|_| "the sharing lock was poisoned".to_owned())?;
+
+    if let Some(service) = session.as_ref() {
+        service.disconnect();
+    }
+
+    Ok(())
+}
+
 /// How long quitting waits for a session to end.
 ///
 /// Long enough for the session to notice between frames and say goodbye to whoever is

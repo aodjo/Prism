@@ -172,6 +172,8 @@ export function installBridge(): void {
 
     stopSharing: (): Promise<null> => call<null>('stop_sharing'),
 
+    disconnectViewer: (): Promise<null> => call<null>('disconnect_viewer'),
+
     sharing: async (): Promise<HostSnapshot | null> => {
       const raw = await call<RawSnapshot | null>('sharing_state');
 

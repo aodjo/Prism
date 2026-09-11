@@ -80,6 +80,14 @@ const KO: Record<string, string> = {
   'Not shared': '공유 안 함',
   'This machine': '이 컴퓨터',
   'Nothing to watch yet': '아직 볼 컴퓨터가 없습니다',
+  'Your other devices can watch this machine': '다른 기기에서 이 컴퓨터를 볼 수 있습니다',
+  'To watch another machine from here, turn on sharing on it.':
+    '여기서 다른 컴퓨터를 보려면 그 컴퓨터에서 공유를 켜세요.',
+  Shared: '공유 중',
+  Opening: '여는 중',
+  'Sharing failed': '공유하지 못했습니다',
+  '{name} is watching this machine': '{name}에서 이 컴퓨터를 보는 중',
+  Disconnect: '연결 끊기',
   'Turn on sharing on the machine you want to watch, and it turns up here.':
     '보고 싶은 컴퓨터에서 공유를 켜면 여기에 나타납니다.',
   'Install PRISM on the machine you want to watch, sign in to the same account, and turn on sharing.':

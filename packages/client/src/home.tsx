@@ -593,7 +593,7 @@ function Home(): JSX.Element {
           <div className="relative flex items-center gap-6 px-7 py-6">
             <div className="flex min-w-0 flex-1 flex-col gap-2.5">
               <span className="truncate text-[30px] leading-none font-semibold tracking-[-0.7px] text-ink">
-                This machine
+                {t('This machine')}
                 {/* The name its owner gave it, after the one everybody's machine has. Somebody
                     with two of these is looking at two cards that say the same thing, and the
                     thing that tells them apart is the part they chose. */}
@@ -608,11 +608,11 @@ function Home(): JSX.Element {
                   end has to be told by hand. */}
               <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
                 {mine?.phase === 'failed'
-                  ? 'Sharing failed'
+                  ? t('Sharing failed')
                   : shared
                     ? mine?.local === null
-                      ? 'Opening'
-                      : 'Shared'
+                      ? t('Opening')
+                      : t('Shared')
                     : t('Not shared')}
               </span>
               <span
@@ -621,7 +621,10 @@ function Home(): JSX.Element {
                 {/* What this machine would send, rather than a sentence about waiting. The
                     line above already says whether it is shared, so saying it again in prose
                     spent the one line that could have carried something. */}
-                {mine?.error ?? (watched ? `${machineName(mine?.peer ?? '')} is watching` : specs)}
+                {mine?.error ??
+                  (watched
+                    ? t('{name} is watching this machine', { name: machineName(mine?.peer ?? '') })
+                    : specs)}
               </span>
             </div>
 
@@ -657,6 +660,24 @@ function Home(): JSX.Element {
                     className="block size-[17px] bg-current [mask-image:url(assets/gear.svg)] [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain]"
                   />
                 </button>
+
+              {/* Beside the switch rather than instead of it. This sends away whoever is watching
+                  now and leaves the machine shared for the next time; the switch is for nobody
+                  at all. Somebody who wants their own mouse back has two different things they
+                  might mean, and both are one click. */}
+              {watched && (
+                <button
+                  type="button"
+                  className="btn-secondary px-5 py-3.5 text-[15px]"
+                  onClick={() => {
+                    void prism.disconnectViewer().catch((error: unknown) => {
+                      setTrouble(reason(error));
+                    });
+                  }}
+                >
+                  {t('Disconnect')}
+                </button>
+              )}
 
               {shared ? (
                 <button type="button" className="btn-danger px-6 py-3.5 text-[15px]" onClick={flip}>
@@ -915,15 +936,20 @@ function Home(): JSX.Element {
              here by itself once it is shared, so what is missing is not a button here but a
              switch over there — or, before that, a second installation. */
           <div className="mt-12 flex-none">
+            {/* A machine that is shared is the one being watched, not the one watching, and
+                telling it there is nothing to watch reads as something being wrong with it.
+                It is ready; what it is ready for is the other machine's to do. */}
             <h2 className="m-0 text-[19px] leading-none font-semibold tracking-[-0.3px] text-ink-2">
-              {t('Nothing to watch yet')}
+              {shared ? t('Your other devices can watch this machine') : t('Nothing to watch yet')}
             </h2>
             <p className="mt-3 mb-0 max-w-[46ch] text-note leading-relaxed text-muted-2">
-              {devices.some((device) => !device.isThisMachine)
-                ? t('Turn on sharing on the machine you want to watch, and it turns up here.')
-                : t(
-                    'Install PRISM on the machine you want to watch, sign in to the same account, and turn on sharing.',
-                  )}
+              {shared
+                ? t('To watch another machine from here, turn on sharing on it.')
+                : devices.some((device) => !device.isThisMachine)
+                  ? t('Turn on sharing on the machine you want to watch, and it turns up here.')
+                  : t(
+                      'Install PRISM on the machine you want to watch, sign in to the same account, and turn on sharing.',
+                    )}
             </p>
           </div>
         ) : (

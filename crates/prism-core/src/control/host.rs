@@ -228,6 +228,11 @@ struct Shared {
     local: Mutex<Option<SocketAddr>>,
     peer: Mutex<Option<[u8; KEY_LEN]>>,
     error: Mutex<Option<String>>,
+    /// Set to end the session that is running now, and nothing after it.
+    ///
+    /// Not [`HostService::stop`]: that ends sharing. This is the person at this machine sending
+    /// away whoever is watching it, with the machine left shared for the next one to come.
+    ending: AtomicBool,
 }
 
 impl Shared {
@@ -324,6 +329,17 @@ impl HostService {
     /// The thread notices between frames, so this takes effect within a frame interval.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Ends the session somebody is watching now, and goes on sharing.
+    ///
+    /// The machine watching is told the host ended it, and this one goes straight back to
+    /// waiting for the next. Does nothing when nobody is watching: there is no session to end,
+    /// and one that opens a moment later was not the one anybody meant.
+    pub fn disconnect(&self) {
+        if self.shared.phase() == Phase::Streaming {
+            self.shared.ending.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Asks the session to end and waits for it.
@@ -487,6 +503,9 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
         }
     };
 
+    // Cleared as each session begins, so a disconnect meant for the last one — pressed as it
+    // was ending anyway — does not end this one the moment it opens.
+    shared.ending.store(false, Ordering::Relaxed);
     shared.set_phase(Phase::Streaming);
 
     // Audio runs on its own thread and its own clock. Interleaving it with the video loop
@@ -1031,7 +1050,7 @@ fn stream(
     let mut frames = 0u64;
     let mut waiting: Option<Instant> = None;
 
-    while keep_going(config, stop, frames) {
+    while keep_going(config, stop, frames) && !shared.ending.load(Ordering::Relaxed) {
         match pump.pump(&mut sender, config.adaptive)? {
             Pumped::Idle => {
                 // Not a still screen: that sends its last frame again. This is a capture that
