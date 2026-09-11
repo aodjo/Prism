@@ -461,7 +461,6 @@ pub fn stop_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<
 ///
 /// A machine the account does not name — renamed to nothing, or off the account since — is
 /// called by the start and end of its key, which is still something to recognise it by.
-#[cfg(target_os = "macos")]
 pub fn watcher(app: &tauri::AppHandle) -> Option<String> {
     use tauri::Manager as _;
 

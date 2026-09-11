@@ -27,10 +27,13 @@ ureq = { version = "3", default-features = false, features = ["rustls", "json"] 
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSGeometry"] }
-# The handle a machine being watched shows at the edge of its screen: a panel of its own, which
-# is AppKit's and not the webview's, because a window the webview draws cannot be see-through
-# without the private API the configuration would have to switch on for every window.
+block2 = "0.6.2"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSGeometry", "NSString"] }
+objc2-core-graphics = "0.3.2"
+# The banner a machine being controlled shows at the top of its screen: a panel of its own,
+# which is AppKit's and not the webview's, because a window the webview draws cannot be
+# see-through without the private API the configuration would have to switch on for every
+# window. And the watch on the mouse that decides when it shows.
 objc2-app-kit = { version = "0.3", features = [
     "NSPanel",
     "NSWindow",
@@ -39,4 +42,18 @@ objc2-app-kit = { version = "0.3", features = [
     "NSGraphics",
     "NSColor",
     "NSView",
+    "NSEvent",
+    "NSAnimation",
+    "NSAnimationContext",
+    "NSBox",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSControl",
+    "NSTextField",
+    "NSText",
+    "NSFont",
+    "NSAppearance",
+    "block2",
+    "objc2-core-graphics",
 ] }

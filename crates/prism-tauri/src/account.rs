@@ -1676,7 +1676,6 @@ pub fn refresh(held: &Held, settings: &Chosen) -> Result<bool, String> {
 ///
 /// Asks nothing of the server. Somebody who is watching this machine was on the account a
 /// moment ago, and the list from then is the name to put to them.
-#[cfg(target_os = "macos")]
 pub fn label_of(held: &Held, public_key: &str) -> Option<String> {
     held.with(|holder| {
         holder
