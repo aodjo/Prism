@@ -82,6 +82,7 @@ pub fn permissions(held: tauri::State<'_, crate::Held>) -> Result<HostPermission
 #[tauri::command]
 pub fn request_permission(
     id: String,
+    app: tauri::AppHandle,
     held: tauri::State<'_, crate::Held>,
 ) -> Result<HostPermissions, String> {
     let grant = named(&id).ok_or_else(|| format!("no such grant: {id}"))?;
@@ -89,6 +90,10 @@ pub fn request_permission(
     // Read the setting and let the lock go before asking, because the system's dialog stands
     // there until somebody answers it and every other command would be waiting behind it.
     let controlling = controlling(&held)?;
+
+    if grant == Grant::Input && !prism_core::control::permissions::check().input {
+        forget_stale_grant(&app);
+    }
 
     if !prism_core::control::permissions::request(grant) {
         let now = look(controlling);
@@ -238,6 +243,32 @@ fn describe(grant: Grant) -> MissingGrant {
         purpose: grant.purpose().to_owned(),
         settings_url: grant.settings_url().to_owned(),
     }
+}
+
+/// Takes whatever an earlier build left on the Accessibility list under this application's name.
+///
+/// The list keeps an entry per signed copy of an application, and one made by a build signed
+/// another way stays switched on while this build is refused. From the outside that is a switch
+/// that is on and a Prism that says it is off, with nothing to be done in System Settings but to
+/// remove the entry by hand. Removing it here, before asking, is what lets the request put this
+/// build in its place.
+///
+/// Only when Accessibility is not held, so there is nothing that works to lose. `tccutil` needs
+/// no administrator for an application's own entry, and a failure changes nothing about what
+/// comes next: the request is made and the pane opened either way.
+#[cfg(target_os = "macos")]
+fn forget_stale_grant(app: &tauri::AppHandle) {
+    let _ = std::process::Command::new("/usr/bin/tccutil")
+        .args(["reset", "Accessibility", &app.config().identifier])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Takes nothing, on a system with no list to take it from.
+#[cfg(not(target_os = "macos"))]
+fn forget_stale_grant(app: &tauri::AppHandle) {
+    let _ = app;
 }
 
 /// Opens the settings pane holding a grant.
