@@ -6,8 +6,9 @@
 //! behind everything or on another desktop, and the person whose machine this is should never
 //! have to go looking for how to get it back.
 //!
-//! The machine watching does not see it. The capture leaves out this application's own windows,
-//! so the handle is not drawn into the picture and mistaken over there for one of theirs.
+//! The machine watching does not see it. The panel refuses to be captured, so the handle is not
+//! drawn into the picture and mistaken over there for one of theirs — while every other window
+//! of Prism's, the home window included, is sent like anything else on the screen.
 
 use tauri::AppHandle;
 
@@ -60,7 +61,7 @@ mod panel {
     use objc2::rc::Retained;
     use objc2_app_kit::{
         NSBackingStoreType, NSColor, NSPanel, NSScreen, NSStatusWindowLevel,
-        NSWindowCollectionBehavior, NSWindowStyleMask,
+        NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
     use prism_stream::drawer::{Drawer, Entry};
@@ -136,6 +137,10 @@ mod panel {
                 | NSWindowCollectionBehavior::FullScreenAuxiliary
                 | NSWindowCollectionBehavior::IgnoresCycle,
         );
+        // Left out of every capture, this one's included. The handle is for the person sitting
+        // here; drawn into the picture it would be a second handle on the other machine's
+        // screen, one that does nothing there.
+        panel.setSharingType(NSWindowSharingType::None);
         // SAFETY: the panel is held in `SHOWN` for the life of the process and never closed,
         // only ordered out, so it is never released out from under that.
         unsafe { panel.setReleasedWhenClosed(false) };
