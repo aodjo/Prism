@@ -91,6 +91,13 @@ pub enum Event {
         /// Frames completed since the session opened.
         frames: u32,
     },
+    /// The host ended the session, rather than this end.
+    ///
+    /// Sent before [`Event::Ended`], which follows once the window has closed.
+    Gone {
+        /// How it went.
+        how: Departure,
+    },
     /// The run is over.
     ///
     /// Sent before the process exits, so the shell knows why rather than only that it did.
@@ -98,6 +105,16 @@ pub enum Event {
         /// What went wrong, or `None` if the stream simply ended.
         error: Option<String>,
     },
+}
+
+/// How the host went, when it was the host that ended a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Departure {
+    /// It said goodbye: sharing was stopped on it, or Prism quit there.
+    Left,
+    /// Nothing arrived from it for the whole idle timeout.
+    Silent,
 }
 
 /// Writes one message and flushes it.

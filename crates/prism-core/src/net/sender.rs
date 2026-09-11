@@ -9,11 +9,12 @@
 //! that nothing is sent unsealed, unpaced, or uncounted.
 
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::clock::now_us;
-use crate::input::{Injector, PlatformInjector};
+use crate::input::{Injector, LOCAL_HOLD, PlatformInjector};
 use crate::net::ack::{is_newer, missing_in_history};
 use crate::net::cc::{CongestionConfig, CongestionController, DelaySample};
 use crate::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
@@ -22,13 +23,15 @@ use crate::net::loss::LossInjector;
 use crate::net::negotiate::{Accept, HostAbility};
 use crate::net::packet::{
     AudioPacket, CLOCK_PONG_LEN, Channel, ClockPing, ClockPong, CursorPosition,
-    FEEDBACK_WANTS_KEYFRAME, FLAG_IDR, FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, InputEvent,
-    InputPacket, MAX_PACKET_SIZE, MAX_VIDEO_PAYLOAD, channel_of,
+    FEEDBACK_WANTS_KEYFRAME, FLAG_IDR, FLAG_LAST_OF_FRAME, FecPacket, FeedbackPacket, GOODBYE_LEN,
+    Goodbye, InputEvent, InputPacket, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD,
+    MouseButton, channel_of,
 };
 use crate::net::packetize::SlicePacketizer;
 use crate::net::seal::Opener;
 use crate::net::secure::SecureSender;
 use crate::net::sendpace::{PacerConfig, SPREAD_PERCENT, SendPacer};
+use crate::net::transfer::{Files, Landed};
 use crate::net::transport::UdpTransport;
 use crate::stats::LatencyRecorder;
 
@@ -55,6 +58,81 @@ pub fn max_slice_bytes(parity_loss: Option<f32>) -> usize {
     parity_loss.map_or(usize::MAX, |loss| {
         max_data_shards_for(loss) * MAX_VIDEO_PAYLOAD
     })
+}
+
+/// How long the file thread waits when a transfer has nothing to send.
+///
+/// Long enough that an idle session is an idle thread, short enough that a person who has just
+/// chosen a file does not notice the wait before it starts moving.
+const FILE_IDLE: Duration = Duration::from_millis(20);
+
+/// The gap between two file packets, which is what holds a transfer under the picture.
+///
+/// Roughly eight megabits a second at a full packet. A file is never the thing somebody is
+/// waiting on in a session about a screen, so it takes what is left rather than competing:
+/// this is a tenth of what the video is configured for and it cannot grow.
+const FILE_PACE: Duration = Duration::from_micros(1_100);
+
+/// Starts the thread that moves a file while the session runs.
+///
+/// Paced rather than driven by the return path, and on a handle of its own so that a chunk
+/// waiting to go never sits behind a frame that is already being written.
+pub fn spawn_files(files: Arc<Mutex<Files>>, mut socket: SecureSender, alive: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; MAX_PLAINTEXT_SIZE];
+
+        while alive.load(Ordering::Relaxed) {
+            let written = match files.lock() {
+                Ok(mut files) => files.step(&mut buf).unwrap_or(0),
+                // Another thread died holding it, which means this session's file state is
+                // gone. Ending quietly: there is nothing left to move.
+                Err(_) => return,
+            };
+
+            if written == 0 {
+                std::thread::sleep(FILE_IDLE);
+
+                continue;
+            }
+
+            if socket.send(&buf[..written]).is_err() {
+                return;
+            }
+
+            std::thread::sleep(FILE_PACE);
+        }
+    });
+}
+
+/// How many times the host says goodbye.
+///
+/// Nothing answers it, so it is sent more than once against loss. Three datagrams a few bytes
+/// long, once a session.
+const GOODBYE_COPIES: usize = 3;
+
+/// Ends the threads a session started, when the session that started them is over.
+///
+/// Sharing is a state rather than an attempt, so a machine offers itself again the moment a
+/// session ends — binding, registering and waiting afresh. That only works if the last session
+/// has actually let go: its return path and its file thread each hold a duplicate of its
+/// socket, and a duplicate of a socket bound to this host's port is that port still taken.
+///
+/// The client is told as well. However the session ended here — sharing stopped, Prism
+/// quitting, the client already gone — the window over there should close now rather than show
+/// the last picture until its idle timeout gives up.
+impl Drop for SliceSender {
+    /// Says goodbye, and tells this session's threads that it is over.
+    fn drop(&mut self) {
+        let mut buf = [0u8; GOODBYE_LEN];
+
+        if let Ok(len) = Goodbye.encode_into(&mut buf) {
+            for _ in 0..GOODBYE_COPIES {
+                let _ = self.sender.send(&buf[..len]);
+            }
+        }
+
+        self.alive.store(false, Ordering::Relaxed);
+    }
 }
 
 /// The shortest gap between two keyframes the host will produce because it was asked to.
@@ -224,6 +302,13 @@ pub struct SliceSender {
     buffer: [u8; MAX_PACKET_SIZE],
     packets: u64,
     bytes: u64,
+    /// Whether the session this belongs to is still going.
+    ///
+    /// The threads it starts — the return path, and the one that moves files — hold a copy and
+    /// stop when this does. Without it they outlive the session that made them and go on
+    /// holding duplicates of its socket, which on a host bound to a port of its own means the
+    /// next session binds a port the last one has not let go of and hears nothing on it.
+    alive: Arc<AtomicBool>,
     feedback: Arc<ReturnPath>,
     /// Drops a fraction of video packets on the way out, when a run is testing recovery.
     ///
@@ -296,6 +381,7 @@ impl SliceSender {
             buffer: [0; MAX_PACKET_SIZE],
             packets: 0,
             bytes: 0,
+            alive: Arc::new(AtomicBool::new(true)),
             feedback: Arc::new(ReturnPath::default()),
             loss: None,
             parity_loss: None,
@@ -720,6 +806,16 @@ impl SliceSender {
         self.audio_frames
     }
 
+    /// Returns whether this session is still going, for a thread that has to stop when it ends.
+    ///
+    /// Cleared when this sender is dropped, which is the end of the turn. Anything holding a
+    /// duplicate of the session's socket has to watch it: a thread that outlives the session
+    /// keeps the port, and the next turn binds the same one.
+    #[must_use]
+    pub fn alive(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.alive)
+    }
+
     /// Returns the connected client's public key, as the handshake proved it.
     #[must_use]
     pub fn peer(&self) -> [u8; KEY_LEN] {
@@ -763,7 +859,11 @@ impl SliceSender {
     ///
     /// Returns the underlying [`io::Error`] if the socket cannot be duplicated, and
     /// [`io::ErrorKind::AlreadyExists`] if a return path is already running.
-    pub fn serve_return_path(&mut self, inject_input: bool) -> io::Result<()> {
+    pub fn serve_return_path(
+        &mut self,
+        inject_input: bool,
+        files: Option<Arc<Mutex<Files>>>,
+    ) -> io::Result<()> {
         let opener = self.opener.take().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -773,6 +873,25 @@ impl SliceSender {
 
         let mut receiver = self.sender.receiver(opener)?;
         let mut replies = self.sender.split()?;
+
+        // Its own thread and its own handle on the socket, because a file moves on a clock of
+        // its own: this thread wakes when the client says something, and a transfer that only
+        // advanced then would run at the rate of the return path rather than at the rate the
+        // wire has room for.
+        if let Some(files) = files.as_ref() {
+            spawn_files(
+                Arc::clone(files),
+                self.sender.split()?,
+                Arc::clone(&self.alive),
+            );
+        }
+
+        // Long enough that a quiet session is a quiet thread, short enough that the socket is
+        // let go of promptly once the session it belongs to is over.
+        receiver.set_read_timeout(Some(Duration::from_millis(400)))?;
+
+        let alive = Arc::clone(&self.alive);
+        let carrier = files;
         let feedback = Arc::clone(&self.feedback);
         let adaptive = self.adaptive;
         let start_bps = self.pacer.as_ref().map_or(0, SendPacer::bitrate_bps);
@@ -793,9 +912,20 @@ impl SliceSender {
             let mut latency = LatencyRecorder::new(4096);
             let mut injected = 0u64;
 
-            loop {
+            while alive.load(Ordering::Relaxed) {
                 let bytes = match receiver.recv_into(&mut recv_buf) {
                     Ok(bytes) => bytes,
+                    // Nothing came within the timeout, which is what the timeout is for: the
+                    // loop goes round, looks at whether the session is still there, and waits
+                    // again if it is.
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
                     // A connected UDP socket reports the far machine having nothing listening
                     // as a refused connection, which is what an ordinary disconnection looks
                     // like from here. Ending quietly, because a line of error text after every
@@ -925,6 +1055,24 @@ impl SliceSender {
                             feedback.rate_changes.fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    // Offers, answers, chunks and reports. Whatever the state machine wants
+                    // to say back goes out from the file thread, which is holding the same
+                    // lock this one is about to let go of.
+                    Ok(Channel::File) => {
+                        let Some(files) = carrier.as_ref() else {
+                            continue;
+                        };
+
+                        if let Ok(mut files) = files.lock() {
+                            match files.arrived(bytes) {
+                                Ok(Some(Landed::Received { name, path })) => {
+                                    println!("files  : {name} arrived in {}", path.display());
+                                }
+                                Ok(_) => {}
+                                Err(err) => eprintln!("files  : {err}"),
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -997,6 +1145,11 @@ struct HostInput {
     injector: Option<PlatformInjector>,
     complained: bool,
     confirmed: bool,
+    /// The buttons the far side has pressed and not let go of.
+    ///
+    /// Let go of the moment somebody here takes the pointer, so they are not handed a drag they
+    /// did not start.
+    pressed: [bool; 3],
 }
 
 impl HostInput {
@@ -1018,11 +1171,67 @@ impl HostInput {
             injector,
             complained: false,
             confirmed: false,
+            pressed: [false; 3],
         }
     }
 
     /// Injects one event, complaining at most once about a kind of failure that repeats.
+    ///
+    /// Pointer input is set aside while the person at this machine is using its mouse. The
+    /// keyboard is not: two people typing at one machine is a conversation they can have, and
+    /// two hands on one pointer is not.
     fn inject(&mut self, event: InputEvent) {
+        if self.injector.is_none() {
+            return;
+        }
+
+        // A release of a button the far side is not holding goes nowhere: either it was never
+        // pressed, or it was let go of already when somebody here took the pointer.
+        if let InputEvent::MouseButton {
+            button,
+            pressed: false,
+        } = event
+        {
+            if !self.pressed[button as usize] {
+                return;
+            }
+        }
+
+        let takes_the_pointer = matches!(
+            event,
+            InputEvent::MouseMove { .. }
+                | InputEvent::MouseTo { .. }
+                | InputEvent::MouseScroll { .. }
+                | InputEvent::MouseButton { pressed: true, .. }
+        );
+
+        if takes_the_pointer && crate::input::touched_within(LOCAL_HOLD) {
+            self.let_go();
+
+            return;
+        }
+
+        if let InputEvent::MouseButton { button, pressed } = event {
+            self.pressed[button as usize] = pressed;
+        }
+
+        self.post(event);
+    }
+
+    /// Lets go of every button the far side is holding.
+    fn let_go(&mut self) {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            if std::mem::take(&mut self.pressed[button as usize]) {
+                self.post(InputEvent::MouseButton {
+                    button,
+                    pressed: false,
+                });
+            }
+        }
+    }
+
+    /// Hands one event to the injector.
+    fn post(&mut self, event: InputEvent) {
         let Some(injector) = self.injector.as_mut() else {
             return;
         };

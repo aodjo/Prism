@@ -23,7 +23,8 @@ import type {
 } from './api.js';
 import { ago, latency, span, when } from './format.js';
 import { Preferences, SharingTerms } from './preferences.js';
-import { Backdrop, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
+import { speak, t } from './i18n.js';
+import { Backdrop, GRANTS, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
 declare global {
   interface Window {
@@ -48,8 +49,31 @@ const prism = window.prism;
 /** The phases where a stream is running or on its way to running. */
 const RUNNING: ReadonlySet<string> = new Set(['connecting', 'streaming']);
 
+/**
+ * The machines this one can watch: the account's others that are shared right now.
+ *
+ * One that is not shared is not somewhere to connect to, whatever the reason — switched off,
+ * never turned on in Prism, or missing a permission sharing needs — so it is not offered.
+ *
+ * @param {readonly AccountDeviceView[]} devices - Every machine on the account.
+ * @param {string} mine - This machine's public key.
+ * @returns {string[]} The public keys of the ones to list.
+ */
+function watchable(devices: readonly AccountDeviceView[], mine: string): string[] {
+  return devices
+    .filter((device) => device.shared && device.publicKey !== mine)
+    .map((device) => device.publicKey);
+}
+
 /** Nothing is happening, and nothing has happened yet. */
-const NOTHING: StreamState = { phase: 'idle', host: null, terms: null, stats: null, log: [] };
+const NOTHING: StreamState = {
+  phase: 'idle',
+  host: null,
+  terms: null,
+  stats: null,
+  departed: null,
+  log: [],
+};
 
 /** How many sessions the list shows before somebody asks for the rest. */
 const RECENT = 3;
@@ -146,13 +170,27 @@ function Home(): JSX.Element {
   const [everything, setEverything] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
   /**
-   * What this machine still needs before it can be shared, and how far along asking has got.
+   * The grants sharing is waiting on, while the window is showing them, by id. Null when it is
+   * not showing them.
    *
-   * `ask` while there is a settings pane to open, `restart` once it has been opened — screen
-   * recording is read once for the life of a process, so a grant given now is one this run goes
-   * on calling missing. Null when nothing is in the way.
+   * Asked when somebody turns sharing on and something is missing, rather than said as an error
+   * afterwards: the switch does nothing until these are allowed, so the window names each one
+   * and opens the way to it.
    */
-  const [needsScreen, setNeedsScreen] = useState<'ask' | 'restart' | null>(null);
+  const [asking, setAsking] = useState<readonly string[] | null>(null);
+  /**
+   * Which of those have already been sent to System Settings.
+   *
+   * Screen recording is read once for the life of a process, so once it has been allowed the
+   * only thing left to offer for it is starting Prism again.
+   */
+  const [asked, setAsked] = useState<ReadonlySet<string>>(new Set());
+  /**
+   * How the host went, when a stream window closed because the machine it showed went away.
+   *
+   * Nobody here closed that window, so the home window says why it went until it is dismissed.
+   */
+  const [gone, setGone] = useState<'left' | 'silent' | null>(null);
   /** Whether the settings are open over the window. */
   const [tuning, setTuning] = useState(false);
   /** Whether the terms this machine is shared on are open beside the switch. */
@@ -213,6 +251,7 @@ function Home(): JSX.Element {
         prism.sessions(),
       ]);
 
+      speak(stored.language);
       setSettings(stored);
       setDevices(signedIn.devices);
       setAccount({ email: signedIn.email });
@@ -223,29 +262,30 @@ function Home(): JSX.Element {
       // The account's machines, and only those. What this machine happens to trust locally is
       // not the same question: that file is a cache of the account's answer, and anything in
       // it that the account does not name is something nobody may reach from here.
-      setMachines(
-        signedIn.devices
-          .map((device) => device.publicKey)
-          .filter((key) => key !== identity.publicKey),
-      );
+      setMachines(watchable(signedIn.devices, identity.publicKey));
     })();
   }, []);
 
   useEffect(() => {
     prism.onSharing(setMine);
     prism.onSessions(setHistory);
-    prism.onStream(setStream);
+    prism.onStream((state) => {
+      setStream(state);
 
-    // The account is asked again whenever this window comes forward, so a machine signed in
-    // somewhere else turns up here without anybody restarting anything.
+      // Once the stream has ended, not while the last of it is still arriving. The shell sends
+      // one state for the end of a run, and the next run starts with this cleared.
+      if (state.departed !== null && !RUNNING.has(state.phase)) {
+        setGone(state.departed);
+      }
+    });
+
+    // The account is asked again whenever this window comes forward and every so often while it
+    // is showing, so a machine that starts sharing somewhere else turns up here without anybody
+    // restarting anything — and one that stops goes.
     prism.onAccount((state) => {
       setDevices(state.devices);
       setAccount({ email: state.email });
-      setMachines(
-        state.devices
-          .map((device) => device.publicKey)
-          .filter((key) => key !== state.publicKey),
-      );
+      setMachines(watchable(state.devices, state.publicKey));
     });
 
     prism.onUpdate(setUpdate);
@@ -294,53 +334,60 @@ function Home(): JSX.Element {
     [settings],
   );
 
+  /**
+   * Shows the grants sharing is waiting on, or starts sharing when there are none.
+   *
+   * Asked of the system rather than read out of an error message, which is text and would tie
+   * this to its wording.
+   *
+   * @async
+   * @returns {Promise<boolean>} Whether sharing started.
+   */
+  const shareOrAsk = useCallback(async (): Promise<boolean> => {
+    const held = await prism.permissions();
+
+    if (held.missing.length > 0) {
+      setAsking(held.missing.map((grant) => grant.id));
+
+      return false;
+    }
+
+    setAsking(null);
+    setMine(await prism.startSharing());
+
+    return true;
+  }, []);
+
   /** Starts or stops handing this machine's screen out. */
   const flip = useCallback((): void => {
     void (async () => {
       setTrouble(null);
-      setNeedsScreen(null);
 
       try {
-        setMine(shared ? await prism.stopSharing() : await prism.startSharing());
+        if (shared) {
+          setMine(await prism.stopSharing());
+        } else {
+          setAsked(new Set());
+          await shareOrAsk();
+        }
       } catch (error) {
         setTrouble(reason(error));
-
-        // A refusal that names a permission is one somebody can act on, so the window offers
-        // the way there rather than the name of a settings pane to go and find. Asked of the
-        // system rather than read out of the message, which is text and would tie this to its
-        // wording.
-        try {
-          const held = await prism.permissions();
-
-          setNeedsScreen(held.screen ? null : 'ask');
-        } catch {
-          setNeedsScreen(null);
-        }
       }
     })();
-  }, [shared]);
+  }, [shared, shareOrAsk]);
 
   // Allowing happens in System Settings, which is to say while this window is not the one being
-  // looked at. Read again when it comes back, so a machine that may now record its screen stops
-  // saying it may not.
+  // looked at. Asked again when it comes back, so the list shrinks as switches are turned on and
+  // sharing starts by itself once the last one is — which is what the button was pressed for.
   useEffect(() => {
-    if (!needsScreen) {
+    if (!asking) {
       return;
     }
 
     const again = (): void => {
-      void (async () => {
-        try {
-          const held = await prism.permissions();
-
-          if (held.screen) {
-            setNeedsScreen(null);
-            setTrouble(null);
-          }
-        } catch {
-          // Nothing to say. The answer is the one it already had.
-        }
-      })();
+      void shareOrAsk().catch((error: unknown) => {
+        setTrouble(reason(error));
+      });
     };
 
     window.addEventListener('focus', again);
@@ -348,7 +395,7 @@ function Home(): JSX.Element {
     return () => {
       window.removeEventListener('focus', again);
     };
-  }, [needsScreen]);
+  }, [asking, shareOrAsk]);
 
   /** Adds a machine to the front of the list, or takes it back out. */
   const pin = (key: string): void => {
@@ -445,19 +492,25 @@ function Home(): JSX.Element {
     <div className="relative h-full w-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <Backdrop sky={HOME_SKY} />
 
+      {/* The strip the window is carried by. It has to be a band of its own rather than a
+          class on the header, because the shell moves the window for the element under the
+          pointer and never for its children — so a header holding a search field and two
+          buttons would drag from three narrow gaps. */}
+      <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-[3] h-[46px]" />
+
       <div className="relative z-[1] mx-auto flex w-full max-w-[1440px] flex-col px-[72px] pt-[46px] pb-[52px]">
-        <header className="drag flex h-10 flex-none items-center gap-4">
+        <header className="flex h-10 flex-none items-center gap-4">
           <Wordmark size="sm" />
-          <div className="flex-1" />
+          <div data-tauri-drag-region className="h-full flex-1" />
           <div
             hidden={alone}
-            className="no-drag flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-pill border border-line-1 bg-wash-3 py-2.5 pr-4 pl-5"
+            className="flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-pill border border-line-1 bg-wash-3 py-2.5 pr-4 pl-5"
           >
             <input
               ref={search}
               type="text"
               spellCheck={false}
-              placeholder="Search devices, sessions, files"
+              placeholder={t('Search devices, sessions, files')}
               value={query}
               onChange={(event) => {
                 setQuery(event.target.value);
@@ -470,7 +523,7 @@ function Home(): JSX.Element {
               of them open the only place there is to change anything. */}
           <button
             type="button"
-            className="no-drag flex-none rounded-pill"
+            className="flex-none rounded-pill"
             title={account.email ?? 'Not signed in'}
             aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
             onClick={() => {
@@ -481,9 +534,9 @@ function Home(): JSX.Element {
           </button>
         </header>
 
-        <div className="drag mt-[30px] flex h-9 flex-none items-center gap-3">
+        <div className="mt-[30px] flex h-9 flex-none items-center gap-3">
           <h1 className="m-0 text-[26px] leading-none font-semibold tracking-[-0.5px] text-ink">
-            Devices
+            {t('Devices')}
           </h1>
           <span
             hidden={alone}
@@ -491,10 +544,10 @@ function Home(): JSX.Element {
           >
             {machines.length + 1}
           </span>
-          <div className="flex-1" />
+          <div data-tauri-drag-region className="h-full flex-1" />
           <div
             hidden={alone}
-            className="no-drag flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]"
+            className="flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]"
           >
             {WHICH.map((one) => (
               <button
@@ -518,10 +571,10 @@ function Home(): JSX.Element {
             type="button"
             hidden={alone}
             onClick={prism.openSettings}
-            className="no-drag inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
+            className="inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
           >
             <span className="text-ui">+</span>
-            <span>Add device</span>
+            <span>{t('Add device')}</span>
           </button>
         </div>
 
@@ -540,7 +593,7 @@ function Home(): JSX.Element {
           <div className="relative flex items-center gap-6 px-7 py-6">
             <div className="flex min-w-0 flex-1 flex-col gap-2.5">
               <span className="truncate text-[30px] leading-none font-semibold tracking-[-0.7px] text-ink">
-                This machine
+                {t('This machine')}
                 {/* The name its owner gave it, after the one everybody's machine has. Somebody
                     with two of these is looking at two cards that say the same thing, and the
                     thing that tells them apart is the part they chose. */}
@@ -555,12 +608,12 @@ function Home(): JSX.Element {
                   end has to be told by hand. */}
               <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
                 {mine?.phase === 'failed'
-                  ? 'Sharing failed'
+                  ? t('Sharing failed')
                   : shared
                     ? mine?.local === null
-                      ? 'Opening'
-                      : 'Shared'
-                    : 'Not shared'}
+                      ? t('Opening')
+                      : t('Shared')
+                    : t('Not shared')}
               </span>
               <span
                 className={`truncate text-[12.5px] ${mine?.error ? 'text-danger-ink' : 'text-dim'}`}
@@ -568,7 +621,10 @@ function Home(): JSX.Element {
                 {/* What this machine would send, rather than a sentence about waiting. The
                     line above already says whether it is shared, so saying it again in prose
                     spent the one line that could have carried something. */}
-                {mine?.error ?? (watched ? `${machineName(mine?.peer ?? '')} is watching` : specs)}
+                {mine?.error ??
+                  (watched
+                    ? t('{name} is watching this machine', { name: machineName(mine?.peer ?? '') })
+                    : specs)}
               </span>
             </div>
 
@@ -582,9 +638,9 @@ function Home(): JSX.Element {
               <div className="flex items-center gap-2.5">
                 <button
                   type="button"
-                  aria-label="Sharing terms"
+                  aria-label={t('Sharing terms')}
                   aria-expanded={terms}
-                  title="Frame rate, bitrate and where it listens"
+                  title={t('Frame rate, bitrate and where it listens')}
                   className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 text-ink transition-colors ${
                     terms ? 'bg-[rgba(255,255,255,0.12)]' : ''
                   }`}
@@ -605,13 +661,31 @@ function Home(): JSX.Element {
                   />
                 </button>
 
+              {/* Beside the switch rather than instead of it. This sends away whoever is watching
+                  now and leaves the machine shared for the next time; the switch is for nobody
+                  at all. Somebody who wants their own mouse back has two different things they
+                  might mean, and both are one click. */}
+              {watched && (
+                <button
+                  type="button"
+                  className="btn-secondary px-5 py-3.5 text-[15px]"
+                  onClick={() => {
+                    void prism.disconnectViewer().catch((error: unknown) => {
+                      setTrouble(reason(error));
+                    });
+                  }}
+                >
+                  {t('Disconnect')}
+                </button>
+              )}
+
               {shared ? (
                 <button type="button" className="btn-danger px-6 py-3.5 text-[15px]" onClick={flip}>
-                  Stop sharing
+                  {t('Stop sharing')}
                 </button>
               ) : (
                 <button type="button" className="btn-primary-md" onClick={flip}>
-                  Share this machine
+                  {t('Share this machine')}
                   <span className="btn-key">⌘↵</span>
                 </button>
               )}
@@ -635,11 +709,11 @@ function Home(): JSX.Element {
             <div className="max-h-full w-full max-w-[460px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               <div className="mb-2 flex items-center justify-between">
                 <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
-                  Sharing this machine
+                  {t('Sharing this machine')}
                 </h2>
                 <button
                   type="button"
-                  aria-label="Close sharing terms"
+                  aria-label={t('Close sharing terms')}
                   className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
                   onClick={() => {
                     setTerms(false);
@@ -661,7 +735,7 @@ function Home(): JSX.Element {
                     setTerms(false);
                   }}
                 >
-                  Done
+                  {t('Done')}
                 </button>
               </div>
             </div>
@@ -743,67 +817,145 @@ function Home(): JSX.Element {
           className="mt-3 flex-none"
         />
 
-        {/* Naming the pane and leaving somebody to find it is most of the work still to do, so
-            the window does that part. What it cannot do is the last step: screen recording is
-            read once for the life of a process, and a grant given to a running Prism is one it
-            goes on calling missing until it starts again. */}
-        {needsScreen && (
-          <div className="mt-3 flex flex-none items-center gap-3">
-            <button
-              type="button"
-              className="btn-secondary no-drag"
-              onClick={() => {
-                void (async () => {
-                  if (needsScreen === 'restart') {
-                    await prism.restart();
+        {/* What sharing is waiting on, one row a grant, each with the way to it. The window
+            does the finding; the one step it cannot take is the switch in System Settings, and
+            for screen recording a restart after it, because a running Prism goes on calling a
+            grant given to it missing until it starts again. No dismissing it by clicking the
+            backdrop: nothing is shared until these are allowed, and a modal that vanishes on a
+            stray click is one that says nothing. */}
+        {asking && (
+          <div className="fixed inset-0 z-[4] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
+            <div className="w-full max-w-[460px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
+              <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+                {t('Allow these to share this machine')}
+              </h2>
+              <p className="mt-3 mb-0 text-ui text-dim">
+                {t('Turn each one on in System Settings, then come back.')}
+              </p>
 
-                    return;
-                  }
+              <div className="mt-4">
+                {GRANTS.filter((grant) => asking.includes(grant.id)).map((grant) => {
+                  const restart = grant.id === 'screen' && asked.has(grant.id);
 
-                  try {
-                    const held = await prism.requestPermission('screen');
+                  return (
+                    <div
+                      key={grant.id}
+                      className="flex items-center gap-3 py-3 not-first:border-t not-first:border-line-1"
+                    >
+                      <span
+                        className={`flex size-[34px] flex-none items-center justify-center rounded-badge border text-ui font-medium ${grant.tint}`}
+                      >
+                        {grant.glyph}
+                      </span>
+                      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <span className="text-ui font-medium text-ink">{t(grant.name)}</span>
+                        <span className="text-fine text-muted-2">{t(grant.why)}</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="btn-secondary flex-none"
+                        onClick={() => {
+                          void (async () => {
+                            if (restart) {
+                              await prism.restart();
 
-                    setNeedsScreen(held.screen ? null : 'restart');
+                              return;
+                            }
 
-                    if (held.screen) {
-                      setTrouble(null);
-                    }
-                  } catch (error) {
-                    setTrouble(reason(error));
-                  }
-                })();
-              }}
+                            try {
+                              await prism.requestPermission(grant.id);
+                              setAsked((was) => new Set(was).add(grant.id));
+                              await shareOrAsk();
+                            } catch (error) {
+                              setTrouble(reason(error));
+                            }
+                          })();
+                        }}
+                      >
+                        {restart ? t('Restart PRISM') : t('Open System Settings')}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setAsking(null);
+                  }}
+                >
+                  {t('Close')}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {gone && (
+          <div className="fixed inset-0 z-[4] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
+            <div
+              role="alertdialog"
+              aria-labelledby="gone-title"
+              className="w-full max-w-[400px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]"
             >
-              {needsScreen === 'restart' ? 'Restart PRISM' : 'Open System Settings'}
-            </button>
+              <h2
+                id="gone-title"
+                className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink"
+              >
+                {gone === 'left'
+                  ? t('The host disconnected')
+                  : t('The connection to the host was lost')}
+              </h2>
+              {gone === 'silent' && (
+                <p className="mt-3 mb-0 text-ui text-dim">
+                  {t('Check that the host is on and connected to the network.')}
+                </p>
+              )}
+
+              <div className="mt-5 flex justify-end">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  autoFocus
+                  onClick={() => {
+                    setGone(null);
+                  }}
+                >
+                  {t('OK')}
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
         {alone ? (
           /* The one thing left to do, said once. Every other machine on the account turns up
-             here by itself, so what is missing is not a button but a second installation —
-             and a window that offered a button instead would be offering the wrong thing. */
+             here by itself once it is shared, so what is missing is not a button here but a
+             switch over there — or, before that, a second installation. */
           <div className="mt-12 flex-none">
+            {/* A machine that is shared is the one being watched, not the one watching, and
+                telling it there is nothing to watch reads as something being wrong with it.
+                It is ready; what it is ready for is the other machine's to do. */}
             <h2 className="m-0 text-[19px] leading-none font-semibold tracking-[-0.3px] text-ink-2">
-              Nothing to watch yet
+              {shared ? t('Your other devices can watch this machine') : t('Nothing to watch yet')}
             </h2>
             <p className="mt-3 mb-0 max-w-[46ch] text-note leading-relaxed text-muted-2">
-              Install Prism on the machine you want to watch and sign in
-              {account.email ? (
-                <>
-                  {' as '}
-                  <span className="text-ink-3">{account.email}</span>
-                </>
-              ) : (
-                ' to the same account'
-              )}
-              . It turns up here on its own.
+              {shared
+                ? t('To watch another machine from here, turn on sharing on it.')
+                : devices.some((device) => !device.isThisMachine)
+                  ? t('Turn on sharing on the machine you want to watch, and it turns up here.')
+                  : t(
+                      'Install PRISM on the machine you want to watch, sign in to the same account, and turn on sharing.',
+                    )}
             </p>
           </div>
         ) : (
           <>
         <h2 className="mt-10 flex-none text-ui font-medium tracking-[0.2px] text-muted-2">
-          Other devices
+          {t('Other devices')}
         </h2>
 
         {/* Three across at the width the design was drawn at, two when the window is narrow
@@ -902,7 +1054,7 @@ function Home(): JSX.Element {
 
         <div className="mt-10 flex flex-none items-center gap-2.5">
           <h2 className="m-0 text-ui font-medium tracking-[0.2px] text-muted-2">
-            Recent sessions
+            {t('Recent sessions')}
           </h2>
           <div className="flex-1" />
           {history.length > RECENT && (
@@ -921,7 +1073,7 @@ function Home(): JSX.Element {
         <div className="mt-2.5 flex flex-none flex-col gap-2">
           {listed.length === 0 ? (
             <p className="m-0 py-3 text-note-2 text-dim">
-              Every session you end is listed here, with what it came to.
+              {t('Every session you end is listed here, with what it came to.')}
             </p>
           ) : (
             listed.map((one) => (
@@ -982,7 +1134,7 @@ function Home(): JSX.Element {
               </h2>
               <button
                 type="button"
-                aria-label="Close settings"
+                aria-label={t('Close settings')}
                 className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
                 onClick={() => {
                   setTuning(false);
@@ -1002,7 +1154,7 @@ function Home(): JSX.Element {
                   setTuning(false);
                 }}
               >
-                Done
+                {t('Done')}
               </button>
             </div>
           </div>

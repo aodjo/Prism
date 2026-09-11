@@ -21,7 +21,18 @@ import type {
   PrismApi,
   Settings,
 } from './api.js';
-import { Backdrop, Primary, STEP_SKY, Trouble, WELCOME_SKY, Wordmark, reason, short } from './ui.js';
+import { speak, t } from './i18n.js';
+import {
+  Backdrop,
+  GRANTS,
+  Primary,
+  STEP_SKY,
+  Trouble,
+  WELCOME_SKY,
+  Wordmark,
+  reason,
+  short,
+} from './ui.js';
 
 declare global {
   interface Window {
@@ -65,30 +76,6 @@ const AFTER: readonly Marker[] = ['intro', 'permissions', 'ready'];
  */
 const HAS_NEXT: ReadonlySet<Step> = new Set<Step>(['intro', 'permissions']);
 
-/** How the three permission rows read, in the order the design puts them. */
-const GRANTS = [
-  {
-    id: 'screen',
-    glyph: '▣',
-    name: 'Screen Recording',
-    why: 'Capture this display so it can be streamed.',
-    tint: 'border-[rgba(124,92,255,0.28)] bg-[rgba(124,92,255,0.16)] text-violet',
-  },
-  {
-    id: 'input',
-    glyph: '⌘',
-    name: 'Accessibility',
-    why: 'Pass keyboard and mouse input to this machine.',
-    tint: 'border-[rgba(53,214,255,0.28)] bg-[rgba(53,214,255,0.16)] text-cyan',
-  },
-  {
-    id: 'network',
-    glyph: '⇄',
-    name: 'Local Network',
-    why: 'Discover your other devices on this network.',
-    tint: 'border-[rgba(77,232,176,0.28)] bg-[rgba(77,232,176,0.16)] text-mint',
-  },
-] as const;
 
 /** How many characters a pairing code has. */
 const CODE_LENGTH = 6;
@@ -337,6 +324,7 @@ function Setup(): JSX.Element {
       ]);
 
       setVersion(identity.version);
+      speak(stored.language);
       setSettings(stored);
       setSignedIn(account.email);
       setArrivedSignedIn(account.email !== null);
@@ -572,12 +560,12 @@ function Setup(): JSX.Element {
       {which === 'welcome' && (
         <section className={cls}>
           <h1 className="max-w-[min(1040px,72.2vw)] text-hero font-semibold">
-            Your desktop.
+            {t('Your desktop.')}
             <br />
-            Everywhere.
+            {t('Everywhere.')}
           </h1>
           <p className="mt-7 max-w-[min(700px,48.6vw)] text-lead text-muted">
-            Low-latency remote access for macOS, Windows, and Linux.
+            {t('Low-latency remote access for macOS, Windows, and Linux.')}
           </p>
           <div className="mt-7">
             <Primary
@@ -587,7 +575,7 @@ function Setup(): JSX.Element {
                 advance();
               }}
             >
-              Begin
+              {t('Begin')}
             </Primary>
           </div>
           {/* Somebody who already has an account signs in and their machines follow. It opens
@@ -599,13 +587,13 @@ function Setup(): JSX.Element {
           {signedIn === null && (
             <button
               type="button"
-              className="btn-ghost no-drag mt-7 text-ink-3 hover:text-ink"
+              className="btn-ghost mt-7 text-ink-3 hover:text-ink"
               onClick={() => {
                 setJoining(false);
                 advance();
               }}
             >
-              Already using PRISM? Sign in
+              {t('Already using PRISM? Sign in')}
             </button>
           )}
         </section>
@@ -615,7 +603,7 @@ function Setup(): JSX.Element {
         <section className={cls}>
           <PrismArt />
           <h2 className="mt-4 max-w-[min(640px,44.4vw)] text-display font-semibold">
-            One machine, every screen.
+            {t('One machine, every screen.')}
           </h2>
           <p className="mt-4 max-w-[min(520px,36.1vw)] text-body text-muted">
             PRISM streams your desktop to any other device you own — with latency low enough
@@ -678,8 +666,7 @@ function Setup(): JSX.Element {
           ) : enrolment ? (
             <div className="card mt-9 w-[min(440px,30.6vw)] p-6">
               <p className="mx-auto max-w-[36ch] text-note leading-normal text-dim">
-                Scan this with an authenticator app. It is shown once — the server keeps only
-                enough to check codes, which is not enough to show it again.
+            {t('Scan this with an authenticator app. It is shown once — the server keeps only enough to check codes, which is not enough to show it again.')}
               </p>
               <img
                 src={enrolment.qr}
@@ -693,7 +680,7 @@ function Setup(): JSX.Element {
               </code>
               <button
                 type="button"
-                className="btn-primary-sm no-drag mx-auto mt-5 block"
+                className="btn-primary-sm mx-automt-5 block"
                 onClick={() => {
                   setEnrolment(null);
                   setJoining(false);
@@ -701,13 +688,13 @@ function Setup(): JSX.Element {
                   setAskingCode(true);
                 }}
               >
-                I have it — test it
+                {t('I have it — test it')}
               </button>
             </div>
           ) : (
             <div className="card mt-9 flex w-[min(440px,30.6vw)] flex-col gap-3 p-6 text-left">
               <label className="flex flex-col gap-1.5">
-                <span className="text-fine-2 text-dim">Email</span>
+                <span className="text-fine-2 text-dim">{t('Email')}</span>
                 <input
                   type="email"
                   autoComplete="username"
@@ -759,7 +746,7 @@ function Setup(): JSX.Element {
               >
                 <div className="overflow-hidden">
                   <label className="flex flex-col gap-1.5">
-                    <span className="text-fine-2 text-dim">Password again</span>
+                    <span className="text-fine-2 text-dim">{t('Password again')}</span>
                     <input
                       type="password"
                       autoComplete="new-password"
@@ -786,7 +773,7 @@ function Setup(): JSX.Element {
 
               <button
                 type="button"
-                className="btn-primary-sm no-drag mt-2 justify-center"
+                className="btn-primary-sm mt-2justify-center"
                 disabled={working}
                 onClick={
                   joining
@@ -807,20 +794,20 @@ function Setup(): JSX.Element {
           {askingCode && (
             <button
               type="button"
-              className="btn-ghost no-drag mt-5"
+              className="btn-ghost mt-5"
               onClick={() => {
                 setAccountTrouble(null);
                 setAskingCode(false);
               }}
             >
-              Use a different email
+              {t('Use a different email')}
             </button>
           )}
 
           {enrolment === null && !greeted && !askingCode && (
             <button
               type="button"
-              className="btn-ghost no-drag mt-5"
+              className="btn-ghost mt-5"
               onClick={() => {
                 setAccountTrouble(null);
                 setConfirm('');
@@ -836,12 +823,12 @@ function Setup(): JSX.Element {
       {which === 'permissions' && (
         <section className={cls}>
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
-            A few permissions first
+            {t('A few permissions first')}
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
-            PRISM needs these to capture and control this machine.
+            {t('PRISM needs these to capture and control this machine.')}
             <br />
-            Nothing is sent outside your own network.
+            {t('Nothing is sent outside your own network.')}
           </p>
           <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
             {GRANTS.map((grant) => {
@@ -867,13 +854,13 @@ function Setup(): JSX.Element {
                     {grant.glyph}
                   </span>
                   <span className="flex min-w-0 flex-1 flex-col gap-1">
-                    <span className="text-body-2 font-medium">{grant.name}</span>
-                    <span className="text-note text-muted-2">{grant.why}</span>
+                    <span className="text-body-2 font-medium">{t(grant.name)}</span>
+                    <span className="text-note text-muted-2">{t(grant.why)}</span>
                   </span>
                   {has ? (
                     <span className="tag-granted">
                       <span className="text-fine">✓</span>
-                      <span>Granted</span>
+                      <span>{t('Granted')}</span>
                     </span>
                   ) : grant.id === 'screen' && asked.has(grant.id) ? (
                     // Screen recording only. It is the grant the system reads once for the
@@ -886,17 +873,17 @@ function Setup(): JSX.Element {
                     // offering to restart for it would be advice that fixes nothing.
                     <button
                       type="button"
-                      className="btn-secondary no-drag"
+                      className="btn-secondary"
                       onClick={() => {
                         void prism.restart();
                       }}
                     >
-                      Restart PRISM
+                      {t('Restart PRISM')}
                     </button>
                   ) : (
                     <button
                       type="button"
-                      className="btn-secondary no-drag"
+                      className="btn-secondary"
                       onClick={() => {
                         void (async () => {
                           try {
@@ -911,7 +898,7 @@ function Setup(): JSX.Element {
                         })();
                       }}
                     >
-                      Allow
+                      {t('Allow')}
                     </button>
                   )}
                 </div>
@@ -919,7 +906,7 @@ function Setup(): JSX.Element {
             })}
           </div>
           <p className="mt-4 text-note text-dim">
-            You can change these later in Settings → Privacy.
+            {t('You can change these later in Settings → Privacy.')}
           </p>
         </section>
       )}
@@ -927,7 +914,7 @@ function Setup(): JSX.Element {
       {which === 'ready' && (
         <section className={cls}>
           <h2 className="max-w-[min(760px,52.8vw)] text-triumph font-semibold">
-            You&rsquo;re all set.
+            {t('You’re all set.')}
           </h2>
           <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
             {signedIn === null
@@ -947,9 +934,9 @@ function Setup(): JSX.Element {
                 1
               </span>
               <span className="flex min-w-0 flex-1 flex-col gap-1">
-                <span className="text-body-2 font-medium">Add another machine</span>
+                <span className="text-body-2 font-medium">{t('Add another machine')}</span>
                 <span className="text-note text-muted-2">
-                  Install PRISM on it and sign in to the same account. The two find each other.
+                  {t('Install PRISM on it and sign in to the same account. The two find each other.')}
                 </span>
               </span>
             </div>
@@ -958,9 +945,9 @@ function Setup(): JSX.Element {
                 2
               </span>
               <span className="flex min-w-0 flex-1 flex-col gap-1">
-                <span className="text-body-2 font-medium">Share the one you want to watch</span>
+                <span className="text-body-2 font-medium">{t('Share the one you want to watch')}</span>
                 <span className="text-note text-muted-2">
-                  Press Share on it, and it turns up on the home screen of the other.
+                  {t('Press Share on it, and it turns up on the home screen of the other.')}
                 </span>
               </span>
             </div>
@@ -968,7 +955,7 @@ function Setup(): JSX.Element {
 
           <div className="mt-[23px]">
             <Primary keys="⌘↵" onClick={finish}>
-              Enter PRISM
+              {t('Enter PRISM')}
             </Primary>
           </div>
         </section>
@@ -1026,7 +1013,7 @@ function Setup(): JSX.Element {
 
   return (
     <>
-      <div className="drag fixed inset-x-0 top-0 z-[3] h-11" />
+      <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-[3] h-11" />
       {/* Both skies are always on the page and one of them is faded out. Swapping the images
           instead would pop the whole backdrop at the moment the screens are halfway through
           moving, which is the one moment nobody is looking at the aurora. */}
@@ -1092,7 +1079,7 @@ function Setup(): JSX.Element {
           )}
           {(HAS_NEXT.has(step) || (step === 'account' && greeted)) && (
             <Primary trailing="→" onClick={advance}>
-              Continue
+              {t('Continue')}
             </Primary>
           )}
         </div>
@@ -1267,7 +1254,7 @@ function CodeBoxes({
           // The line box is the height of the box it is in, so the digit and the caret sit in
           // the middle of it. Left to the type scale it inherits a line height of one and a
           // half, which in a box this tall puts both of them near the top.
-          className={`no-drag h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit leading-[70px] font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none transition-[transform,opacity,background-color,border-color,box-shadow] duration-[340ms] ease-[cubic-bezier(0.4,0,0.2,1)] focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)] ${
+          className={`h-[72px] w-[62px] rounded-panel border p-0 text-center text-digit leading-[70px] font-medium text-ink caret-[rgba(124,92,255,0.9)] outline-none transition-[transform,opacity,background-color,border-color,box-shadow] duration-[340ms] ease-[cubic-bezier(0.4,0,0.2,1)] focus:border-[1.6px] focus:border-[rgba(124,92,255,0.85)] focus:shadow-[0_0_18px_rgba(124,92,255,0.35)] ${
             character === ''
               ? 'border-line-4 bg-wash-1 animate-[code-in_380ms_cubic-bezier(0.22,1.2,0.36,1)_both]'
               : 'border-[rgba(124,92,255,0.45)] bg-wash-4'

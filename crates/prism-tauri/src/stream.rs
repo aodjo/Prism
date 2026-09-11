@@ -129,6 +129,11 @@ pub struct Snapshot {
     pub terms: Option<Terms>,
     /// What is happening, as of the last second.
     pub stats: Option<Stats>,
+    /// How the host went, when it was the host that ended the stream.
+    ///
+    /// What a window says once the stream window has closed on its own: somebody who did not
+    /// close it is owed a sentence about why it went.
+    pub departed: Option<ipc::Departure>,
     /// The last few lines the client wrote, which is what explains a failure.
     pub log: Vec<String>,
 }
@@ -155,6 +160,7 @@ struct Inner {
     host: Option<String>,
     terms: Option<Terms>,
     stats: Option<Stats>,
+    departed: Option<ipc::Departure>,
     log: VecDeque<String>,
     child: Option<Child>,
     /// Which run the fields above describe.
@@ -187,6 +193,7 @@ impl Inner {
             host: None,
             terms: None,
             stats: None,
+            departed: None,
             log: VecDeque::new(),
             child: None,
             run: 0,
@@ -205,6 +212,7 @@ impl Inner {
             host: self.host.clone(),
             terms: self.terms.clone(),
             stats: self.stats.clone(),
+            departed: self.departed,
             log: self.log.iter().cloned().collect(),
         }
     }
@@ -342,6 +350,7 @@ impl Held {
         inner.host = Some(host.to_owned());
         inner.terms = None;
         inner.stats = None;
+        inner.departed = None;
         inner.log.clear();
         inner.started_at = None;
         inner.stopping = false;
@@ -505,6 +514,7 @@ fn absorb(shared: &Arc<Shared>, run: u64, source: ChildStdout) {
                 inner.rtt_count = inner.rtt_count.saturating_add(1);
                 inner.stats = Some(stats);
             }
+            ipc::Event::Gone { how } => inner.departed = Some(how),
             // What it came to is settled by `conclude`, which waits for the process rather than
             // for its pipes. Kept as a line, because a stream that failed said why here.
             ipc::Event::Ended { error } => {
@@ -759,6 +769,7 @@ mod tests {
                 mbps: 18.4,
                 frames: 12,
             }),
+            departed: Some(ipc::Departure::Left),
             log: Vec::new(),
         })
         .expect("writes");
@@ -766,6 +777,7 @@ mod tests {
         assert!(written.contains("\"phase\":\"streaming\""));
         assert!(written.contains("\"rttMs\""));
         assert!(!written.contains("\"rtt_ms\""));
+        assert!(written.contains("\"departed\":\"left\""));
     }
 
     #[test]

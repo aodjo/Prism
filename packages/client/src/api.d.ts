@@ -49,6 +49,8 @@ export interface AccountDeviceView {
   readonly label: string;
   /** Whether it is the machine this window is running on. */
   readonly isThisMachine: boolean;
+  /** Whether it is shared right now, which is what makes it somewhere to connect to. */
+  readonly shared: boolean;
 }
 
 /**
@@ -171,6 +173,12 @@ export interface Settings {
    * somebody moves it.
    */
   updateChannel: string;
+  /**
+   * Which language the windows are in: `en`, `ko`, or empty to follow the machine.
+   *
+   * Empty by default, because the machine already knows what language its owner reads.
+   */
+  language: string;
   /** Whether somebody has been all the way through setup on this machine. */
   setupFinished: boolean;
 }
@@ -266,6 +274,11 @@ export interface StreamState {
   readonly terms: StreamTerms | null;
   /** What is happening, as of the last second. */
   readonly stats: StreamStats | null;
+  /**
+   * How the host went, when it was the host that ended the stream: `left` when it said so —
+   * sharing stopped, or Prism quit there — and `silent` when it stopped answering.
+   */
+  readonly departed: 'left' | 'silent' | null;
   /** The last few lines the stream process wrote, which is what explains a failure. */
   readonly log: readonly string[];
 }
@@ -354,6 +367,16 @@ export interface PrismApi {
    * @returns {Promise<null>} Nothing, which is what the session is now.
    */
   stopSharing(): Promise<null>;
+
+  /**
+   * Sends away whoever is watching this machine, and goes on sharing it.
+   *
+   * Their window closes and says the host ended it; this machine goes back to waiting.
+   *
+   * @async
+   * @returns {Promise<null>} Nothing, once they have been told.
+   */
+  disconnectViewer(): Promise<null>;
 
   /**
    * Returns what this machine's own session is doing, or `null` when it is not shared.

@@ -82,6 +82,7 @@ pub fn permissions(held: tauri::State<'_, crate::Held>) -> Result<HostPermission
 #[tauri::command]
 pub fn request_permission(
     id: String,
+    app: tauri::AppHandle,
     held: tauri::State<'_, crate::Held>,
 ) -> Result<HostPermissions, String> {
     let grant = named(&id).ok_or_else(|| format!("no such grant: {id}"))?;
@@ -89,6 +90,10 @@ pub fn request_permission(
     // Read the setting and let the lock go before asking, because the system's dialog stands
     // there until somebody answers it and every other command would be waiting behind it.
     let controlling = controlling(&held)?;
+
+    if grant == Grant::Input && !prism_core::control::permissions::check().input {
+        forget_stale_grant(&app);
+    }
 
     if !prism_core::control::permissions::request(grant) {
         let now = look(controlling);
@@ -113,7 +118,81 @@ pub fn request_permission(
 /// refused, which is why it is not `-> !`.
 #[tauri::command]
 pub fn restart(app: tauri::AppHandle) {
+    relaunch(&app);
+}
+
+/// Starts Prism again the way the system starts it, and lets this copy go.
+///
+/// Every restart goes through here — the one a missing grant asks for, and the one after an
+/// update is installed. The second used Tauri's own restart until a copy started that way was
+/// found unable to reach the machine it was trying to watch on the local network, for as long
+/// as it ran, while the same bundle opened from the Dock reached it at once.
+///
+/// Returns once the relaunch has been handed over and this copy told to exit, or not at all
+/// where there is no such hand-over and Tauri's own restart is the only one left.
+pub(crate) fn relaunch(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    if reopen() {
+        app.exit(0);
+
+        return;
+    }
+
     app.restart();
+}
+
+/// Asks the system to open this application again, once this copy of it has gone.
+///
+/// Tauri's own restart runs the binary inside the bundle directly. That produces a process which
+/// happens to live in an application rather than a running application: the system launched
+/// nothing, so it has nothing recorded against it, and the privacy grants that belong to the
+/// bundle are not offered to it. Which is exactly what this restart exists to collect — so it
+/// would restart, ask again, and be told no a second time.
+///
+/// The wait is a shell holding on until this process is gone. `open` on a bundle that is still
+/// running brings the old copy forward instead of starting a new one, and the old copy is the
+/// one on its way out.
+///
+/// # Returns
+///
+/// Whether the relaunch was handed over. False leaves the caller to restart the other way, which
+/// is better than not restarting.
+#[cfg(target_os = "macos")]
+fn reopen() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+
+    // `…/Prism.app/Contents/MacOS/prism-tauri` — three steps up is the bundle.
+    let Some(bundle) = exe.ancestors().nth(3) else {
+        return false;
+    };
+
+    if bundle.extension().is_none_or(|kind| kind != "app") {
+        return false;
+    }
+
+    let waiting = format!(
+        "while kill -0 {} 2>/dev/null; do sleep 0.2; done; open {}",
+        std::process::id(),
+        shell_quoted(&bundle.display().to_string()),
+    );
+
+    std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(waiting)
+        .spawn()
+        .is_ok()
+}
+
+/// Wraps a path so a shell reads it as one word.
+///
+/// Single quotes, with any single quote in the path closed and reopened around an escaped one.
+/// The path comes from the running executable rather than from anybody's typing, but a command
+/// line assembled without quoting is a command line that breaks on the first space.
+#[cfg(target_os = "macos")]
+fn shell_quoted(path: &str) -> String {
+    format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 /// Returns whether the session will accept the client's input.
@@ -164,6 +243,32 @@ fn describe(grant: Grant) -> MissingGrant {
         purpose: grant.purpose().to_owned(),
         settings_url: grant.settings_url().to_owned(),
     }
+}
+
+/// Takes whatever an earlier build left on the Accessibility list under this application's name.
+///
+/// The list keeps an entry per signed copy of an application, and one made by a build signed
+/// another way stays switched on while this build is refused. From the outside that is a switch
+/// that is on and a Prism that says it is off, with nothing to be done in System Settings but to
+/// remove the entry by hand. Removing it here, before asking, is what lets the request put this
+/// build in its place.
+///
+/// Only when Accessibility is not held, so there is nothing that works to lose. `tccutil` needs
+/// no administrator for an application's own entry, and a failure changes nothing about what
+/// comes next: the request is made and the pane opened either way.
+#[cfg(target_os = "macos")]
+fn forget_stale_grant(app: &tauri::AppHandle) {
+    let _ = std::process::Command::new("/usr/bin/tccutil")
+        .args(["reset", "Accessibility", &app.config().identifier])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Takes nothing, on a system with no list to take it from.
+#[cfg(not(target_os = "macos"))]
+fn forget_stale_grant(app: &tauri::AppHandle) {
+    let _ = app;
 }
 
 /// Opens the settings pane holding a grant.

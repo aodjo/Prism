@@ -129,8 +129,9 @@ pub async fn check_for_update(
 /// reason anybody can see. Asking again after the download is asking a second time about a
 /// decision already made.
 ///
-/// Never returns when it succeeds: the process is replaced. `Ok(None)` means there was nothing
-/// to install after all, which happens when a newer version was found and then withdrawn.
+/// Returns the version that was installed once the new copy has been asked for, and this one is
+/// on its way out. `Ok(None)` means there was nothing to install after all, which happens when a
+/// newer version was found and then withdrawn.
 ///
 /// # Errors
 ///
@@ -152,9 +153,11 @@ pub async fn install_update(
         .await
         .map_err(|err| err.to_string())?;
 
-    // Does not return. Anything after it is only reached when the platform refused to restart,
-    // and then the caller is told what was installed so it can say so.
-    app.restart();
+    // Through the system rather than by running the new binary directly: a copy started the
+    // direct way could not reach a machine on the local network for as long as it ran.
+    crate::permissions::relaunch(&app);
+
+    Ok(Some(update.version))
 }
 
 /// Asks the endpoint for this channel what it has.

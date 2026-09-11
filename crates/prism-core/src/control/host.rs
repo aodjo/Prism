@@ -22,18 +22,16 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
-
-/// Only the platforms with a capture loop measure elapsed time.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::net::handshake::{Identity, KEY_LEN};
 use crate::net::negotiate::{Codecs, H264, HostAbility};
 use crate::net::sender::SliceSender;
+use crate::net::transfer::Files;
 
 /// How the host should behave.
 #[derive(Debug, Clone)]
@@ -79,6 +77,12 @@ pub struct HostConfig {
     /// desktop audio and is under half a percent of what the picture costs, so this is on by
     /// default and off only when somebody has a reason.
     pub audio_bitrate_bps: Option<u32>,
+    /// Where files sent to this machine are put, and what it offers when asked for a listing.
+    ///
+    /// `None` turns the file channel off entirely: nothing is accepted and nothing is listed,
+    /// which is what a measurement run wants and what a machine whose owner has not asked for
+    /// file transfer gets.
+    pub shared_folder: Option<PathBuf>,
 }
 
 impl Default for HostConfig {
@@ -97,6 +101,7 @@ impl Default for HostConfig {
             inject_input: true,
             audio_bitrate_bps: Some(128_000),
             codecs: host_codecs(),
+            shared_folder: crate::net::transfer::shared_folder(),
         }
     }
 }
@@ -223,6 +228,11 @@ struct Shared {
     local: Mutex<Option<SocketAddr>>,
     peer: Mutex<Option<[u8; KEY_LEN]>>,
     error: Mutex<Option<String>>,
+    /// Set to end the session that is running now, and nothing after it.
+    ///
+    /// Not [`HostService::stop`]: that ends sharing. This is the person at this machine sending
+    /// away whoever is watching it, with the machine left shared for the next one to come.
+    ending: AtomicBool,
 }
 
 impl Shared {
@@ -321,12 +331,48 @@ impl HostService {
         self.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Ends the session somebody is watching now, and goes on sharing.
+    ///
+    /// The machine watching is told the host ended it, and this one goes straight back to
+    /// waiting for the next. Does nothing when nobody is watching: there is no session to end,
+    /// and one that opens a moment later was not the one anybody meant.
+    pub fn disconnect(&self) {
+        if self.shared.phase() == Phase::Streaming {
+            self.shared.ending.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Asks the session to end and waits for it.
     pub fn join(mut self) {
         self.stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+
+    /// Asks the session to end and waits for it, but no longer than `patience`.
+    ///
+    /// For a process on its way out. Ending the session is what says goodbye to the machine
+    /// watching this one, so it is worth a moment; a session that has not ended by then is left
+    /// to the exit rather than holding it up. Returns whether it ended in time.
+    pub fn join_within(mut self, patience: Duration) -> bool {
+        self.stop();
+
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+
+        let deadline = Instant::now() + patience;
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let finished = thread.is_finished();
+        if finished {
+            let _ = thread.join();
+        }
+
+        finished
     }
 }
 
@@ -457,7 +503,15 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
         }
     };
 
+    // Cleared as each session begins, so a disconnect meant for the last one — pressed as it
+    // was ending anyway — does not end this one the moment it opens.
+    shared.ending.store(false, Ordering::Relaxed);
     shared.set_phase(Phase::Streaming);
+    eprintln!(
+        "host: {} a session opened with {}",
+        seconds_now(),
+        crate::identity::to_hex(&sender.peer())
+    );
 
     // Audio runs on its own thread and its own clock. Interleaving it with the video loop
     // would tie a five millisecond cadence to a sixteen millisecond one, and whichever waited
@@ -470,6 +524,16 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
 
     let outcome = stream(&config, sender, shared, stop);
 
+    // Said on standard error, which the application keeps in its log. Why a session ended is
+    // the one thing about a host anybody asks afterwards, and this is the only place that knows.
+    let why = match &outcome {
+        Err(err) => format!("it failed: {err}"),
+        Ok(()) if stop.load(Ordering::Relaxed) => "sharing was stopped".to_owned(),
+        Ok(()) if shared.ending.load(Ordering::Relaxed) => "it was disconnected here".to_owned(),
+        Ok(()) => "the client went away".to_owned(),
+    };
+    eprintln!("host: {} the session ended because {why}", seconds_now());
+
     if let Some(thread) = audio {
         let _ = thread.join();
     }
@@ -480,6 +544,16 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
     if let Err(err) = outcome {
         shared.fail(err);
     }
+}
+
+/// The time, in whole seconds since the Unix epoch, for a line in the log.
+///
+/// Not a date: the log is read by comparing its lines with each other and with the other
+/// machine's, and a number compares without a time zone getting in the way.
+fn seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Turns a bound address into one somebody could actually type.
@@ -729,7 +803,12 @@ fn ready(mut sender: SliceSender, config: &HostConfig) -> io::Result<SliceSender
     if let Some(bitrate) = config.pace_bps {
         sender.enable_pacing(bitrate, config.adaptive);
     }
-    sender.serve_return_path(config.inject_input)?;
+    let files = config
+        .shared_folder
+        .clone()
+        .map(|folder| Arc::new(Mutex::new(Files::new(folder))));
+
+    sender.serve_return_path(config.inject_input, files)?;
     if let Some(loss) = config.parity_loss {
         sender.enable_parity(loss);
     }
@@ -782,6 +861,12 @@ pub fn spawn_audio(
         return Ok(None);
     }
 
+    // Two reasons to stop, and both are needed. `stop` is somebody unsharing the machine, which
+    // ends every turn of the loop; `alive` is this turn ending on its own, which is what happens
+    // every time a client hangs up. Watching only the first is a thread that outlives its
+    // session holding a duplicate of its socket — and since the turn after it binds the same
+    // port, that is a machine which can never be watched again until it is restarted.
+    let alive = sender.alive();
     let mut sender = sender.audio_sender()?;
     let sent = Arc::clone(sent);
     let stop = Arc::clone(stop);
@@ -809,7 +894,7 @@ pub fn spawn_audio(
             let mut heard = false;
             let mut mute_warned = false;
 
-            while !stop.load(Ordering::Relaxed) {
+            while !stop.load(Ordering::Relaxed) && alive.load(Ordering::Relaxed) {
                 // A silent machine may deliver nothing at all, not zeroes. Sending silence in
                 // its place keeps the stream continuous, which is what stops the client's
                 // jitter buffer from having to fill from empty the moment something makes a
@@ -946,6 +1031,14 @@ fn keep_going(config: &HostConfig, stop: &AtomicBool, frames: u64) -> bool {
         .is_none_or(|budget| frames < u64::from(budget))
 }
 
+/// How long a capture that has produced nothing at all is given before the session gives up.
+///
+/// Not the same thing as a still screen, which produces nothing and is sent anyway. This is a
+/// capture that never started: the stream is running, the compositor is answering, and no
+/// frame has ever come out of it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const CAPTURE_PATIENCE: Duration = Duration::from_secs(10);
+
 /// Captures, encodes and sends until the session ends.
 ///
 /// One function for every platform that can host, because the pipeline underneath it is
@@ -962,40 +1055,46 @@ fn stream(
 ) -> Result<(), String> {
     use crate::encode::pump::{PumpConfig, Pumped, ScreenPump};
 
+    // What the client said it can show, as the negotiation settled it. Passed on rather than left
+    // at zero: zero is the display's own size, and the capture used to take that and ignore the
+    // agreement entirely — so the terms said one size and the frames were another.
+    let (width, height) = sender.agreed().map_or((0, 0), |agreed| {
+        (u32::from(agreed.width), u32::from(agreed.height))
+    });
+
     let mut pump = ScreenPump::start(PumpConfig {
         fps: config.fps,
         bitrate_bps: config.bitrate_bps,
-        // The display's own size. A window application has nobody to ask for a smaller one,
-        // and the client's offer has already capped what the negotiation agreed.
-        width: 0,
-        height: 0,
+        width,
+        height,
         codec: agreed_codec(&sender),
     })
     .map_err(|err| err.to_string())?;
 
     let started = Instant::now();
     let mut frames = 0u64;
-    let mut idle = 0u32;
+    let mut waiting: Option<Instant> = None;
 
-    while keep_going(config, stop, frames) {
+    while keep_going(config, stop, frames) && !shared.ending.load(Ordering::Relaxed) {
         match pump.pump(&mut sender, config.adaptive)? {
             Pumped::Idle => {
-                // A still screen produces no frames at all, so this is ordinary. Twenty in a
-                // row is ten seconds of a compositor that has stopped, which is not.
-                idle += 1;
-                if idle > 20 {
-                    return Err("the compositor stopped delivering frames".into());
+                // Not a still screen: that sends its last frame again. This is a capture that
+                // has never produced one, which after ten seconds is one that never will.
+                let since = *waiting.get_or_insert_with(Instant::now);
+
+                if since.elapsed() > CAPTURE_PATIENCE {
+                    return Err("the screen was never delivered to be sent".into());
                 }
                 continue;
             }
-            Pumped::Filling | Pumped::Dropped => {
-                idle = 0;
+            Pumped::Filling | Pumped::Dropped | Pumped::Still => {
+                waiting = None;
                 continue;
             }
             // Ordinary: somebody closed their client. Ending here rather than reporting a
             // failure is what stops the tray showing an error after most sessions.
             Pumped::PeerGone => return Ok(()),
-            Pumped::Sent => idle = 0,
+            Pumped::Sent => waiting = None,
         }
 
         frames += 1;

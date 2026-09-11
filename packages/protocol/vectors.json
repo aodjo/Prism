@@ -10,12 +10,23 @@
     "clockPongLen": 26,
     "inputPacketLen": 15,
     "cursorPositionLen": 18,
+    "goodbyeLen": 2,
     "fecHeaderLen": 20,
     "maxFecPayload": 1156,
     "sealOverhead": 24,
     "maxPlaintextSize": 1176,
     "audioHeaderLen": 13,
-    "maxAudioPayload": 1163
+    "maxAudioPayload": 1163,
+    "fileHeaderLen": 2,
+    "fileChunkHeaderLen": 10,
+    "maxFilePayload": 1166,
+    "fileOfferFixedLen": 20,
+    "fileAnswerLen": 8,
+    "fileReportLen": 14,
+    "fileListingFixedLen": 5,
+    "fileEntryFixedLen": 9,
+    "fileAskFixedLen": 3,
+    "maxFileName": 255
   },
   "channels": {
     "control": 0,
@@ -23,7 +34,23 @@
     "audio": 2,
     "input": 3,
     "feedback": 4,
-    "fec": 5
+    "fec": 5,
+    "file": 6
+  },
+  "fileTypes": {
+    "offer": 0,
+    "answer": 1,
+    "chunk": 2,
+    "report": 3,
+    "list": 4,
+    "listing": 5,
+    "ask": 6
+  },
+  "fileRefusals": {
+    "declined": 0,
+    "tooLarge": 1,
+    "badName": 2,
+    "notWritable": 3
   },
   "videoFlags": {
     "idr": 1,
@@ -101,6 +128,36 @@
       "reason": "no channel tag"
     },
     {
+      "name": "file-unknown-type",
+      "hex": "0607",
+      "reason": "file message type 7 is not defined"
+    },
+    {
+      "name": "file-offer-named-a-path",
+      "hex": "0600010000000000000000000000010000000300612f62",
+      "reason": "a file called a/b would be written somewhere it was not offered"
+    },
+    {
+      "name": "file-offer-named-the-parent",
+      "hex": "06000100000000000000000000000100000002002e2e",
+      "reason": "a file called .. is not a file"
+    },
+    {
+      "name": "file-report-truncated",
+      "hex": "06030100",
+      "reason": "report shorter than FILE_REPORT_LEN"
+    },
+    {
+      "name": "file-listing-ends-inside-an-entry",
+      "hex": "0605000100030000000000000005612e74",
+      "reason": "the last entry names five bytes and carries three"
+    },
+    {
+      "name": "file-answer-unknown-refusal",
+      "hex": "06010700000000ff",
+      "reason": "refusal 255 is not a reason this build knows"
+    },
+    {
       "name": "unknown-channel",
       "hex": "09",
       "reason": "channel 9 is not defined"
@@ -176,6 +233,11 @@
       "reason": "cursor position with a screen of no height"
     },
     {
+      "name": "goodbye-with-a-tail",
+      "hex": "000300",
+      "reason": "a goodbye carries nothing after its type"
+    },
+    {
       "name": "fec-truncated-header",
       "hex": "05070000000100080200f40140420f00000000",
       "reason": "fec packet shorter than FEC_HEADER_LEN"
@@ -224,7 +286,8 @@
   "controlTypes": {
     "clockPing": 0,
     "clockPong": 1,
-    "cursorPosition": 2
+    "cursorPosition": 2,
+    "goodbye": 3
   },
   "clockPings": [
     {
@@ -250,7 +313,8 @@
     "mouseMove": 0,
     "mouseButton": 1,
     "mouseScroll": 2,
-    "key": 3
+    "key": 3,
+    "mouseTo": 4
   },
   "mouseButtons": {
     "left": 0,
@@ -301,6 +365,28 @@
         "originTsUs": "3000000"
       },
       "hex": "0303c0c62d00000000000400000001"
+    },
+    {
+      "name": "mouse-to-a-point",
+      "fields": {
+        "kind": 4,
+        "x": 32768,
+        "y": 16384,
+        "flags": 0,
+        "originTsUs": "5000000"
+      },
+      "hex": "0304404b4c00000000000080004000"
+    },
+    {
+      "name": "mouse-to-the-far-corner",
+      "fields": {
+        "kind": 4,
+        "x": 65535,
+        "y": 65535,
+        "flags": 0,
+        "originTsUs": "0"
+      },
+      "hex": "03040000000000000000ffffffff00"
     }
   ],
   "cursorPositions": [
@@ -336,6 +422,12 @@
         "screenHeight": 65535
       },
       "hex": "0002ffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "goodbyes": [
+    {
+      "name": "canonical",
+      "hex": "0003"
     }
   ],
   "fecPackets": [
@@ -409,6 +501,121 @@
       },
       "payloadHex": "ff",
       "hex": "02ffffffffffffffffffffffffff"
+    }
+  ],
+  "fileOffers": [
+    {
+      "name": "canonical",
+      "fields": {
+        "id": 1,
+        "size": "9",
+        "chunks": 1,
+        "name": "notes.txt"
+      },
+      "hex": "06000100000009000000000000000100000009006e6f7465732e747874"
+    },
+    {
+      "name": "a-file-of-nothing",
+      "fields": {
+        "id": 4294967295,
+        "size": "0",
+        "chunks": 0,
+        "name": "a"
+      },
+      "hex": "0600ffffffff000000000000000000000000010061"
+    }
+  ],
+  "fileAnswers": [
+    {
+      "name": "accepted",
+      "fields": {
+        "id": 7,
+        "accepted": true,
+        "refusal": 0
+      },
+      "hex": "0601070000000100"
+    },
+    {
+      "name": "too-large",
+      "fields": {
+        "id": 7,
+        "accepted": false,
+        "refusal": 1
+      },
+      "hex": "0601070000000001"
+    }
+  ],
+  "fileChunks": [
+    {
+      "name": "canonical",
+      "fields": {
+        "id": 1,
+        "index": 2
+      },
+      "payloadHex": "070809",
+      "hex": "06020100000002000000070809"
+    },
+    {
+      "name": "empty-tail",
+      "fields": {
+        "id": 0,
+        "index": 4294967295
+      },
+      "payloadHex": "",
+      "hex": "060200000000ffffffff"
+    }
+  ],
+  "fileReports": [
+    {
+      "name": "canonical",
+      "fields": {
+        "id": 1,
+        "have": 4,
+        "arrived": 5
+      },
+      "hex": "0603010000000400000005000000"
+    },
+    {
+      "name": "nothing-yet",
+      "fields": {
+        "id": 0,
+        "have": 0,
+        "arrived": 0
+      },
+      "hex": "0603000000000000000000000000"
+    }
+  ],
+  "fileLists": [
+    {
+      "name": "canonical",
+      "hex": "0604"
+    }
+  ],
+  "fileListings": [
+    {
+      "name": "one-file",
+      "fields": {
+        "more": false,
+        "files": [{ "size": "3", "name": "a.txt" }]
+      },
+      "hex": "0605000100030000000000000005612e747874"
+    },
+    {
+      "name": "empty-and-truncated",
+      "fields": {
+        "more": true,
+        "files": []
+      },
+      "hex": "0605010000"
+    }
+  ],
+  "fileAsks": [
+    {
+      "name": "canonical",
+      "fields": {
+        "name": "a.txt"
+      },
+      "hex": "060605612e747874"
     }
   ]
 }
