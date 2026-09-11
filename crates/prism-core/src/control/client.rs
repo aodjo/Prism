@@ -251,11 +251,23 @@ pub enum Report {
 pub enum Departure {
     /// It said goodbye: sharing was stopped on it, or Prism quit there.
     Left,
-    /// Nothing arrived from it for the whole idle timeout, with no word as to why.
+    /// It went without a word: nothing arrived from it for the whole idle timeout, or its port
+    /// was found closed.
     ///
     /// A host that crashed, lost its network, or was put to sleep. Or one whose goodbye was lost
     /// three times over, which on a path that bad is much the same thing.
     Silent,
+}
+
+/// Whether a failed read means the host's end is closed, rather than that something broke here.
+///
+/// A connected datagram socket is told when what it sends is refused at the far end, and its
+/// next read fails with that: the port it was talking to has nothing behind it any more.
+fn host_is_gone(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+    )
 }
 
 /// Where a client's reports go.
@@ -747,6 +759,14 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         let bytes = match receiver.recv_into(&mut recv_buf) {
             Ok(bytes) => bytes,
             Err(err) if is_timeout(&err) => {
+                say.send(Report::Gone(Departure::Silent));
+                break;
+            }
+            // The host's port is closed: whatever was listening there is not any more. That is
+            // the host gone without a word, not something wrong with this machine, and a window
+            // should say so rather than show a socket error.
+            Err(err) if host_is_gone(&err) => {
+                say.note(format!("the host stopped answering ({err})"));
                 say.send(Report::Gone(Departure::Silent));
                 break;
             }
