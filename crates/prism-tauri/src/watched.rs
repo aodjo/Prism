@@ -107,10 +107,12 @@ mod banner {
     /// How far below the top of the screen it sits.
     const DROP: f64 = 12.0;
 
-    /// When the mouse here was last touched, in milliseconds since the Unix epoch.
+    /// When the banner was last given reason to show, in milliseconds since the Unix epoch.
     ///
-    /// Written from the event monitors and read when deciding what to show. An atomic because
-    /// the two are both on the main thread today and nothing should depend on that staying so.
+    /// The mouse here being touched, or a session opening. Its own rather than the session's
+    /// record of touches, because a session opening is a reason to show the banner and not a
+    /// reason to take the pointer from the far side. An atomic because the two writers are both
+    /// on the main thread today and nothing should depend on that staying so.
     static TOUCHED: AtomicU64 = AtomicU64::new(0);
 
     thread_local! {
@@ -228,6 +230,10 @@ mod banner {
     }
 
     /// Records that the mouse was touched here, unless it was the far side that moved it.
+    ///
+    /// Told to the session as well, which sets the far side's pointer input aside while the
+    /// person here is using the mouse. This is the only thing that tells it: the mark on what
+    /// the injector posted is what makes the two hands tell apart at all.
     fn noticed(event: &NSEvent) {
         let injected = event.CGEvent().is_some_and(|raw| {
             CGEvent::integer_value_field(Some(&raw), CGEventField::EventSourceUserData) == INJECTED
@@ -235,6 +241,7 @@ mod banner {
 
         if !injected {
             TOUCHED.store(now_ms(), Ordering::Relaxed);
+            prism_core::input::note_touch();
         }
     }
 

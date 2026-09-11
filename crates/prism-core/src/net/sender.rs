@@ -11,10 +11,10 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::clock::now_us;
-use crate::input::{Injector, LocalHand, PlatformInjector};
+use crate::input::{Injector, LOCAL_HOLD, PlatformInjector};
 use crate::net::ack::{is_newer, missing_in_history};
 use crate::net::cc::{CongestionConfig, CongestionController, DelaySample};
 use crate::net::fec::{FecCodec, ParityBlock, max_data_shards_for, parity_shards_for};
@@ -1145,8 +1145,6 @@ struct HostInput {
     injector: Option<PlatformInjector>,
     complained: bool,
     confirmed: bool,
-    /// Whether the person at this machine has the pointer, which puts the far side's aside.
-    hand: LocalHand,
     /// The buttons the far side has pressed and not let go of.
     ///
     /// Let go of the moment somebody here takes the pointer, so they are not handed a drag they
@@ -1173,7 +1171,6 @@ impl HostInput {
             injector,
             complained: false,
             confirmed: false,
-            hand: LocalHand::default(),
             pressed: [false; 3],
         }
     }
@@ -1208,17 +1205,14 @@ impl HostInput {
                 | InputEvent::MouseButton { pressed: true, .. }
         );
 
-        if takes_the_pointer && self.hand.holds(crate::input::pointer(), Instant::now()) {
+        if takes_the_pointer && crate::input::touched_within(LOCAL_HOLD) {
             self.let_go();
 
             return;
         }
 
-        match event {
-            InputEvent::MouseTo { x, y } => self.hand.placed(x, y),
-            InputEvent::MouseMove { .. } => self.hand.lost_track(),
-            InputEvent::MouseButton { button, pressed } => self.pressed[button as usize] = pressed,
-            _ => {}
+        if let InputEvent::MouseButton { button, pressed } = event {
+            self.pressed[button as usize] = pressed;
         }
 
         self.post(event);
