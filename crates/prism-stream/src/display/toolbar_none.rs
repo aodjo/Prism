@@ -11,7 +11,11 @@
 use sdl3::video::Window;
 
 /// One control in the title bar.
+///
+/// Named here as on macOS so the window loop is one loop, and never built: with no controls,
+/// nothing is ever pressed. Which is dead code by definition, and the one place it is allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Tool {
     /// Hand the pointer and the keyboard to the machine being watched, or take them back.
     Control,
