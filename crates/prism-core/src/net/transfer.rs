@@ -229,18 +229,17 @@ impl Files {
             })?
             .to_owned();
 
-        let file = File::open(path)?;
-        let about = file.metadata()?;
-
-        // A directory opens on this platform and reads as nothing, so a caller that pointed at
-        // one would offer a file of no bytes rather than be told it had pointed at a folder.
-        if !about.is_file() {
+        // Asked before opening, because the two systems answer differently once it is open: on
+        // macOS a directory opens and reads as nothing, which would offer a file of no bytes,
+        // and on Windows opening one is refused as access denied, which says nothing about why.
+        if !std::fs::metadata(path)?.is_file() {
             return Err(FileError::NotAFile {
                 path: path.display().to_string(),
             });
         }
 
-        let size = about.len();
+        let file = File::open(path)?;
+        let size = file.metadata()?.len();
 
         if size > MAX_FILE_SIZE {
             return Err(FileError::TooLarge { size });
