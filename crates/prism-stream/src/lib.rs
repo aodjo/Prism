@@ -21,4 +21,6 @@
 mod audio;
 #[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
 pub mod display;
+#[cfg(target_os = "macos")]
+pub mod drawer;
 pub mod ipc;

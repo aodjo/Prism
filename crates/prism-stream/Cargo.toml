@@ -50,6 +50,17 @@ objc2-app-kit = { version = "0.3", features = [
     "NSResponder",
     "NSApplication",
     "NSGraphics",
+    "NSView",
+    "NSControl",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSBox",
+    "NSTextField",
+    "NSText",
+    "NSColor",
+    "NSFont",
+    "NSAppearance",
     "objc2-core-foundation",
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }

@@ -17,7 +17,7 @@
 
 #![cfg(target_os = "macos")]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
@@ -27,12 +27,14 @@ use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSEvent, NSImage, NSMenu, NSMenuItem, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
-    NSToolbarItem, NSToolbarItemIdentifier, NSWindow, NSWindowToolbarStyle,
+    NSToolbarItem, NSToolbarItemIdentifier, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSPoint, NSString};
 use sdl3::video::Window;
 use sdl3_sys::properties::SDL_GetPointerProperty;
 use sdl3_sys::video::{SDL_GetWindowProperties, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER};
+
+use crate::drawer::{Drawer, Entry};
 
 /// One control in the title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +115,36 @@ const TOOLS: [Tool; 6] = [
 
 /// The symbol the control item carries while the machine is being controlled.
 const CONTROLLING: &str = "cursorarrow.rays";
+
+/// The controls the drawer holds while the window fills the screen, in order.
+///
+/// Not the toolbar's list: fitting the window to the picture means nothing on a window that is
+/// the size of the screen, and the one that fills the screen is, here, the one that leaves it.
+const DRAWN: [Tool; 5] = [
+    Tool::Control,
+    Tool::Fullscreen,
+    Tool::Send,
+    Tool::Fetch,
+    Tool::Disconnect,
+];
+
+/// What a control in the drawer says and shows.
+fn drawn(tool: Tool, controlling: bool) -> Entry {
+    match tool {
+        Tool::Fullscreen => Entry {
+            symbol: "arrow.down.right.and.arrow.up.left",
+            label: "전체 화면 나가기".to_owned(),
+        },
+        Tool::Control if controlling => Entry {
+            symbol: CONTROLLING,
+            label: tool.label().to_owned(),
+        },
+        _ => Entry {
+            symbol: tool.symbol(),
+            label: tool.label().to_owned(),
+        },
+    }
+}
 
 /// What the delegate holds.
 struct Held {
@@ -214,12 +246,20 @@ impl Controls {
 }
 
 /// The controls in a window's title bar, and the presses they have collected.
+///
+/// And the same controls in a drawer at the left edge, for while the window fills the screen:
+/// the title bar is gone then, and so is everything that was in it. Only the picture shows,
+/// with a handle at the edge that opens the controls beside it.
 pub struct Toolbar {
     pressed: Arc<Mutex<VecDeque<Tool>>>,
     chosen: Arc<Mutex<VecDeque<String>>>,
     controls: Retained<Controls>,
-    /// Held so the toolbar outlives this call. Nothing reads it again.
-    _toolbar: Retained<NSToolbar>,
+    toolbar: Retained<NSToolbar>,
+    window: Retained<NSWindow>,
+    /// The drawer, once the window has something under it to be laid over.
+    drawer: Option<Drawer>,
+    /// Whether the window was filling the screen the last time anybody looked.
+    filling: Cell<bool>,
 }
 
 impl Toolbar {
@@ -270,8 +310,69 @@ impl Toolbar {
             pressed,
             chosen,
             controls,
-            _toolbar: toolbar,
+            toolbar,
+            window: ns_window,
+            drawer: None,
+            filling: Cell::new(false),
         })
+    }
+
+    /// Puts the drawer the controls move into while the window fills the screen.
+    ///
+    /// Separate from [`Toolbar::install`] and after the picture's own view exists, because
+    /// views stack in the order they are added: one added before the picture's would be under
+    /// it, and a drawer nobody can see is not a way to leave full screen.
+    pub fn add_drawer(&mut self) {
+        let Some(content) = self.window.contentView() else {
+            return;
+        };
+
+        let entries: Vec<Entry> = DRAWN.iter().map(|tool| drawn(*tool, false)).collect();
+        let pressed = Arc::clone(&self.pressed);
+
+        self.drawer = Drawer::install(&content, None, &entries, false, move |index| {
+            if let (Some(tool), Ok(mut queue)) = (DRAWN.get(index), pressed.lock()) {
+                queue.push_back(*tool);
+            }
+        });
+    }
+
+    /// Returns whether the window fills the screen, and moves the controls to match.
+    ///
+    /// Asked of the window every turn rather than remembered from the control that asked for
+    /// it, because that control is not the only way in or out: the green button, the menu and
+    /// Escape all change it without a word to anything here.
+    pub fn sync_fullscreen(&self) -> bool {
+        let filling = self
+            .window
+            .styleMask()
+            .contains(NSWindowStyleMask::FullScreen);
+
+        if filling != self.filling.replace(filling) {
+            self.toolbar.setVisible(!filling);
+
+            if let Some(drawer) = self.drawer.as_ref() {
+                drawer.set_shown(filling);
+            }
+        }
+
+        filling
+    }
+
+    /// Returns whether a place in the window is over the drawer.
+    ///
+    /// In the window's own coordinates, which count down from the top as the pointer's do. A
+    /// click there is a click on a control, and must not reach the far machine as well.
+    #[must_use]
+    pub fn covers(&self, x: f32, y: f32) -> bool {
+        let (Some(drawer), Some(content)) = (self.drawer.as_ref(), self.window.contentView())
+        else {
+            return false;
+        };
+
+        let height = content.bounds().size.height;
+
+        drawer.covers(NSPoint::new(f64::from(x), height - f64::from(y)))
     }
 
     /// Returns the next control that was pressed, or `None` if none was.
@@ -360,6 +461,10 @@ impl Toolbar {
             if *tool == Tool::Control {
                 item.setImage(symbol_image(symbol).as_deref());
             }
+        }
+
+        if let Some(drawer) = self.drawer.as_ref() {
+            drawer.set_entry(0, &drawn(Tool::Control, controlling));
         }
     }
 }

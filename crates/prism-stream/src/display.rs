@@ -165,6 +165,16 @@ fn to_fraction(x: f32, y: f32, area: (u32, u32)) -> (u16, u16) {
     )
 }
 
+/// Returns where in the window a pointer event happened, when the event is one that has a place.
+fn pointer_at(event: &Event) -> Option<(f32, f32)> {
+    match event {
+        Event::MouseMotion { x, y, .. }
+        | Event::MouseButtonDown { x, y, .. }
+        | Event::MouseButtonUp { x, y, .. } => Some((*x, *y)),
+        _ => None,
+    }
+}
+
 /// Returns where a click was made, when the event is one.
 ///
 /// Sent ahead of the button itself. The host's pointer is wherever the last motion put it,
@@ -486,7 +496,7 @@ pub fn run(
 
     // Installed before anything is drawn, because adding a toolbar moves the content view
     // down: a surface built for the window as it was would be built one title bar too tall.
-    let bar = toolbar::Toolbar::install(&window);
+    let mut bar = toolbar::Toolbar::install(&window);
 
     let (mut drawable_width, mut drawable_height) = window.size_in_pixels();
     let scale = f64::from(drawable_width) / f64::from(window.size().0.max(1));
@@ -499,6 +509,11 @@ pub fn run(
     // Declared after the window so it is dropped before it: the surface holds objects the
     // window owns, and releasing them afterwards would be releasing them into nothing.
     let mut surface = surface::Surface::new(&window, drawable_width, drawable_height, scale)?;
+
+    // After the surface, so the drawer is laid over the picture rather than under it.
+    if let Some(bar) = bar.as_mut() {
+        bar.add_drawer();
+    }
 
     say.note(format!(
         "display: window {width}x{height}, drawable {drawable_width}x{drawable_height}, {}",
@@ -604,6 +619,13 @@ pub fn run(
     }
 
     'main: loop {
+        // Read from the window rather than kept here, because the control is not the only way
+        // in or out of full screen, and a remembered answer goes stale the first time somebody
+        // presses the green button instead.
+        if let Some(bar) = bar.as_ref() {
+            filling = bar.sync_fullscreen();
+        }
+
         while let Some(tool) = bar.as_ref().and_then(toolbar::Toolbar::pressed) {
             match tool {
                 toolbar::Tool::Control if capture_input => {
@@ -700,9 +722,15 @@ pub fn run(
                 drawable_height = height;
                 area = window.size();
             }
-            if capture_input && (controlling || is_release(&event)) {
+            // The drawer's controls are this window's, not the far machine's: a press or a pass
+            // over them goes nowhere else. A release still does, so a drag that started on the
+            // picture and ended over the drawer does not leave a button held over there.
+            let over_drawer = pointer_at(&event)
+                .is_some_and(|(x, y)| bar.as_ref().is_some_and(|bar| bar.covers(x, y)));
+
+            if capture_input && ((controlling && !over_drawer) || is_release(&event)) {
                 if let Some(sender) = input_slot.get() {
-                    if controlling {
+                    if controlling && !over_drawer {
                         if let Some(place) = where_clicked(&event, area) {
                             if sender.send(place).is_ok() {
                                 sent_input += 1;
