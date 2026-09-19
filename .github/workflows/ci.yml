@@ -181,10 +181,26 @@ jobs:
       - name: TypeScript types
         run: pnpm typecheck
 
+      # Everything from here down produces the bundles a release is made of, and a pull request
+      # makes no release: the `release` job below is already skipped on one, so what these steps
+      # built was uploaded as an artifact and then thrown away.
+      #
+      # Measured on the run that merged #70, where this was the whole of the wait: packaging
+      # took 443 seconds on the slowest runner against 351 for the tests and about ninety for
+      # everything else put together. Skipping it on a pull request takes the slowest job from
+      # roughly fifteen minutes to nine, and the wait for an answer with it.
+      #
+      # What is given up is that a bundling failure — a missing sidecar, a signature, an icon —
+      # now shows on `develop` rather than on the pull request. That has happened here before
+      # (#60), so it is a real cost and not a theoretical one; what makes it the right trade is
+      # that compiling and testing, which is what catches the failures this project actually
+      # produces, still happens on every platform on every pull request.
+
       # What this build calls itself. A push to a branch is a development build and numbers
       # itself as a prerelease of the version being worked toward; a tag is that version. See
       # `scripts/version.mjs` for why they cannot simply be the same number with a suffix.
       - name: Name this build
+        if: github.event_name != 'pull_request'
         id: name
         shell: bash
         run: |
@@ -215,7 +231,7 @@ jobs:
       # not there and fail the build. So a fork, or this repository before the secrets exist,
       # simply signs ad-hoc as it did before.
       - name: Take out the developer certificate, if there is one
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
         env:
           CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -254,6 +270,7 @@ jobs:
           fi
 
       - name: Package the application
+        if: github.event_name != 'pull_request'
         run: pnpm package
         env:
           PRISM_CHANNEL: ${{ steps.name.outputs.channel }}
@@ -292,7 +309,11 @@ jobs:
           xcrun stapler validate "$app"
           spctl --assess --verbose=4 --type execute "$app" 2>&1 | grep -q 'source=Notarized Developer ID'
 
+      # `if-no-files-found: error` is what makes a platform that quietly built nothing fail
+      # rather than leave a release short of it, which is why this cannot simply run and find
+      # an empty directory on a pull request.
       - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
         with:
           name: prism-${{ matrix.name }}
           path: target/release/bundle/**
