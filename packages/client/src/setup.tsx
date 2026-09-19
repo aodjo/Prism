@@ -241,6 +241,8 @@ function Setup(): JSX.Element {
    * pane holding an answer somebody has already given.
    */
   const [asked, setAsked] = useState<ReadonlySet<string>>(new Set());
+  /** What went wrong asking the system for a grant, when something did. */
+  const [trouble, setTrouble] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -680,7 +682,7 @@ function Setup(): JSX.Element {
               </code>
               <button
                 type="button"
-                className="btn-primary-sm mx-automt-5 block"
+                className="btn-primary-sm mx-auto mt-5 block"
                 onClick={() => {
                   setEnrolment(null);
                   setJoining(false);
@@ -773,7 +775,7 @@ function Setup(): JSX.Element {
 
               <button
                 type="button"
-                className="btn-primary-sm mt-2justify-center"
+                className="btn-primary-sm mt-2 justify-center"
                 disabled={working}
                 onClick={
                   joining
@@ -832,16 +834,20 @@ function Setup(): JSX.Element {
           </p>
           <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
             {GRANTS.map((grant) => {
-              // Local Network is stated as given rather than checked. There is no
-              // interface for asking the system about it, and by the time this screen is
-              // on a display the application has already used the network to draw it — so
-              // reporting anything else would be reporting a guess.
+              // Local Network is the one the system will not answer for: there is no call
+              // that asks whether it has been given. So it is shown as neither held nor
+              // refused, and its button opens the pane rather than requesting anything.
+              //
+              // It used to be drawn as granted. That is the worst of the three answers — it
+              // is the permission that stops two machines on one network reaching each
+              // other while everything through the rendezvous keeps working, so a green tick
+              // here sends the one person who could fix it looking somewhere else.
               const has =
                 grant.id === 'screen'
                   ? (held?.screen ?? false)
                   : grant.id === 'input'
                     ? (held?.input ?? false)
-                    : true;
+                    : false;
 
               return (
                 <div
@@ -888,6 +894,8 @@ function Setup(): JSX.Element {
                         void (async () => {
                           try {
                             await prism.requestPermission(grant.id);
+                          } catch (error: unknown) {
+                            setTrouble(reason(error));
                           } finally {
                             // Redrawn either way. The system may have granted it, refused
                             // it, or opened its own settings pane — and only the check
@@ -898,13 +906,14 @@ function Setup(): JSX.Element {
                         })();
                       }}
                     >
-                      {t('Allow')}
+                      {t(grant.id === 'network' ? 'Open System Settings' : 'Allow')}
                     </button>
                   )}
                 </div>
               );
             })}
           </div>
+          {trouble !== '' && <p className="mt-4 text-note text-danger-ink">{trouble}</p>}
           <p className="mt-4 text-note text-dim">
             {t('You can change these later in Settings → Privacy.')}
           </p>

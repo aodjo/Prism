@@ -17,6 +17,17 @@
 use prism_core::control::permissions::Grant;
 use serde::Serialize;
 
+/// What the window calls the local network permission when it asks for it.
+///
+/// Kept out of [`Grant`] deliberately. Everything in that enum can be checked and reported as
+/// held or missing; this one cannot be checked at all, and putting it there would make every
+/// answer about it a guess.
+const LOCAL_NETWORK: &str = "network";
+
+/// Where the system keeps the switch for it.
+const LOCAL_NETWORK_PANE: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork";
+
 /// One thing the system still has to allow.
 ///
 /// Field names are camelCase on the wire because the window reading them is the same TypeScript
@@ -85,11 +96,26 @@ pub fn request_permission(
     app: tauri::AppHandle,
     held: tauri::State<'_, crate::Held>,
 ) -> Result<HostPermissions, String> {
-    let grant = named(&id).ok_or_else(|| format!("no such grant: {id}"))?;
-
     // Read the setting and let the lock go before asking, because the system's dialog stands
     // there until somebody answers it and every other command would be waiting behind it.
     let controlling = controlling(&held)?;
+
+    // The local network is not a [`Grant`], because the system offers nothing to ask it with:
+    // there is no preflight, no request, and no answer afterwards. So it is not checked, is
+    // never in `missing`, and never refuses a share — and the one thing that can be done about
+    // it is to put somebody in front of the switch.
+    //
+    // Saying it was held, which the first-run screen did, is the one answer that must not be
+    // given. It is the grant that stops two machines on one network reaching each other while
+    // everything through the rendezvous goes on working, so a screen that ticks it green sends
+    // the one person who could fix it looking somewhere else.
+    if id == LOCAL_NETWORK {
+        open_settings_pane(LOCAL_NETWORK_PANE);
+
+        return Ok(look(controlling));
+    }
+
+    let grant = named(&id).ok_or_else(|| format!("no such grant: {id}"))?;
 
     if grant == Grant::Input && !prism_core::control::permissions::check().input {
         forget_stale_grant(&app);
