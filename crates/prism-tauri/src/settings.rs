@@ -193,7 +193,12 @@ pub fn save(settings: &Settings) -> Result<(), String> {
 
     let text = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
 
-    fs::write(path, format!("{text}\n")).map_err(|error| error.to_string())
+    // Replaced rather than written over. `load` cannot tell a file a power cut left half
+    // written from one that was never there, so a truncated write does not read as a bad
+    // settings file — it reads as a machine that has never been set up, and comes back with
+    // the setup window, no nickname, and sharing off.
+    prism_core::store::replace(&path, format!("{text}\n").as_bytes())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

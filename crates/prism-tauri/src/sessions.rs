@@ -186,7 +186,11 @@ fn save(history: &[Session]) -> Result<(), String> {
 
     let text = serde_json::to_string_pretty(history).map_err(|error| error.to_string())?;
 
-    fs::write(path, format!("{text}\n")).map_err(|error| error.to_string())
+    // One of the three files `store` names as the only copy of something. `parse` reads a
+    // half-written file as no history at all, so a power cut during a write costs every
+    // session ever recorded rather than the one being added.
+    prism_core::store::replace(&path, format!("{text}\n").as_bytes())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
