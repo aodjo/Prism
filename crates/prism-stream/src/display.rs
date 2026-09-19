@@ -598,11 +598,16 @@ pub fn run(
     // Every pixel the screen has. Without this the window is drawn at one pixel to a point
     // and the compositor doubles it on a Retina display, which is a picture that arrives sharp
     // and is shown soft.
+    // Built hidden and shown once there is something in it. A window that opens the moment this
+    // process starts is a black rectangle sitting over everything for as long as the handshake
+    // takes — and the handshake is the part that can be slow, or fail. The shell says what is
+    // happening meanwhile, in the window somebody is already looking at.
     let mut window = video
         .window(&title, width, height)
         .position_centered()
         .resizable()
         .high_pixel_density()
+        .hidden()
         .build()?;
 
     // Installed before anything is drawn, because adding a toolbar moves the content view
@@ -739,6 +744,10 @@ pub fn run(
     // How large the pictures arriving are, once one has. What the window is set to when
     // somebody asks for the size the far machine is actually sending.
     let mut picture: Option<(u32, u32)> = None;
+
+    // Whether the window has been put on screen. It is built hidden and raised by the first
+    // picture, so nothing is shown until there is something to show.
+    let mut opened = false;
 
     // Where the file chooser puts what somebody picked. A channel rather than a shared slot,
     // because the dialog answers from inside the event pump and this loop reads it outside.
@@ -1058,6 +1067,15 @@ pub fn run(
                 if surface.present(&decoded, cursor.normalised(), target)? {
                     shown += 1;
                     hud_frames += 1;
+
+                    // The first picture is what the window was waiting for. Shown after it has
+                    // been presented rather than before, so what appears already has the far
+                    // machine in it — a window raised a frame early is a black flash.
+                    if !opened {
+                        opened = true;
+                        window.show();
+                        window.raise();
+                    }
                 } else {
                     missed += 1;
                 }
