@@ -222,7 +222,7 @@ export function Frame({
           }}
           className="pointer-events-none absolute z-[3] rounded-card border-2 border-dashed border-violet bg-[rgba(124,92,255,0.16)]"
         >
-          <span className="absolute -bottom-9 left-1/2 -translate-x-1/2 rounded-badge bg-violet px-3 py-1.5 text-tiny font-medium text-white tabular-nums">
+          <span className="absolute -bottom-9 left-1/2 -translate-x-1/2 rounded-badge bg-violet px-3 py-1.5 text-tiny font-medium text-white font-mono tabular-nums">
             {at.w} × {at.h}
           </span>
         </div>
@@ -468,7 +468,7 @@ export function BlockPanel({
 
         <div className="flex items-center justify-between gap-3 border-t border-line-1 px-5 py-4">
           <span className="text-tiny font-medium text-muted-2">{t('Size')}</span>
-          <span className="text-control text-ink tabular-nums">
+          <span className="text-control text-ink font-mono tabular-nums">
             {block.w} × {block.h}
           </span>
         </div>
@@ -624,7 +624,7 @@ export function AddPanel({
                   <span className="truncate text-control font-medium text-ink">
                     {t(KINDS[one].name)}
                   </span>
-                  <span className="flex-none text-tiny text-muted-2 tabular-nums">
+                  <span className="flex-none text-tiny text-muted-2 font-mono tabular-nums">
                     {KINDS[one].size[0]} × {KINDS[one].size[1]}
                   </span>
                 </span>
@@ -665,7 +665,7 @@ export function AddPanel({
         )}
 
         <div className="flex items-center justify-between gap-3 border-t border-line-1 px-[26px] py-4">
-          <span className="text-note font-medium text-muted-2 tabular-nums">
+          <span className="text-note font-medium text-muted-2 font-mono tabular-nums">
             {t(shape.name)} · {shape.size[0]} × {shape.size[1]}
           </span>
           <span className="flex gap-2.5">

@@ -17,6 +17,10 @@
      and a typeface that arrives late is a window that reflows in front of somebody. */
   --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
 
+  /* The face every changing figure is set in. A frame rate that redraws once a second in a
+     proportional face moves the label beside it; in this one the column stands still. */
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
   --color-base: #08080b;
   --color-sunk: #06060a;
   --color-sidebar: rgba(12, 12, 18, 0.72);

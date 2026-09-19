@@ -619,7 +619,7 @@ function Home(): JSX.Element {
               </span>
               <span className="flex-1" />
               {chosen && (
-                <span className="text-fine text-ink-3 tabular-nums">
+                <span className="text-fine text-ink-3 font-mono tabular-nums">
                   {titleOf(chosen, ground)} | {chosen.w} × {chosen.h}
                 </span>
               )}
@@ -647,12 +647,12 @@ function Home(): JSX.Element {
                     ? t('Sharing this machine')
                     : t('Not shared')}
               </span>
-              <span className="truncate text-fine text-dim tabular-nums">{specs}</span>
+              <span className="truncate text-fine text-dim font-mono tabular-nums">{specs}</span>
               <span className="flex-1" />
               <button type="button" className="btn-secondary" onClick={prism.openTransfers}>
                 {t('Files')}
                 {stream.moving.length > 0 && (
-                  <span className="ml-2 rounded-pill bg-mint px-1.5 text-label font-semibold text-on-light tabular-nums">
+                  <span className="ml-2 rounded-pill bg-mint px-1.5 text-label font-semibold text-on-light font-mono tabular-nums">
                     {stream.moving.length}
                   </span>
                 )}

@@ -126,7 +126,7 @@ function Head({ title, trailing }: { title: string; trailing?: ReactNode }): JSX
     <div className="flex flex-none items-center justify-between gap-3">
       <span className="truncate text-fine font-medium text-muted-2">{title}</span>
       {trailing !== undefined && (
-        <span className="flex-none text-tiny text-dim tabular-nums">{trailing}</span>
+        <span className="flex-none text-tiny text-dim font-mono tabular-nums">{trailing}</span>
       )}
     </div>
   );
@@ -153,7 +153,7 @@ function Pair({
   return (
     <div className="flex items-center justify-between gap-3">
       <span className="truncate text-note text-ink-3">{name}</span>
-      <span className={`flex-none text-note tabular-nums ${tone}`}>{value}</span>
+      <span className={`flex-none text-note font-mono tabular-nums ${tone}`}>{value}</span>
     </div>
   );
 }
@@ -210,7 +210,7 @@ function Machine({ block, ground }: { block: Block; ground: Ground }): JSX.Eleme
           <span className="truncate">{name}</span>
         </span>
         <span
-          className={`truncate text-note tabular-nums ${how === 'off' ? 'text-dim' : 'text-ink-3'}`}
+          className={`truncate text-note font-mono tabular-nums ${how === 'off' ? 'text-dim' : 'text-ink-3'}`}
         >
           {machineLine(key, ground, block.fields)}
         </span>
@@ -265,7 +265,7 @@ function Machines({ block, ground }: { block: Block; ground: Ground }): JSX.Elem
                   <span className="truncate">{device.label || device.publicKey.slice(0, 8)}</span>
                 </span>
                 <span
-                  className={`flex-none text-fine tabular-nums ${TONE[how]} ${
+                  className={`flex-none text-fine font-mono tabular-nums ${TONE[how]} ${
                     block.fields.includes('rtt') ? '' : 'hidden'
                   }`}
                 >
@@ -314,7 +314,7 @@ function Mine({ block, ground }: { block: Block; ground: Ground }): JSX.Element 
       </div>
 
       <div className="flex items-center justify-between gap-3">
-        <span className="min-w-0 flex-1 truncate text-fine text-dim tabular-nums">
+        <span className="min-w-0 flex-1 truncate text-fine text-dim font-mono tabular-nums">
           {block.fields.includes('screen') ? ground.specs : ''}
         </span>
         <button
@@ -377,7 +377,7 @@ function Sessions({ block, ground }: { block: Block; ground: Ground }): JSX.Elem
                 <Platform platform={ground.platformOf(one.host)} size={15} />
                 <span className="truncate">{ground.nameOf(one.host)}</span>
               </span>
-              <span className="flex-none text-fine text-dim tabular-nums">
+              <span className="flex-none text-fine text-dim font-mono tabular-nums">
                 {block.fields.includes('started') && when(one.endedAt)}
                 {block.fields.includes('length') && `  |  ${span(one.endedAt - one.startedAt)}`}
                 {block.fields.includes('rtt') && `  |  ${latency(one.rttMs)} ms`}
@@ -458,7 +458,7 @@ function Link({ block, ground }: { block: Block; ground: Ground }): JSX.Element 
       <Head title={block.label || t('Connection')} />
 
       <div className="flex items-baseline gap-2.5">
-        <span className="text-[38px] leading-none font-semibold tracking-[-1px] text-ink tabular-nums">
+        <span className="text-[38px] leading-none font-semibold tracking-[-1px] text-ink font-mono tabular-nums">
           {stats ? latency(stats.rttMs) : '—'}
         </span>
         <span className="text-note font-medium text-muted-2">{t('ms round trip')}</span>
