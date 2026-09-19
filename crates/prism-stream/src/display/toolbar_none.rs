@@ -17,8 +17,8 @@ use sdl3::video::Window;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Tool {
-    /// Hand the pointer and the keyboard to the machine being watched, or take them back.
-    Control,
+    /// Step through what this machine's keyboard and pointer are doing to the far one.
+    Hands,
     /// Take the window down one step: out of full screen, or into the Dock.
     Shrink,
     /// Fill the screen, and leave it again.
@@ -31,6 +31,44 @@ pub enum Tool {
     Stats,
     /// End the session.
     Disconnect,
+}
+
+/// What this machine's keyboard and pointer are doing to the far one.
+///
+/// The same three stops as on macOS, because the window loop is one loop: only the picture of
+/// them in a title bar is missing here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hands {
+    /// Nothing crosses. The far machine is a picture.
+    Watching,
+    /// Keys and clicks cross, and the pointer points at the picture from this side.
+    Controlling,
+    /// The pointer is caged here and crosses as movement, which is what a game reads.
+    Aiming,
+}
+
+impl Hands {
+    /// The next stop along, wrapping back to watching.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Hands::Watching => Hands::Controlling,
+            Hands::Controlling => Hands::Aiming,
+            Hands::Aiming => Hands::Watching,
+        }
+    }
+
+    /// Whether anything this machine does crosses to the other one.
+    #[must_use]
+    pub fn sends(self) -> bool {
+        !matches!(self, Hands::Watching)
+    }
+
+    /// Whether the pointer is caged here and sent as movement.
+    #[must_use]
+    pub fn caged(self) -> bool {
+        matches!(self, Hands::Aiming)
+    }
 }
 
 /// The controls in a window's title bar, where there are any.
@@ -53,8 +91,8 @@ impl Toolbar {
     }
 
     /// Does nothing, because there is no item to redraw.
-    pub fn set_controlling(&self, controlling: bool) {
-        let _ = controlling;
+    pub fn set_hands(&self, hands: Hands) {
+        let _ = hands;
     }
 
     /// Returns `None`, because there is no menu to choose from.

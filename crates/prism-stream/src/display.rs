@@ -508,39 +508,34 @@ fn choose_a_file(
     }
 }
 
-/// Says that this machine has started controlling the far one, or stopped.
+/// Moves to a stop on the one road this machine's keyboard and pointer travel, and says so.
 ///
-/// One place, because there are two ways to ask — the chord and the toolbar — and the flag the
-/// loop holds and the picture in the title bar have to agree afterwards. Nothing about the
-/// pointer changes here: it stays this machine's, visible and free, and what the flag decides
-/// is only whether where it points is sent on.
-fn announce_control(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
+/// One place, because there are two ways to ask — the chord and the toolbar — and the state the
+/// loop holds, the picture in the title bar and the cage around the pointer all have to agree
+/// afterwards. Caging is done here rather than by the caller for the same reason: a stop that
+/// changed without the cage following it is a cursor nobody can find.
+fn take(
+    hands: toolbar::Hands,
+    bar: Option<&toolbar::Toolbar>,
+    mouse: &sdl3::mouse::MouseUtil,
+    window: &sdl3::video::Window,
+    say: &Reporter,
+) -> toolbar::Hands {
+    mouse.set_relative_mouse_mode(window, hands.caged());
+
     if let Some(bar) = bar {
-        bar.set_controlling(on);
+        bar.set_hands(hands);
     }
 
-    say.note(if on {
-        "display: controlling this machine, control option to stop"
-    } else {
-        "display: watching only, control option to take control"
+    say.note(match hands {
+        toolbar::Hands::Watching => "display: watching only, control option cycles",
+        toolbar::Hands::Controlling => "display: controlling this machine, control option cycles",
+        toolbar::Hands::Aiming => {
+            "display: the pointer is caged and sent as movement, control option cycles"
+        }
     });
-}
 
-/// Says that the pointer has been caged in this window, or let go.
-///
-/// Worth saying plainly either way. Caging takes the cursor off this machine, and somebody who
-/// did it by accident is looking at a desktop with no pointer on it; the line is where the way
-/// out is written down.
-fn announce_aim(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
-    if let Some(bar) = bar {
-        bar.set_aiming(on);
-    }
-
-    say.note(if on {
-        "display: the pointer is caged and sent as movement, control option to let it go"
-    } else {
-        "display: the pointer is this machine's again"
-    });
+    hands
 }
 
 /// How the stream is to be shown, as against what is to be shown.
@@ -721,16 +716,15 @@ pub fn run(
     // have ended. Given back when this function returns, whatever ends it.
     let _awake = prism_core::power::Awake::hold("Prism is showing another machine");
 
-    // Whether what happens in this window is sent on to the far machine. On from the start,
-    // because nothing is seized to make it so: the pointer stays this machine's, visible and
-    // free to leave the window, and only where it points inside it goes across.
-    let mut controlling = capture_input;
-
-    // Whether the pointer is caged in this window and sent on as movement rather than as a
-    // place. Off from the start: it takes the cursor away from this machine, and nothing should
-    // do that until somebody asks. What asks for it is a game — anything that hides the cursor
-    // and steers by how far the mouse moved.
-    let mut aiming = false;
+    // What this machine's keyboard and pointer are doing to the far one. Controlling from the
+    // start on a session that may, because nothing is seized to get there: the pointer stays
+    // this machine's, visible and free to leave the window. Never caged from the start — that
+    // takes the cursor away, and nothing should do that until somebody asks.
+    let mut hands = if capture_input {
+        toolbar::Hands::Controlling
+    } else {
+        toolbar::Hands::Watching
+    };
     let mouse = sdl.mouse();
 
     // The size the pointer's coordinates are measured against, which is the window's own and
@@ -758,7 +752,7 @@ pub fn run(
     let mut told_moving: Vec<crate::ipc::Moving> = Vec::new();
 
     if capture_input {
-        announce_control(bar.as_ref(), say, controlling);
+        hands = take(hands, bar.as_ref(), &mouse, &window, say);
     }
 
     'main: loop {
@@ -771,32 +765,14 @@ pub fn run(
 
         while let Some(tool) = bar.as_ref().and_then(toolbar::Toolbar::pressed) {
             match tool {
-                toolbar::Tool::Control if capture_input => {
-                    controlling = !controlling;
-
-                    // Letting go of control lets go of the pointer with it. A caged cursor on
-                    // a session that has stopped sending anywhere is a cursor nobody can find.
-                    if !controlling && aiming {
-                        aiming = false;
-                        mouse.set_relative_mouse_mode(&window, false);
-                    }
-
-                    announce_control(bar.as_ref(), say, controlling);
-                }
-                // The pointer goes to the far machine as movement rather than as a place, and
-                // disappears from this one. For a game that hides the cursor and steers by how
-                // far the mouse moved, which is every first-person one.
-                toolbar::Tool::Aim if capture_input && controlling => {
-                    aiming = !aiming;
-                    mouse.set_relative_mouse_mode(&window, aiming);
-                    announce_aim(bar.as_ref(), say, aiming);
-                }
-                toolbar::Tool::Aim => {
-                    say.note("display: take control first, then the pointer can be caged");
+                // Watching, then controlling, then aiming, then back to watching. Each stop
+                // does what the one before it did and one thing more.
+                toolbar::Tool::Hands if capture_input => {
+                    hands = take(hands.next(), bar.as_ref(), &mouse, &window, say);
                 }
                 // Asked for on a session that is only watching. Said rather than ignored,
                 // because a control that does nothing when pressed is a fault to look for.
-                toolbar::Tool::Control => {
+                toolbar::Tool::Hands => {
                     say.note(
                         "display: this session is watching only, so there is nothing to control",
                     );
@@ -948,17 +924,20 @@ pub fn run(
                 break 'main;
             }
             if capture_input && is_control_toggle(&event) {
-                controlling = !controlling;
-
-                // The one chord everybody reaches for to get their own machine back has to
-                // get the cursor back too, since a caged one is the half that is hardest to
-                // undo without it.
-                if !controlling && aiming {
-                    aiming = false;
-                    mouse.set_relative_mouse_mode(&window, false);
-                }
-
-                announce_control(bar.as_ref(), say, controlling);
+                // The chord everybody reaches for to get their own machine back goes straight
+                // to watching rather than one stop along. From aiming, one stop would leave the
+                // keyboard still crossing — and the hand that pressed this wanted out.
+                hands = take(
+                    if hands.sends() {
+                        toolbar::Hands::Watching
+                    } else {
+                        toolbar::Hands::Controlling
+                    },
+                    bar.as_ref(),
+                    &mouse,
+                    &window,
+                    say,
+                );
                 continue;
             }
             if resized(&event) {
@@ -971,7 +950,7 @@ pub fn run(
                 drawable_height = height;
                 area = window.size();
             }
-            if capture_input && (controlling || is_release(&event)) {
+            if capture_input && (hands.sends() || is_release(&event)) {
                 let shown = shown_in(picture, area);
 
                 if let Some(sender) = input_slot.get() {
@@ -979,14 +958,14 @@ pub fn run(
                     // lands where it was aimed. Not while the pointer is caged: there is no
                     // place then, and sending one would throw the far pointer to wherever in
                     // this window the caged cursor happens to be held.
-                    if controlling && !aiming {
+                    if hands.sends() && !hands.caged() {
                         if let Some(place) = where_clicked(&event, shown) {
                             if sender.send(place).is_ok() {
                                 sent_input += 1;
                             }
                         }
                     }
-                    if let Some(input) = to_input_event(&event, shown, aiming) {
+                    if let Some(input) = to_input_event(&event, shown, hands.caged()) {
                         if let Ok(stamped) = sender.send(input) {
                             sent_input += 1;
                             predict(&mut cursor, stamped, input);
@@ -1049,7 +1028,7 @@ pub fn run(
                             shown,
                             missed,
                             clock_offset_us: clock_offset,
-                            control: capture_input.then_some(controlling),
+                            control: capture_input.then_some(hands.sends()),
                             picture,
                             drawable: (drawable_width, drawable_height),
                         },
@@ -1213,6 +1192,26 @@ mod tests {
         let sent = super::to_input_event(&motion(639.5, 375.5, 12.0, -4.0), filled(), true);
 
         assert_eq!(sent, Some(InputEvent::MouseMove { dx: 12, dy: -4 }));
+    }
+
+    #[test]
+    fn the_one_control_goes_round_and_comes_back() {
+        use crate::display::toolbar::Hands;
+
+        assert_eq!(Hands::Watching.next(), Hands::Controlling);
+        assert_eq!(Hands::Controlling.next(), Hands::Aiming);
+        assert_eq!(Hands::Aiming.next(), Hands::Watching);
+    }
+
+    #[test]
+    fn each_stop_does_what_the_one_before_it_did() {
+        use crate::display::toolbar::Hands;
+
+        // Which is what makes them one control rather than two switches: there is no state
+        // where the pointer is caged but nothing is being sent.
+        assert!(!Hands::Watching.sends() && !Hands::Watching.caged());
+        assert!(Hands::Controlling.sends() && !Hands::Controlling.caged());
+        assert!(Hands::Aiming.sends() && Hands::Aiming.caged());
     }
 
     #[test]
