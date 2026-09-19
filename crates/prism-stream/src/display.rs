@@ -513,10 +513,13 @@ fn announce_control(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
 
 /// How the stream is to be shown, as against what is to be shown.
 ///
-/// Five numbers that all answer the same question — what this window does with what arrives —
-/// and passing them one at a time made the call a row of bare literals nobody could read.
-#[derive(Debug, Clone, Copy)]
+/// A handful of values that all answer the same question — what this window does with what
+/// arrives — and passing them one at a time made the call a row of bare literals nobody could
+/// read.
+#[derive(Debug, Clone)]
 pub struct Shown {
+    /// What the window is called: the machine being watched, then the application.
+    pub title: String,
     /// How large to open the window.
     pub width: u32,
     /// How large to open the window.
@@ -549,6 +552,7 @@ pub fn run(
     talk: &crate::ipc::Talkback,
 ) -> Result<(), Box<dyn Error>> {
     let Shown {
+        title,
         width,
         height,
         pacing_us,
@@ -563,7 +567,7 @@ pub fn run(
     // and the compositor doubles it on a Retina display, which is a picture that arrives sharp
     // and is shown soft.
     let mut window = video
-        .window("Prism", width, height)
+        .window(&title, width, height)
         .position_centered()
         .resizable()
         .high_pixel_density()

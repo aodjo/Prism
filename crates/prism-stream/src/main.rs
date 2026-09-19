@@ -179,6 +179,7 @@ fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(),
     display::run(
         config,
         display::Shown {
+            title: titled(&start.label),
             width: start.width,
             height: start.height,
             pacing_us: if start.smooth { SMOOTH_PACING_US } else { 0 },
@@ -200,6 +201,20 @@ fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(),
     let _ = (start, say, talk);
 
     Err("this build has no window to show a stream in".to_owned())
+}
+
+/// What to call the window.
+///
+/// The machine being watched first, because that is what tells one of these windows from
+/// another when three are open; the application second, because that is what tells them from
+/// everything else on the desktop. A shell that sent no name leaves the application alone,
+/// which is what every build before this one showed.
+fn titled(label: &str) -> String {
+    if label.is_empty() {
+        return "Prism".to_owned();
+    }
+
+    format!("{label} - Prism")
 }
 
 /// Turns what the session says into what the shell reads.
@@ -236,4 +251,21 @@ fn translate(report: Report) -> ipc::Event {
 /// Returns a dimension, or zero when it means "whatever the host has".
 fn capped(size: u16) -> u32 {
     if size < 65_534 { u32::from(size) } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_is_named_after_the_machine_it_shows() {
+        assert_eq!(titled("작업실 맥"), "작업실 맥 - Prism");
+    }
+
+    #[test]
+    fn a_shell_that_sent_no_name_leaves_the_application_alone() {
+        // Which is every build before the shell started sending one, and every run from the
+        // headless client, where there is no account to ask what a key is called.
+        assert_eq!(titled(""), "Prism");
+    }
 }

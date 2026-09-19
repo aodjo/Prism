@@ -30,6 +30,14 @@ pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
 pub struct Start {
     /// The host to watch, as pairing recorded it: a stored name or a hex public key.
     pub host: String,
+    /// What that machine is called, for the window's title.
+    ///
+    /// The account's label rather than the key, because the title bar is read by somebody with
+    /// several of these windows open and a row of identical ones named after the application
+    /// tells them nothing. Empty from a shell that never said, and then the window is titled
+    /// after the application alone, as it was.
+    #[serde(default)]
+    pub label: String,
     /// Where the host can be reached directly, when that is known.
     ///
     /// `None` means find it through the rendezvous server, which is what a host behind a
