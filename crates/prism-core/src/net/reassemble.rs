@@ -131,13 +131,17 @@ impl SliceState {
     fn accept_parity(&mut self, packet: &FecPacket<'_>) -> bool {
         let data_count = u16::from(packet.data_count);
 
-        if !self.seen {
-            self.begin(data_count);
-        } else if self.pkt_count != data_count {
+        // Judged before `begin`, not after. Establishing the slice's shape from a packet that
+        // is then refused leaves the slice marked seen with a `pkt_count` no real packet can
+        // match, so every genuine packet for it afterwards is counted invalid and the frame
+        // never completes — one short parity packet costing the whole frame.
+        if packet.payload.len() != MAX_VIDEO_PAYLOAD {
             return false;
         }
 
-        if packet.payload.len() != MAX_VIDEO_PAYLOAD {
+        if !self.seen {
+            self.begin(data_count);
+        } else if self.pkt_count != data_count {
             return false;
         }
 
@@ -385,6 +389,13 @@ impl FrameReassembler {
 
     /// Stores a parity shard and attempts recovery, without touching the counters.
     fn push_fec_inner(&mut self, packet: &FecPacket<'_>) -> PushOutcome {
+        // The ceiling the video path applies in `is_plausible`, which this path was missing.
+        // Without it a parity packet sizes `slot.slices` from its own `slice_id`, which is the
+        // enormous table [`MAX_SLICES_PER_FRAME`] exists to stop.
+        if usize::from(packet.slice_id) >= MAX_SLICES_PER_FRAME {
+            return PushOutcome::Invalid;
+        }
+
         if self
             .last_delivered
             .is_some_and(|last| !is_newer(packet.frame_id, last))

@@ -40,6 +40,29 @@ sdl3 = { version = "0.18", features = ["build-from-source-static"], optional = t
 sdl3-sys = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSToolbar",
+    "NSToolbarItem",
+    "NSWindow",
+    "NSImage",
+    "NSResponder",
+    "NSApplication",
+    "NSGraphics",
+    "NSView",
+    "NSControl",
+    "NSButton",
+    "NSButtonCell",
+    "NSCell",
+    "NSBox",
+    "NSTextField",
+    "NSText",
+    "NSColor",
+    "NSFont",
+    "NSAppearance",
+    "objc2-core-foundation",
+] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "objc2-metal"] }
 objc2-metal = { version = "0.3", features = ["MTLPixelFormat"] }
 

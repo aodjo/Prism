@@ -161,11 +161,23 @@ fn the_backdrop_behind_the_statistics_is_actually_painted() {
             );
     }
 
-    // A corner well away from any glyph, so what is there is the panel and nothing else.
-    let corner = ((height - 2) * width + (width - 2)) * 4;
+    // The far end of the line's own row, so what is there is the panel and nothing else. The
+    // panel covers the lines there are rather than the whole bitmap, which is why this samples
+    // beside the text rather than in the corner furthest from it.
+    let beside = (width + (width - 2)) * 4;
     assert!(
-        pixels[corner + 3] > 100,
+        pixels[beside + 3] > 100,
         "the panel behind the text should be mostly opaque, got rgba {:?}",
-        &pixels[corner..corner + 4]
+        &pixels[beside..beside + 4]
+    );
+
+    // And below the last line there is nothing, so a session with little to say does not put
+    // a black box over the picture the size of the most it could ever say.
+    let under = ((height - 2) * width + (width - 2)) * 4;
+    assert_eq!(
+        pixels[under + 3],
+        0,
+        "the bitmap past the last line should be clear, got rgba {:?}",
+        &pixels[under..under + 4]
     );
 }

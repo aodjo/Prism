@@ -52,8 +52,14 @@ impl AckTracker {
             // The old newest becomes an ordinary member of the history, one place below the
             // new arrival. A jump of more than the window empties the bitmap, which is
             // correct: nothing in it can still be described.
-            self.bitmap = if advance >= HISTORY {
+            self.bitmap = if advance > HISTORY {
                 0
+            } else if advance == HISTORY {
+                // A jump of exactly the window keeps nothing older, but the frame being left
+                // lands at the far edge, which the report below still describes. Clearing it
+                // with the rest told the host a frame was lost that had in fact arrived, and
+                // cost it a reference it did not need to give up.
+                1u32 << (HISTORY - 1)
             } else {
                 let shifted = self.bitmap << advance;
                 shifted | (1u32 << (advance - 1))

@@ -72,6 +72,12 @@ pub struct Settings {
     /// somebody moves it. Setting it is how a machine joins or leaves the development line
     /// without being reinstalled.
     pub update_channel: String,
+    /// Which language the windows are in: `en`, `ko`, or empty to follow the machine.
+    ///
+    /// Empty by default, because the machine already knows what language its owner reads and
+    /// asking again is asking a question that has been answered.
+    #[serde(default)]
+    pub language: String,
     /// Whether somebody has been all the way through setup on this machine.
     ///
     /// Needed because the permissions step cannot be finished in one sitting: macOS only reads a
@@ -97,6 +103,13 @@ impl Default for Settings {
     /// it makes no difference, since the port is discovered either way — but without one, a
     /// machine on an operating-system-chosen port is a machine nobody can reach: the other end
     /// has no way to learn a number nothing told it.
+    ///
+    /// The bitrate is where a session starts rather than what it is held to: congestion control
+    /// takes it as its opening figure and moves from there, down as fast as a path needs and up
+    /// again when it will carry more. So the number to choose is what a link that can afford it
+    /// should open at, not the least any link might manage — and a whole desktop at sixty frames
+    /// is soft at twenty-four megabits in a way a person reads as a bad picture rather than as a
+    /// setting.
     fn default() -> Self {
         Self {
             rendezvous: PRISM_RENDEZVOUS.to_owned(),
@@ -104,7 +117,7 @@ impl Default for Settings {
             nickname: String::new(),
             bind: "0.0.0.0:47200".to_owned(),
             fps: 60,
-            bitrate_bps: 24_000_000,
+            bitrate_bps: 40_000_000,
             sharing: false,
             control: true,
             smooth: false,
@@ -112,6 +125,7 @@ impl Default for Settings {
             pinned: Vec::new(),
             auto_update: true,
             update_channel: String::new(),
+            language: String::new(),
             setup_finished: false,
         }
     }
@@ -186,7 +200,12 @@ pub fn save(settings: &Settings) -> Result<(), String> {
 
     let text = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
 
-    fs::write(path, format!("{text}\n")).map_err(|error| error.to_string())
+    // Replaced rather than written over. `load` cannot tell a file a power cut left half
+    // written from one that was never there, so a truncated write does not read as a bad
+    // settings file — it reads as a machine that has never been set up, and comes back with
+    // the setup window, no nickname, and sharing off.
+    prism_core::store::replace(&path, format!("{text}\n").as_bytes())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

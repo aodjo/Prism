@@ -21,7 +21,7 @@ use crate::capture::{CaptureConfig, CaptureError};
 use crate::encode::EncoderConfig;
 use crate::encode::nv12::{Bgra2Nv12, Nv12Texture};
 use crate::encode::nvenc::NvencEncoder;
-use crate::encode::pump::{CAPTURE_TIMEOUT, PumpConfig, Pumped, after_send};
+use crate::encode::pump::{PumpConfig, Pumped, REPEAT_INTERVAL, after_send};
 use crate::net::sender::SliceSender;
 
 /// How many slices NVENC cuts each frame into.
@@ -124,18 +124,28 @@ impl ScreenPump {
 
     /// Captures one frame, encodes it, and sends its slices.
     ///
+    /// A turn where the compositor delivered nothing sends the screen as it last was, so a
+    /// still machine is a still picture rather than no picture.
+    ///
     /// # Errors
     ///
     /// Returns a message if the conversion or the encoder fails. A socket that has lost its
     /// client is reported as [`Pumped::PeerGone`] rather than as an error.
     pub fn pump(&mut self, sender: &mut SliceSender, adaptive: bool) -> Result<Pumped, String> {
-        let Some(captured) = self.capture.poll(CAPTURE_TIMEOUT) else {
-            return Ok(Pumped::Idle);
-        };
+        // Waiting the whole repeat interval is what makes a turn with nothing new the turn
+        // that sends the screen again: this encoder hands a frame back as it takes one, so
+        // unlike the asynchronous one there is never a frame trapped inside it waiting for a
+        // successor before it can come out.
+        let fresh = self.capture.poll(REPEAT_INTERVAL);
 
-        let Ok(bgra) = captured.texture() else {
-            return Ok(Pumped::Dropped);
-        };
+        // A still screen delivers nothing, and the conversion target still holds whatever the
+        // screen last was, so a turn with nothing new encodes that again rather than sending
+        // silence. Somebody who starts watching a machine nobody is touching would otherwise
+        // sit in front of a black window until a mouse moved on the far end. Nothing but the
+        // first turn can do this: there is no picture to repeat before one has arrived.
+        if fresh.is_none() && self.submitted == 0 {
+            return Ok(Pumped::Idle);
+        }
 
         let capture_ts_us = crate::clock::now_us();
 
@@ -157,9 +167,15 @@ impl ScreenPump {
         // the Windows path was missing while the macOS one had it.
         let force_idr = self.submitted == 0 || sender.take_keyframe_request();
 
-        self.converter
-            .convert(&bgra, &self.target)
-            .map_err(|err| err.to_string())?;
+        if let Some(captured) = fresh {
+            let Ok(bgra) = captured.texture() else {
+                return Ok(Pumped::Dropped);
+            };
+
+            self.converter
+                .convert(&bgra, &self.target)
+                .map_err(|err| err.to_string())?;
+        }
 
         let frame = self
             .encoder

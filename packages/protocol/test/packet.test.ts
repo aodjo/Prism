@@ -11,6 +11,7 @@ import {
   CONTROL_HEADER_LEN,
   CURSOR_POSITION_LEN,
   FEC_HEADER_LEN,
+  GOODBYE_LEN,
   MAX_FEC_PAYLOAD,
   MAX_PLAINTEXT_SIZE,
   SEAL_OVERHEAD,
@@ -33,16 +34,46 @@ import {
   decodeCursorPosition,
   decodeFecPacket,
   decodeFeedbackPacket,
+  decodeGoodbye,
   decodeInputPacket,
   decodeVideoPacket,
   encodeClockPing,
   encodeClockPong,
   encodeCursorPosition,
   encodeFecPacket,
+  encodeGoodbye,
   sliceLenOf,
   encodeFeedbackPacket,
   encodeInputPacket,
   encodeVideoPacket,
+  FILE_ANSWER_LEN,
+  FILE_ASK_FIXED_LEN,
+  FILE_CHUNK_HEADER_LEN,
+  FILE_ENTRY_FIXED_LEN,
+  FILE_HEADER_LEN,
+  FILE_LISTING_FIXED_LEN,
+  FILE_OFFER_FIXED_LEN,
+  FILE_REPORT_LEN,
+  FileRefusal,
+  FileType,
+  MAX_FILE_NAME,
+  MAX_FILE_PAYLOAD,
+  decodeFileAnswer,
+  decodeFileAsk,
+  decodeFileChunk,
+  decodeFileList,
+  decodeFileListing,
+  decodeFileOffer,
+  decodeFileReport,
+  encodeFileAnswer,
+  encodeFileAsk,
+  encodeFileChunk,
+  encodeFileList,
+  encodeFileListing,
+  encodeFileOffer,
+  encodeFileReport,
+  fileTypeOf,
+  plainFileName,
 } from '../src/index.js';
 
 /**
@@ -100,7 +131,18 @@ describe('constants match the shared vectors', () => {
     expect(ControlType.ClockPong).toBe(vectors.controlTypes.clockPong);
     expect(CURSOR_POSITION_LEN).toBe(vectors.constants.cursorPositionLen);
     expect(ControlType.CursorPosition).toBe(vectors.controlTypes.cursorPosition);
+    expect(GOODBYE_LEN).toBe(vectors.constants.goodbyeLen);
+    expect(ControlType.Goodbye).toBe(vectors.controlTypes.goodbye);
   });
+});
+
+describe('goodbyes', () => {
+  for (const vector of vectors.goodbyes) {
+    it(`round-trips ${vector.name}`, () => {
+      expect(bytesToHex(encodeGoodbye())).toBe(vector.hex);
+      expect(() => decodeGoodbye(hexToBytes(vector.hex))).not.toThrow();
+    });
+  }
 });
 
 describe('input packets', () => {
@@ -110,6 +152,7 @@ describe('input packets', () => {
     expect(InputKind.MouseButton).toBe(vectors.inputKinds.mouseButton);
     expect(InputKind.MouseScroll).toBe(vectors.inputKinds.mouseScroll);
     expect(InputKind.Key).toBe(vectors.inputKinds.key);
+    expect(InputKind.MouseTo).toBe(vectors.inputKinds.mouseTo);
     expect(MouseButton.Left).toBe(vectors.mouseButtons.left);
   });
 
@@ -124,6 +167,7 @@ describe('input packets', () => {
         event = { kind: InputKind.MouseScroll as const, dx: x, dy: y };
       else if (kind === InputKind.MouseButton)
         event = { kind: InputKind.MouseButton as const, button: x as MouseButton, pressed };
+      else if (kind === InputKind.MouseTo) event = { kind: InputKind.MouseTo as const, x, y };
       else event = { kind: InputKind.Key as const, usage: x, pressed };
 
       const packet = { originTsUs: BigInt(vector.fields.originTsUs), event };
@@ -139,6 +183,21 @@ describe('input packets', () => {
     const bytes = hexToBytes(vectors.inputPackets[1]!.hex);
     bytes[10] = 9;
     expect(() => decodeInputPacket(bytes)).toThrow(PrismProtocolError);
+  });
+
+  it('refuses to aim the pointer off the screen', () => {
+    // Packed into two bytes as it stands, 65536 would wrap to zero and put the pointer on the
+    // opposite edge from the one it was aimed at.
+    for (const x of [-1, 65536, 0.5]) {
+      expect(
+        () =>
+          encodeInputPacket({
+            originTsUs: 0n,
+            event: { kind: InputKind.MouseTo, x, y: 0 },
+          }),
+        String(x),
+      ).toThrow(PrismProtocolError);
+    }
   });
 });
 
@@ -362,12 +421,24 @@ function decodeByChannel(bytes: Uint8Array): void {
       const type = controlTypeOf(bytes);
       if (type === ControlType.ClockPing) decodeClockPing(bytes);
       else if (type === ControlType.CursorPosition) decodeCursorPosition(bytes);
+      else if (type === ControlType.Goodbye) decodeGoodbye(bytes);
       else decodeClockPong(bytes);
       return;
     }
     case Channel.Audio:
       decodeAudioPacket(bytes);
       return;
+    case Channel.File: {
+      const type = fileTypeOf(bytes);
+      if (type === FileType.Offer) decodeFileOffer(bytes);
+      else if (type === FileType.Answer) decodeFileAnswer(bytes);
+      else if (type === FileType.Chunk) decodeFileChunk(bytes);
+      else if (type === FileType.Report) decodeFileReport(bytes);
+      else if (type === FileType.List) decodeFileList(bytes);
+      else if (type === FileType.Listing) decodeFileListing(bytes);
+      else decodeFileAsk(bytes);
+      return;
+    }
   }
 }
 
@@ -496,11 +567,151 @@ describe('malformed packets are rejected', () => {
       const bytes = hexToBytes(vector.hex);
       const tag = bytes.at(0);
 
-      if (tag === undefined || tag > Channel.Fec) {
+      if (tag === undefined || tag > Channel.File) {
         continue;
       }
 
       expect(() => channelOf(bytes), `${vector.name} names a known channel`).not.toThrow();
     }
+  });
+});
+
+describe('file channel', () => {
+  it('agrees with the vectors about its constants', () => {
+    expect(Channel.File).toBe(vectors.channels.file);
+    expect(FileType.Offer).toBe(vectors.fileTypes.offer);
+    expect(FileType.Answer).toBe(vectors.fileTypes.answer);
+    expect(FileType.Chunk).toBe(vectors.fileTypes.chunk);
+    expect(FileType.Report).toBe(vectors.fileTypes.report);
+    expect(FileType.List).toBe(vectors.fileTypes.list);
+    expect(FileType.Listing).toBe(vectors.fileTypes.listing);
+    expect(FileType.Ask).toBe(vectors.fileTypes.ask);
+
+    expect(FileRefusal.Declined).toBe(vectors.fileRefusals.declined);
+    expect(FileRefusal.TooLarge).toBe(vectors.fileRefusals.tooLarge);
+    expect(FileRefusal.BadName).toBe(vectors.fileRefusals.badName);
+    expect(FileRefusal.NotWritable).toBe(vectors.fileRefusals.notWritable);
+
+    expect(FILE_HEADER_LEN).toBe(vectors.constants.fileHeaderLen);
+    expect(FILE_CHUNK_HEADER_LEN).toBe(vectors.constants.fileChunkHeaderLen);
+    expect(MAX_FILE_PAYLOAD).toBe(vectors.constants.maxFilePayload);
+    expect(FILE_OFFER_FIXED_LEN).toBe(vectors.constants.fileOfferFixedLen);
+    expect(FILE_ANSWER_LEN).toBe(vectors.constants.fileAnswerLen);
+    expect(FILE_REPORT_LEN).toBe(vectors.constants.fileReportLen);
+    expect(FILE_LISTING_FIXED_LEN).toBe(vectors.constants.fileListingFixedLen);
+    expect(FILE_ENTRY_FIXED_LEN).toBe(vectors.constants.fileEntryFixedLen);
+    expect(FILE_ASK_FIXED_LEN).toBe(vectors.constants.fileAskFixedLen);
+    expect(MAX_FILE_NAME).toBe(vectors.constants.maxFileName);
+  });
+
+  for (const vector of vectors.fileOffers) {
+    it(`encodes and decodes the ${vector.name} offer`, () => {
+      const offer = {
+        id: vector.fields.id,
+        size: BigInt(vector.fields.size),
+        chunks: vector.fields.chunks,
+        name: vector.fields.name,
+      };
+      const bytes = encodeFileOffer(offer);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(decodeFileOffer(hexToBytes(vector.hex))).toEqual(offer);
+    });
+  }
+
+  for (const vector of vectors.fileAnswers) {
+    it(`encodes and decodes the ${vector.name} answer`, () => {
+      const answer = {
+        id: vector.fields.id,
+        accepted: vector.fields.accepted,
+        refusal: vector.fields.refusal as FileRefusal,
+      };
+      const bytes = encodeFileAnswer(answer);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(bytes.length).toBe(FILE_ANSWER_LEN);
+      expect(decodeFileAnswer(hexToBytes(vector.hex))).toEqual(answer);
+    });
+  }
+
+  for (const vector of vectors.fileChunks) {
+    it(`encodes and decodes the ${vector.name} chunk`, () => {
+      const chunk = {
+        id: vector.fields.id,
+        index: vector.fields.index,
+        payload: hexToBytes(vector.payloadHex),
+      };
+      const bytes = encodeFileChunk(chunk);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(decodeFileChunk(hexToBytes(vector.hex))).toEqual(chunk);
+    });
+  }
+
+  for (const vector of vectors.fileReports) {
+    it(`encodes and decodes the ${vector.name} report`, () => {
+      const report = {
+        id: vector.fields.id,
+        have: vector.fields.have,
+        arrived: vector.fields.arrived,
+      };
+      const bytes = encodeFileReport(report);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(bytes.length).toBe(FILE_REPORT_LEN);
+      expect(decodeFileReport(hexToBytes(vector.hex))).toEqual(report);
+    });
+  }
+
+  for (const vector of vectors.fileLists) {
+    it(`encodes and decodes the ${vector.name} request`, () => {
+      expect(bytesToHex(encodeFileList())).toBe(vector.hex);
+      expect(() => decodeFileList(hexToBytes(vector.hex))).not.toThrow();
+    });
+  }
+
+  for (const vector of vectors.fileListings) {
+    it(`encodes and decodes the ${vector.name} listing`, () => {
+      const listing = {
+        more: vector.fields.more,
+        files: vector.fields.files.map((file) => ({
+          size: BigInt(file.size),
+          name: file.name,
+        })),
+      };
+      const bytes = encodeFileListing(listing);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(decodeFileListing(hexToBytes(vector.hex))).toEqual(listing);
+    });
+  }
+
+  for (const vector of vectors.fileAsks) {
+    it(`encodes and decodes the ${vector.name} ask`, () => {
+      const ask = { name: vector.fields.name };
+      const bytes = encodeFileAsk(ask);
+
+      expect(bytesToHex(bytes)).toBe(vector.hex);
+      expect(decodeFileAsk(hexToBytes(vector.hex))).toEqual(ask);
+    });
+  }
+
+  it('refuses to send a name that would be written somewhere else', () => {
+    for (const name of ['', '.', '..', 'a/b', 'a\\b', 'a\0b']) {
+      expect(plainFileName(name), name).toBe(false);
+      expect(() => encodeFileAsk({ name }), name).toThrow(PrismProtocolError);
+    }
+  });
+
+  it('carries a name that is not spelled in this alphabet', () => {
+    const offer = { id: 1, size: 4n, chunks: 1, name: '보고서.txt' };
+
+    expect(decodeFileOffer(encodeFileOffer(offer))).toEqual(offer);
+  });
+
+  it('refuses a chunk larger than one packet holds', () => {
+    expect(() =>
+      encodeFileChunk({ id: 0, index: 0, payload: new Uint8Array(MAX_FILE_PAYLOAD + 1) }),
+    ).toThrow(PrismProtocolError);
   });
 });

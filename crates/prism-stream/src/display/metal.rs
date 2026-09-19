@@ -17,7 +17,7 @@ use sdl3_sys::metal::{
     SDL_Metal_CreateView, SDL_Metal_DestroyView, SDL_Metal_GetLayer, SDL_MetalView,
 };
 
-use crate::display::{HUD_FONT_SIZE, HUD_HEIGHT, HUD_WIDTH};
+use crate::display::hud_measure;
 
 /// A decoded picture on this platform.
 pub type Picture = prism_core::decode::videotoolbox::DecodedFrame;
@@ -27,12 +27,19 @@ pub fn pts_of(picture: &Picture) -> u64 {
     picture.pts_us
 }
 
+/// Returns how large a picture is, in pixels.
+pub fn size_of(picture: &Picture) -> (u32, u32) {
+    (picture.width, picture.height)
+}
+
 /// The window's drawing surface and everything drawn onto it.
 pub struct Surface {
     view: SDL_MetalView,
     renderer: MetalRenderer,
     overlay: TextOverlay,
     cursor: CursorOverlay,
+    /// Whether the statistics panel is drawn over the picture.
+    stats: bool,
 }
 
 impl Surface {
@@ -42,7 +49,12 @@ impl Surface {
     ///
     /// Returns an error if SDL will not make a Metal view, or if Metal will not build the
     /// renderer, the statistics panel or the cursor.
-    pub fn new(window: &Window, width: u32, height: u32) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        window: &Window,
+        width: u32,
+        height: u32,
+        scale: f64,
+    ) -> Result<Self, Box<dyn Error>> {
         // SAFETY: the window outlives this surface, which is dropped before it.
         let view = unsafe { SDL_Metal_CreateView(window.raw()) };
         if view.is_null() {
@@ -50,7 +62,8 @@ impl Surface {
         }
 
         let renderer = MetalRenderer::new(MTLPixelFormat::BGRA8Unorm)?;
-        let overlay = TextOverlay::new(renderer.device(), HUD_WIDTH, HUD_HEIGHT, HUD_FONT_SIZE)?;
+        let (hud_width, hud_height, hud_font) = hud_measure(scale);
+        let overlay = TextOverlay::new(renderer.device(), hud_width, hud_height, hud_font)?;
         let cursor = CursorOverlay::new(renderer.device())?;
 
         let surface = Self {
@@ -58,6 +71,7 @@ impl Surface {
             renderer,
             overlay,
             cursor,
+            stats: false,
         };
         surface
             .renderer
@@ -89,6 +103,15 @@ impl Surface {
         self.overlay.update(lines);
     }
 
+    /// Says whether the statistics panel is drawn at all.
+    ///
+    /// Off until somebody asks for it. The panel is a black box over the top left of the far
+    /// machine's desktop, which is where its menu bar and its windows' buttons are — a thing
+    /// worth having while a session is being measured, and in the way of somebody working.
+    pub fn show_stats(&mut self, on: bool) {
+        self.stats = on;
+    }
+
     /// Draws one picture with the overlays on top and presents it.
     ///
     /// Returns `false` when the layer had no drawable available, which happens when the
@@ -110,13 +133,19 @@ impl Surface {
         // The cursor comes after the statistics so it draws on top of them. It is the thing
         // being pointed with, and it should never vanish behind a panel.
         let mut quads = [self.overlay.quad(target.0, target.1); 2];
-        let count = match cursor_at {
-            Some(at) => {
-                quads[1] = self.cursor.quad(at, target.0, target.1);
-                2
-            }
-            None => 1,
-        };
+
+        // The statistics quad is already in place; what decides is how many of the array are
+        // drawn. Off, and the cursor takes the first slot instead.
+        let mut count = usize::from(self.stats);
+
+        if let Some(at) = cursor_at {
+            // A place on the far screen, which is the picture and not the window around it.
+            let whole = (target.0 as f32, target.1 as f32);
+            let at = prism_core::render::fit(size_of(picture), whole).to_target(at, whole);
+
+            quads[count] = self.cursor.quad(at, target.0, target.1);
+            count += 1;
+        }
 
         // Taken from the view rather than through `&self`, so the renderer is free to be
         // borrowed mutably for the draw that follows.

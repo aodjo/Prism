@@ -187,6 +187,9 @@ impl HeldKeys {
     }
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use crate::net::packet::InputEvent;
 
 /// Where the pointer is on this machine, and how big the screen holding it is.
@@ -268,6 +271,91 @@ impl Injector for Unsupported {
 
     fn injection_is_landing(&self) -> bool {
         false
+    }
+}
+
+/// How long the pointer stays with the person at this machine after they last moved it.
+///
+/// A second: long enough that somebody reaching for their own mouse is not fought for it by
+/// the machine watching, short enough that the far side has it back as soon as they let go.
+pub const LOCAL_HOLD: Duration = Duration::from_secs(1);
+
+/// When the person at this machine last used its own mouse, in milliseconds since the Unix
+/// epoch, or zero for never.
+///
+/// Told rather than worked out. Whatever can see this machine's own mouse events, and tell them
+/// from the ones injected here — which carry a mark saying so — reports them through
+/// [`note_touch`]: on macOS, the shell's watch on the mouse. Where nothing does, the far side
+/// always has the pointer.
+///
+/// It used to be worked out, from where the pointer was against where the far side had put it.
+/// On a busy machine the pointer trails what it is told by more than a few events, and the gap
+/// read as somebody here moving it — so the far side lost the pointer for as long as it went on
+/// moving, which is to say for good.
+static TOUCHED: AtomicU64 = AtomicU64::new(0);
+
+/// Records that the person at this machine has just used its mouse.
+///
+/// For whatever watches the machine's own events. An injected one must never be reported here:
+/// the far side's hand would then be taking the pointer away from itself.
+pub fn note_touch() {
+    TOUCHED.store(now_ms(), Ordering::Relaxed);
+}
+
+/// Returns whether the person at this machine has used its mouse within `span`.
+#[must_use]
+pub fn touched_within(span: Duration) -> bool {
+    touched_before(TOUCHED.load(Ordering::Relaxed), now_ms(), span)
+}
+
+/// Whether a touch at `touched` is within `span` of `now`, both in milliseconds.
+///
+/// [`touched_within`] without the clock, so the arithmetic can be tested.
+fn touched_before(touched: u64, now: u64, span: Duration) -> bool {
+    touched != 0 && u128::from(now.saturating_sub(touched)) < span.as_millis()
+}
+
+/// The time, in milliseconds since the Unix epoch.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+#[cfg(test)]
+mod touches {
+    use std::time::Duration;
+
+    use super::{LOCAL_HOLD, touched_before};
+
+    #[test]
+    fn a_mouse_nobody_here_has_touched_never_holds_the_pointer() {
+        assert!(!touched_before(0, 1_000_000, LOCAL_HOLD));
+    }
+
+    #[test]
+    fn a_touch_holds_the_pointer_for_the_hold_and_no_longer() {
+        let at = 1_000_000;
+
+        assert!(
+            touched_before(at, at, LOCAL_HOLD),
+            "the moment it is touched"
+        );
+        assert!(
+            touched_before(at, at + 999, LOCAL_HOLD),
+            "until the hold runs out"
+        );
+        assert!(
+            !touched_before(at, at + 1_000, LOCAL_HOLD),
+            "and the far side's again after"
+        );
+    }
+
+    #[test]
+    fn a_clock_that_stepped_back_is_a_touch_just_now_rather_than_a_crash() {
+        assert!(touched_before(2_000, 1_000, Duration::from_millis(10)));
     }
 }
 

@@ -265,13 +265,11 @@
 }
 
 @layer utilities {
-  /* Windows have no title bar of their own, so the surface says which parts of it drag. */
-  .drag {
-    -webkit-app-region: drag;
-  }
-
-  .no-drag {
-    -webkit-app-region: no-drag;
+  /* Windows have no title bar of their own, so the surface says which parts of it drag —
+     with `data-tauri-drag-region` on the element itself, which is what the shell watches for.
+     `-webkit-app-region` was how Electron was told, and no system webview reads it. */
+  [data-tauri-drag-region] {
+    cursor: default;
   }
 }
 

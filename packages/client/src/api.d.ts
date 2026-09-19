@@ -49,6 +49,8 @@ export interface AccountDeviceView {
   readonly label: string;
   /** Whether it is the machine this window is running on. */
   readonly isThisMachine: boolean;
+  /** Whether it is shared right now, which is what makes it somewhere to connect to. */
+  readonly shared: boolean;
 }
 
 /**
@@ -171,6 +173,12 @@ export interface Settings {
    * somebody moves it.
    */
   updateChannel: string;
+  /**
+   * Which language the windows are in: `en`, `ko`, or empty to follow the machine.
+   *
+   * Empty by default, because the machine already knows what language its owner reads.
+   */
+  language: string;
   /** Whether somebody has been all the way through setup on this machine. */
   setupFinished: boolean;
 }
@@ -266,8 +274,51 @@ export interface StreamState {
   readonly terms: StreamTerms | null;
   /** What is happening, as of the last second. */
   readonly stats: StreamStats | null;
+  /**
+   * How the host went, when it was the host that ended the stream: `left` when it said so —
+   * sharing stopped, or Prism quit there — and `silent` when it stopped answering.
+   */
+  readonly departed: 'left' | 'silent' | null;
   /** The last few lines the stream process wrote, which is what explains a failure. */
   readonly log: readonly string[];
+  /** Every file on its way, in either direction. */
+  readonly moving: readonly MovingFile[];
+  /** What the machine being watched last said it is offering. */
+  readonly offered: readonly OfferedFile[];
+  /** Whether it had more to offer than one answer could carry. */
+  readonly offeredMore: boolean;
+  /** What has arrived this session, newest first. */
+  readonly arrived: readonly ArrivedFile[];
+}
+
+/** One file on its way between the two machines. */
+export interface MovingFile {
+  /** What the file is called. */
+  readonly name: string;
+  /** How many bytes it holds. */
+  readonly size: number;
+  /** How many of them have moved. */
+  readonly moved: number;
+  /** Whether this machine is the one sending. */
+  readonly sending: boolean;
+  /** Whether it is finished. */
+  readonly done: boolean;
+}
+
+/** One file the machine being watched is offering. */
+export interface OfferedFile {
+  /** What it is called. */
+  readonly name: string;
+  /** How many bytes it holds. */
+  readonly size: number;
+}
+
+/** One file that finished arriving on this machine. */
+export interface ArrivedFile {
+  /** What it is called. */
+  readonly name: string;
+  /** Where it was put. */
+  readonly path: string;
 }
 
 /** One system grant this machine has not given yet. */
@@ -356,6 +407,16 @@ export interface PrismApi {
   stopSharing(): Promise<null>;
 
   /**
+   * Sends away whoever is watching this machine, and goes on sharing it.
+   *
+   * Their window closes and says the host ended it; this machine goes back to waiting.
+   *
+   * @async
+   * @returns {Promise<null>} Nothing, once they have been told.
+   */
+  disconnectViewer(): Promise<null>;
+
+  /**
    * Returns what this machine's own session is doing, or `null` when it is not shared.
    *
    * @async
@@ -388,6 +449,56 @@ export interface PrismApi {
    * @returns {void}
    */
   openSettings(): void;
+
+  /**
+   * Opens the window files are managed in, or brings it forward if it is already open.
+   *
+   * @returns {void}
+   */
+  openTransfers(): void;
+
+  /**
+   * Offers a file on this machine to the one being watched.
+   *
+   * @async
+   * @param {string} path - Where the file is on this machine.
+   * @returns {Promise<void>} Once the stream has been told, not once the file has moved.
+   * @throws {Error} If no stream is running, or the stream process cannot be told.
+   */
+  sendFile(path: string): Promise<void>;
+
+  /**
+   * Asks the machine being watched for one of the files it is offering.
+   *
+   * @async
+   * @param {string} name - The name, as its listing gave it.
+   * @returns {Promise<void>} Once the stream has been told.
+   * @throws {Error} If no stream is running, or the stream process cannot be told.
+   */
+  fetchFile(name: string): Promise<void>;
+
+  /**
+   * Puts a file chooser up and offers whatever is picked.
+   *
+   * The dialog belongs to the stream window, because that is the window this session has.
+   *
+   * @async
+   * @returns {Promise<void>} Once the chooser has been asked for, not once a file is picked.
+   * @throws {Error} If no stream is running, or the stream process cannot be told.
+   */
+  chooseFile(): Promise<void>;
+
+  /**
+   * Asks the machine being watched what it is offering.
+   *
+   * The answer arrives later, as a change to the stream state: a listing crosses a network, and
+   * a call that waited for it would hold the window for as long as that took.
+   *
+   * @async
+   * @returns {Promise<void>} Once the question has been asked.
+   * @throws {Error} If no stream is running, or the stream process cannot be told.
+   */
+  askListing(): Promise<void>;
 
   /**
    * Returns what is known about the account.

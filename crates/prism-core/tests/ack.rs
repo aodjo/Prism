@@ -130,9 +130,14 @@ fn a_jump_forward_beyond_the_window_clears_the_history() {
 }
 
 #[test]
-fn a_jump_of_exactly_the_window_clears_the_history() {
+fn a_jump_of_exactly_the_window_keeps_the_frame_at_its_far_edge() {
     // The boundary where a shift of 32 on a u32 is undefined in most languages and a panic
     // in debug Rust. Worth pinning on its own.
+    //
+    // It clears everything but one bit rather than all of them. A bit `N` describes the frame
+    // `last_frame_id - 1 - N`, so frame 39 under a newest of 71 is bit 31 — the last place the
+    // history reaches, and still inside it. The out-of-order arm below says the same thing
+    // from the other side: a `behind` of 32 sets bit 31 rather than being discarded.
     let mut tracker = AckTracker::new();
     for frame_id in 0..40 {
         tracker.received(frame_id);
@@ -142,7 +147,7 @@ fn a_jump_of_exactly_the_window_clears_the_history() {
 
     let report = tracker.report(0, 0).expect("frames have arrived");
     assert_eq!(report.last_frame_id, 71);
-    assert_eq!(report.recv_bitmap, 0);
+    assert_eq!(report.recv_bitmap, 1 << 31);
 }
 
 #[test]

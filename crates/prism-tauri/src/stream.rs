@@ -129,8 +129,31 @@ pub struct Snapshot {
     pub terms: Option<Terms>,
     /// What is happening, as of the last second.
     pub stats: Option<Stats>,
+    /// How the host went, when it was the host that ended the stream.
+    ///
+    /// What a window says once the stream window has closed on its own: somebody who did not
+    /// close it is owed a sentence about why it went.
+    pub departed: Option<ipc::Departure>,
     /// The last few lines the client wrote, which is what explains a failure.
     pub log: Vec<String>,
+    /// Every file on its way, in either direction.
+    pub moving: Vec<ipc::Moving>,
+    /// What the far machine last said it is offering.
+    pub offered: Vec<ipc::Offered>,
+    /// Whether it had more to offer than one answer could carry.
+    pub offered_more: bool,
+    /// What has arrived this session, newest first.
+    pub arrived: Vec<Arrived>,
+}
+
+/// One file that finished arriving.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Arrived {
+    /// What it is called.
+    pub name: String,
+    /// Where it was put, so a window can offer to show somebody.
+    pub path: String,
 }
 
 /// Called whenever anything about the stream changes.
@@ -155,8 +178,18 @@ struct Inner {
     host: Option<String>,
     terms: Option<Terms>,
     stats: Option<Stats>,
+    departed: Option<ipc::Departure>,
     log: VecDeque<String>,
     child: Option<Child>,
+    /// Where to write commands for the stream, for as long as it is running.
+    ///
+    /// Held rather than dropped after `Start`, which is what lets a window of the shell's own
+    /// send a file instead of only the menu inside the stream window.
+    asking: Option<std::process::ChildStdin>,
+    moving: Vec<ipc::Moving>,
+    offered: Vec<ipc::Offered>,
+    offered_more: bool,
+    arrived: Vec<Arrived>,
     /// Which run the fields above describe.
     ///
     /// A client that is being killed goes on writing for as long as it takes to die, and a
@@ -187,8 +220,14 @@ impl Inner {
             host: None,
             terms: None,
             stats: None,
+            departed: None,
             log: VecDeque::new(),
             child: None,
+            asking: None,
+            moving: Vec::new(),
+            offered: Vec::new(),
+            offered_more: false,
+            arrived: Vec::new(),
             run: 0,
             started_at: None,
             stopping: false,
@@ -205,8 +244,27 @@ impl Inner {
             host: self.host.clone(),
             terms: self.terms.clone(),
             stats: self.stats.clone(),
+            departed: self.departed,
             log: self.log.iter().cloned().collect(),
+            moving: self.moving.clone(),
+            offered: self.offered.clone(),
+            offered_more: self.offered_more,
+            arrived: self.arrived.clone(),
         }
+    }
+
+    /// Writes one command to the stream, if there is one to write to.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no stream is running, or when the pipe to it will not take the message —
+    /// which on this pipe means the process has gone.
+    fn ask(&mut self, command: &ipc::Command) -> Result<(), String> {
+        let Some(asking) = self.asking.as_mut() else {
+            return Err("no stream is running".to_owned());
+        };
+
+        ipc::write(asking, command).map_err(|error| format!("the stream did not hear: {error}"))
     }
 
     /// Keeps a line of the client's output, dropping the oldest once there are enough.
@@ -326,10 +384,10 @@ impl Held {
         };
 
         // Sent before anything else, because the process does nothing until it arrives. The
-        // pipe is dropped straight afterwards: there is no second message, and a stream whose
-        // input stayed open would be one waiting for a message that never comes.
+        // pipe is then kept rather than dropped: what follows it are the things a person asks
+        // for while the stream runs, and files were only ever offered inside the stream window
+        // because this end had nothing left to ask through.
         let asked = ipc::write(&mut stdin, &wanted(host, address, settings));
-        drop(stdin);
 
         if let Err(error) = asked {
             let _ = child.kill();
@@ -342,7 +400,13 @@ impl Held {
         inner.host = Some(host.to_owned());
         inner.terms = None;
         inner.stats = None;
+        inner.departed = None;
         inner.log.clear();
+        inner.asking = Some(stdin);
+        inner.moving.clear();
+        inner.offered.clear();
+        inner.offered_more = false;
+        inner.arrived.clear();
         inner.started_at = None;
         inner.stopping = false;
         inner.rtt_sum = 0.0;
@@ -374,6 +438,19 @@ impl Held {
         (self.0.watch)(&snapshot);
 
         Ok(snapshot)
+    }
+
+    /// Asks the running stream for something.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no stream is running, or when the pipe to it will not take the message.
+    pub fn ask(&self, command: &ipc::Command) -> Result<(), String> {
+        self.0
+            .inner
+            .lock()
+            .map_err(|_| "the stream state was left locked".to_owned())?
+            .ask(command)
     }
 
     /// Ends the stream, if one is running.
@@ -452,7 +529,35 @@ impl Held {
 fn absorb(shared: &Arc<Shared>, run: u64, source: ChildStdout) {
     let mut source = BufReader::new(source);
 
-    while let Ok(Some(event)) = ipc::read::<ipc::Event>(&mut source) {
+    loop {
+        let event = match ipc::read::<ipc::Event>(&mut source) {
+            Ok(Some(event)) => event,
+            // The pipe ended, which is what a process closing it means. `conclude` settles the
+            // rest.
+            Ok(None) => return,
+            // A message that could not be read. The length said where the next one starts, so a
+            // reader that failed here no longer knows where in the pipe it is and cannot go on.
+            //
+            // But the stream itself is still running, and leaving it there is the worst of the
+            // two: its pipe fills, it blocks on the write, and the shell goes on showing
+            // `connecting` for a session that will never report again and a window that will
+            // never close. So the run is ended rather than abandoned, which puts it through
+            // `conclude` like any other.
+            Err(error) => {
+                if let Ok(mut inner) = shared.inner.lock()
+                    && inner.run == run
+                {
+                    inner.remember(format!("the stream stopped making sense ({error})"));
+
+                    if let Some(child) = inner.child.as_mut() {
+                        let _ = child.kill();
+                    }
+                }
+
+                return;
+            }
+        };
+
         let Ok(mut inner) = shared.inner.lock() else {
             return;
         };
@@ -465,6 +570,21 @@ fn absorb(shared: &Arc<Shared>, run: u64, source: ChildStdout) {
 
         match event {
             ipc::Event::Note { line } => inner.remember(line),
+            ipc::Event::Transfers { moving } => inner.moving = moving,
+            ipc::Event::Arrived { name, path } => {
+                inner.remember(format!("{name} arrived"));
+
+                // Newest first, because a window showing a session's arrivals is showing the
+                // one that just landed.
+                inner.arrived.insert(0, Arrived { name, path });
+            }
+            ipc::Event::Offering { entries, more } => {
+                inner.offered = entries;
+                inner.offered_more = more;
+            }
+            // A message from a stream built at a different commit. Kept out of the log: it says
+            // nothing a person can act on, and a burst of them would push out the lines that do.
+            ipc::Event::Unknown => {}
             ipc::Event::Established { address } => {
                 inner.phase = Phase::Streaming;
 
@@ -505,6 +625,7 @@ fn absorb(shared: &Arc<Shared>, run: u64, source: ChildStdout) {
                 inner.rtt_count = inner.rtt_count.saturating_add(1);
                 inner.stats = Some(stats);
             }
+            ipc::Event::Gone { how } => inner.departed = Some(how),
             // What it came to is settled by `conclude`, which waits for the process rather than
             // for its pipes. Kept as a line, because a stream that failed said why here.
             ipc::Event::Ended { error } => {
@@ -540,6 +661,11 @@ fn conclude(shared: &Arc<Shared>, run: u64) {
         return;
     }
 
+    // Let go of the pipe into the stream before waiting on it. `Child::wait` closes the one it
+    // still owns for exactly this reason, and this one was taken out of the child at spawn so
+    // that files could be asked for — which makes closing it this end's job.
+    inner.asking = None;
+
     let ended_well = inner
         .child
         .take()
@@ -554,6 +680,9 @@ fn conclude(shared: &Arc<Shared>, run: u64) {
 
     let session = inner.take_session();
     inner.host = None;
+    inner.moving.clear();
+    inner.offered.clear();
+    inner.offered_more = false;
     let snapshot = inner.snapshot();
     drop(inner);
 
@@ -690,6 +819,53 @@ pub fn stream_disconnect(stream: State<'_, Held>) -> Result<Snapshot, String> {
     stream.stop()
 }
 
+/// Offers a file on this machine to the one being watched.
+///
+/// # Errors
+///
+/// Fails when no stream is running, or when the stream process cannot be told.
+#[tauri::command]
+pub fn stream_send_file(path: String, stream: State<'_, Held>) -> Result<(), String> {
+    stream.ask(&ipc::Command::Send { path })
+}
+
+/// Asks the machine being watched for one of the files it is offering.
+///
+/// # Errors
+///
+/// Fails when no stream is running, or when the stream process cannot be told.
+#[tauri::command]
+pub fn stream_fetch_file(name: String, stream: State<'_, Held>) -> Result<(), String> {
+    stream.ask(&ipc::Command::Fetch { name })
+}
+
+/// Puts the stream window's file chooser up, and offers whatever comes back.
+///
+/// The dialog belongs to the stream window rather than to this one: a file chooser has to have a
+/// window, and asking the process that already has one costs nothing this end would otherwise
+/// have to grow.
+///
+/// # Errors
+///
+/// Fails when no stream is running, or when the stream process cannot be told.
+#[tauri::command]
+pub fn stream_choose_file(stream: State<'_, Held>) -> Result<(), String> {
+    stream.ask(&ipc::Command::Choose)
+}
+
+/// Asks the machine being watched what it is offering.
+///
+/// The answer arrives later, as a change to the snapshot: a listing crosses a network and a
+/// command that waited for it would hold the interface for as long as that took.
+///
+/// # Errors
+///
+/// Fails when no stream is running, or when the stream process cannot be told.
+#[tauri::command]
+pub fn stream_ask_listing(stream: State<'_, Held>) -> Result<(), String> {
+    stream.ask(&ipc::Command::Listing)
+}
+
 /// Returns what the stream is doing.
 ///
 /// Asked once when a window opens; everything after that arrives through the watcher, so this
@@ -759,13 +935,27 @@ mod tests {
                 mbps: 18.4,
                 frames: 12,
             }),
+            departed: Some(ipc::Departure::Left),
             log: Vec::new(),
+            moving: vec![ipc::Moving {
+                name: "notes.txt".to_owned(),
+                size: 4096,
+                moved: 1024,
+                sending: true,
+                done: false,
+            }],
+            offered: Vec::new(),
+            offered_more: false,
+            arrived: Vec::new(),
         })
         .expect("writes");
 
         assert!(written.contains("\"phase\":\"streaming\""));
         assert!(written.contains("\"rttMs\""));
         assert!(!written.contains("\"rtt_ms\""));
+        assert!(written.contains("\"departed\":\"left\""));
+        assert!(written.contains("\"offeredMore\""));
+        assert!(!written.contains("\"offered_more\""));
     }
 
     #[test]

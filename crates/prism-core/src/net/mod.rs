@@ -16,4 +16,5 @@ pub mod seal;
 pub mod secure;
 pub mod sender;
 pub mod sendpace;
+pub mod transfer;
 pub mod transport;

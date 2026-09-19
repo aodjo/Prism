@@ -470,22 +470,26 @@ impl D3d11Renderer {
         })?;
         let (luma, chroma) = self.planes(texture, index)?;
 
-        let viewport = D3D11_VIEWPORT {
-            TopLeftX: 0.0,
-            TopLeftY: 0.0,
-            Width: self.width as f32,
-            Height: self.height as f32,
-            MinDepth: 0.0,
-            MaxDepth: 1.0,
-        };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: the texture is alive for the duration of the call.
+        unsafe { texture.GetDesc(&mut desc) };
+
+        // The picture into the part of the target its shape fits, and the rest cleared to
+        // black. The triangle fills whatever viewport it is drawn in, so narrowing the viewport
+        // is the whole of it.
+        let whole = (self.width as f32, self.height as f32);
+        let fitted = crate::render::fit((desc.Width, desc.Height), whole);
+        let picture = viewport(fitted.left, fitted.top, fitted.width, fitted.height);
+        let everywhere = viewport(0.0, 0.0, whole.0, whole.1);
 
         // SAFETY: every object bound below belongs to this renderer's device and outlives the
         // calls; the picture draw emits exactly the three vertices its vertex shader generates
-        // and each overlay the six of its own, neither reading any vertex buffer. Nothing
-        // clears first because the full-screen triangle covers the whole target.
+        // and each overlay the six of its own, neither reading any vertex buffer.
         unsafe {
+            self.context
+                .ClearRenderTargetView(&target, &[0.0, 0.0, 0.0, 1.0]);
             self.context.OMSetRenderTargets(Some(&[Some(target)]), None);
-            self.context.RSSetViewports(Some(&[viewport]));
+            self.context.RSSetViewports(Some(&[picture]));
             self.context
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -499,6 +503,9 @@ impl D3d11Renderer {
             self.context.Draw(3, 0);
 
             if !quads.is_empty() {
+                // Placed against the whole target, bars included: the statistics belong in its
+                // corner, and the pointer was placed on the picture by whoever asked.
+                self.context.RSSetViewports(Some(&[everywhere]));
                 self.context.OMSetBlendState(&self.blend, None, u32::MAX);
                 self.context.VSSetShader(&self.overlay_vs, None);
                 self.context.PSSetShader(&self.overlay_ps, None);
@@ -730,6 +737,18 @@ impl core::fmt::Debug for D3d11Renderer {
             .field("tearing", &self.tearing)
             .field("copying", &self.copying)
             .finish_non_exhaustive()
+    }
+}
+
+/// Builds a viewport from its top left corner and size, in pixels of the target.
+fn viewport(left: f32, top: f32, width: f32, height: f32) -> D3D11_VIEWPORT {
+    D3D11_VIEWPORT {
+        TopLeftX: left,
+        TopLeftY: top,
+        Width: width,
+        Height: height,
+        MinDepth: 0.0,
+        MaxDepth: 1.0,
     }
 }
 

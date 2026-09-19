@@ -207,9 +207,26 @@ impl TextOverlay {
         // currently has, and a fresh bitmap context does not necessarily have the one the
         // caller has in mind — these four components read as grey plus alpha give a fully
         // transparent black, which is a backdrop that never appears.
+        // Behind the lines there are, rather than behind the whole bitmap. The texture is one
+        // size for the life of the session because reallocating it every time a line appears
+        // would be reallocating it ten times a second; the panel is what somebody sees, and a
+        // panel sized for the most it could ever say is a black box over the picture.
+        let used = (self.line_height * lines.len() as f64 + self.line_height * 0.5)
+            .min(self.height as f64);
+        let panel = CGRect {
+            origin: CGPoint {
+                x: 0.0,
+                y: self.height as f64 - used,
+            },
+            size: CGSize {
+                width: self.width as f64,
+                height: used,
+            },
+        };
+
         CGContext::clear_rect(Some(&self.context), full);
         CGContext::set_fill_color_with_color(Some(&self.context), Some(&self.backdrop));
-        CGContext::fill_rect(Some(&self.context), full);
+        CGContext::fill_rect(Some(&self.context), panel);
 
         for (index, line) in lines.iter().enumerate() {
             let baseline = self.height as f64 - self.line_height * (index as f64 + 1.0);

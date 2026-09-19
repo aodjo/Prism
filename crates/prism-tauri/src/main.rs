@@ -22,9 +22,11 @@ mod sharing;
 mod stream;
 mod tray;
 mod updates;
+mod watched;
 mod windows;
 
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 
 use prism_core::identity;
 use settings::Settings;
@@ -32,6 +34,25 @@ use tauri::{Emitter, Manager};
 
 /// The settings as they stand, read once at launch and written when somebody changes something.
 struct Held(Mutex<Settings>);
+
+/// How often the account is asked again while the home window is on screen.
+///
+/// The home screen lists the machines that are shared, and a machine turning sharing on somewhere
+/// else is something only the account knows. Fifteen seconds is how long somebody waits for it
+/// to turn up; it is also one small request, a few times a minute, from one window.
+const ACCOUNT_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Tells every window what the account says now, when that is different from before.
+fn refresh_account(app: &tauri::AppHandle) {
+    let account = app.state::<account::Held>();
+    let chosen = app.state::<Held>();
+
+    if account::refresh(&account, &chosen).unwrap_or(false)
+        && let Ok(state) = account::account_state(account, chosen)
+    {
+        let _ = app.emit("account:state", state);
+    }
+}
 
 /// Turns a failure into the sentence a window should show.
 ///
@@ -207,10 +228,72 @@ fn opening() -> (&'static str, &'static str) {
     }
 }
 
+/// How large the log may grow before a launch starts it afresh.
+#[cfg(all(unix, not(debug_assertions)))]
+const LOG_CEILING: u64 = 1024 * 1024;
+
+/// Keeps what the application says on standard error, which is otherwise lost.
+///
+/// An application started from the Dock has nowhere for standard error to go, and that is where
+/// every line a host writes about itself ends up — a session opening, why it ended — along with
+/// any panic. So a build not being run from a terminal points it at a file beside this machine's
+/// key, where somebody asked what happened on it can find the answer.
+///
+/// Started afresh at launch once it has grown past [`LOG_CEILING`], so it never becomes the
+/// thing filling the disk.
+#[cfg(all(unix, not(debug_assertions)))]
+fn keep_the_log() {
+    use std::os::fd::AsRawFd as _;
+
+    unsafe extern "C" {
+        fn dup2(from: std::ffi::c_int, to: std::ffi::c_int) -> std::ffi::c_int;
+    }
+
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+
+    let folder = std::path::Path::new(&home).join(".prism");
+    let path = folder.join("prism.log");
+    let _ = std::fs::create_dir_all(&folder);
+
+    let fresh = std::fs::metadata(&path).is_ok_and(|about| about.len() > LOG_CEILING);
+    let file = if fresh {
+        std::fs::File::create(&path)
+    } else {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+    };
+
+    if let Ok(file) = file {
+        // SAFETY: both are open descriptors for the length of the call — the file's own, and
+        // standard error, which every process starts with — and `dup2` only makes the second
+        // refer to what the first does. The file's descriptor can close after; the copy stays.
+        unsafe { dup2(file.as_raw_fd(), 2) };
+    }
+}
+
+/// Leaves standard error where it is: a build run from a terminal is read in that terminal.
+#[cfg(not(all(unix, not(debug_assertions))))]
+fn keep_the_log() {}
+
 fn main() {
+    keep_the_log();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            eprintln!(
+                "prism: {} started at {}, process {}",
+                app.package_info().version,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_secs()),
+                std::process::id()
+            );
+
             app.manage(Held(Mutex::new(settings::load())));
             app.manage(account::Held::new());
             app.manage(sharing::Held::new());
@@ -224,9 +307,32 @@ fn main() {
             let reporting = app.handle().clone();
             let recording = app.handle().clone();
 
+            // Whether anything was moving the last time this was looked at, so that the window
+            // is raised on the first file of a run rather than on every snapshot after it.
+            let moving_before = std::sync::atomic::AtomicBool::new(false);
+
             app.manage(stream::Held::new(
                 Box::new(move |snapshot| {
                     let _ = reporting.emit("stream:state", snapshot);
+
+                    // The stream window closed because the machine it showed went away, not
+                    // because anybody here closed it. The home window is where that is said, so
+                    // it comes forward to say it.
+                    if snapshot.phase == stream::Phase::Stopped && snapshot.departed.is_some() {
+                        tray::surface(&reporting);
+                    }
+
+                    // A file starting to move opens the window that shows it. Somebody who
+                    // dropped a file on the stream is owed somewhere to watch it go, and the
+                    // one place that existed was a menu drawn over the desktop they were
+                    // working in. Only on the first one: it is raised when there was nothing
+                    // moving a moment ago, so a second file in the same run does not take the
+                    // focus back from whatever they moved on to.
+                    if !snapshot.moving.is_empty() && !moving_before.swap(true, Ordering::Relaxed) {
+                        let _ = windows::open_transfers(reporting.clone());
+                    } else if snapshot.moving.is_empty() {
+                        moving_before.store(false, Ordering::Relaxed);
+                    }
                 }),
                 Box::new(move |session| {
                     let held = recording.state::<sessions::Held>();
@@ -250,6 +356,9 @@ fn main() {
             // from the moment its window finishes drawing.
             sharing::resume(app.handle());
 
+            // And the handle that says so at the edge of the screen while somebody is watching.
+            watched::watch(app.handle());
+
             let (label, page) = opening();
             let window = windows::stage(app.handle(), label, page)?;
 
@@ -268,16 +377,28 @@ fn main() {
 
                 // On its own thread: this runs on the one drawing the window, and asking a
                 // server across the internet from here would freeze the window it is redrawing.
-                std::thread::spawn(move || {
-                    let account = asking.state::<account::Held>();
-                    let chosen = asking.state::<Held>();
+                std::thread::spawn(move || refresh_account(&asking));
+            });
 
-                    if account::refresh(&account, &chosen).unwrap_or(false)
-                        && let Ok(state) = account::account_state(account, chosen)
-                    {
-                        let _ = asking.emit("account:state", state);
+            // And every so often while the home window is showing, focused or not. What it
+            // lists is the machines that are shared right now, and one that starts sharing
+            // while somebody is looking at the list should turn up without their having to
+            // click somewhere else and back.
+            let polling = app.handle().clone();
+
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(ACCOUNT_POLL);
+
+                    let showing = polling
+                        .get_webview_window("home")
+                        .and_then(|home| home.is_visible().ok())
+                        .unwrap_or(false);
+
+                    if showing {
+                        refresh_account(&polling);
                     }
-                });
+                }
             });
 
             harness::run(&window);
@@ -296,10 +417,15 @@ fn main() {
             permissions::restart,
             sharing::start_sharing,
             sharing::stop_sharing,
+            sharing::disconnect_viewer,
             sharing::sharing_state,
             stream::stream_connect,
             stream::stream_disconnect,
             stream::stream_state,
+            stream::stream_send_file,
+            stream::stream_fetch_file,
+            stream::stream_ask_listing,
+            stream::stream_choose_file,
             sessions::get_sessions,
             account::account_state,
             account::account_challenge,
@@ -310,6 +436,7 @@ fn main() {
             sign_out,
             windows::finish_setup,
             windows::open_settings,
+            windows::open_transfers,
             windows::fit,
             updates::build_info,
             updates::check_for_update,
@@ -319,13 +446,22 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("the shell could not start")
         .run(|app, event| {
-            // Only the arm below wants it, and that arm is macOS's. Everywhere else this is a
-            // binding nothing reads, which `-D warnings` counts as an error rather than a
-            // nicety — and no local check compiles this crate for those targets to say so.
-            #[cfg(not(target_os = "macos"))]
-            let _ = app;
-
             match event {
+                // The stream is a process of its own, and a process of its own outlives the
+                // one that started it. One left behind goes on holding the session it opened,
+                // so the host it is watching stays busy and every later attempt to watch that
+                // machine is told there is nobody there.
+                //
+                // Sharing ends too, and is waited on for a moment: ending it is what tells the
+                // machine watching this one that it has gone. A process that simply exits says
+                // nothing, and the window over there shows the last picture until it gives up.
+                tauri::RunEvent::Exit => {
+                    let held: tauri::State<'_, stream::Held> = app.state();
+
+                    let _ = held.stop();
+
+                    sharing::leave(app);
+                }
                 // No windows left is not a reason to stop. The exit somebody asked for carries
                 // a code — `exit` and `restart` both set one — and that is the one that goes
                 // through.

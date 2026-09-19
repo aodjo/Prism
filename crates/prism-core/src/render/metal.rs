@@ -23,7 +23,7 @@ use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
     MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction,
     MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLStoreAction, MTLTexture,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLStoreAction, MTLTexture, MTLViewport,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
@@ -335,6 +335,18 @@ impl MetalRenderer {
                 reason: "could not create a render encoder",
             })?;
 
+        // The picture into the part of the target its shape fits, and the rest left the black
+        // it was cleared to. The triangle fills whatever viewport it is drawn in, so narrowing
+        // the viewport is the whole of it.
+        let whole = (target.width() as f32, target.height() as f32);
+        let fitted = crate::render::fit((width as u32, height as u32), whole);
+
+        encoder.setViewport(viewport(
+            fitted.left,
+            fitted.top,
+            fitted.width,
+            fitted.height,
+        ));
         encoder.setRenderPipelineState(&self.pipeline);
         // SAFETY: both textures outlive the encoder, and the pipeline draws exactly the
         // three vertices its vertex function generates.
@@ -345,6 +357,9 @@ impl MetalRenderer {
         }
 
         if !quads.is_empty() {
+            // The overlays are placed against the whole target, bars included: the statistics
+            // belong in its corner, and the pointer was placed on the picture by whoever asked.
+            encoder.setViewport(viewport(0.0, 0.0, whole.0, whole.1));
             encoder.setRenderPipelineState(&self.overlay_pipeline);
 
             // Drawn in the order given, so a caller decides what sits on top of what by
@@ -412,6 +427,18 @@ impl MetalRenderer {
 
         // SAFETY: CoreVideo created the texture, so ownership transfers here.
         Ok(unsafe { CFRetained::from_raw(NonNull::new_unchecked(raw)) })
+    }
+}
+
+/// Builds a viewport from its top left corner and size, in pixels of the target.
+fn viewport(left: f32, top: f32, width: f32, height: f32) -> MTLViewport {
+    MTLViewport {
+        originX: f64::from(left),
+        originY: f64::from(top),
+        width: f64::from(width),
+        height: f64::from(height),
+        znear: 0.0,
+        zfar: 1.0,
     }
 }
 

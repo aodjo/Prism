@@ -21,7 +21,7 @@
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -34,11 +34,12 @@ use crate::net::handshake::{Identity, KEY_LEN};
 use crate::net::negotiate::Offer;
 use crate::net::packet::{
     AudioPacket, CLOCK_PING_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
-    FEEDBACK_PACKET_LEN, FEEDBACK_WANTS_KEYFRAME, FecPacket, INPUT_PACKET_LEN, InputEvent,
+    FEEDBACK_PACKET_LEN, FEEDBACK_WANTS_KEYFRAME, FecPacket, Goodbye, INPUT_PACKET_LEN, InputEvent,
     InputPacket, MAX_PACKET_SIZE, VideoPacket, channel_of, control_type_of,
 };
 use crate::net::reassemble::{FrameReassembler, PushOutcome};
 use crate::net::secure::{SecureReceiver, SecureSender};
+use crate::net::transfer::{Files, Landed};
 use crate::net::transport::UdpTransport;
 
 use crate::stats::{LatencyRecorder, LatencySummary};
@@ -238,6 +239,35 @@ pub enum Report {
     Terms(crate::net::negotiate::Accept),
     /// The counters, once every [`STATS_INTERVAL`].
     Counters(Counters),
+    /// The host is gone, and the session with it.
+    ///
+    /// Not sent when this side ended the session, by a frame budget or by being told to stop:
+    /// only when the far end is why it is over.
+    Gone(Departure),
+}
+
+/// How the host went, when it was the host that ended a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Departure {
+    /// It said goodbye: sharing was stopped on it, or Prism quit there.
+    Left,
+    /// It went without a word: nothing arrived from it for the whole idle timeout, or its port
+    /// was found closed.
+    ///
+    /// A host that crashed, lost its network, or was put to sleep. Or one whose goodbye was lost
+    /// three times over, which on a path that bad is much the same thing.
+    Silent,
+}
+
+/// Whether a failed read means the host's end is closed, rather than that something broke here.
+///
+/// A connected datagram socket is told when what it sends is refused at the far end, and its
+/// next read fails with that: the port it was talking to has nothing behind it any more.
+fn host_is_gone(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+    )
 }
 
 /// Where a client's reports go.
@@ -300,6 +330,19 @@ pub struct ClientHooks {
     pub input: Option<Arc<OnceLock<InputSender>>>,
     /// Updated as the host reports where its pointer is.
     pub cursor: Option<CursorSink>,
+    /// Both directions of file movement, when this machine will move files.
+    ///
+    /// Held by the caller as well, which is how a window offers a file to the host and asks
+    /// for what the host is offering: the same state machine, under the same lock.
+    pub files: Option<Arc<Mutex<Files>>>,
+    /// Where a file that has finished arriving, or a listing that has come back, is announced.
+    pub landed: Option<SyncSender<Landed>>,
+    /// Set to end the session from outside, the way a window closing does.
+    ///
+    /// The session otherwise ends only when the host goes quiet, and a host that is still
+    /// streaming never does — so a window that had been closed went on waiting for a session
+    /// that went on running, and showed the spinning pointer until something killed it.
+    pub stop: Option<Arc<AtomicBool>>,
     /// Where arriving audio frames go, when this machine can play them.
     ///
     /// Absent when nothing is showing the stream, because a session with no window is a
@@ -359,6 +402,20 @@ pub struct ClientConfig {
     /// does not hold the matching private key cannot read that message at all, which is what
     /// makes standing in the middle useless rather than merely detectable.
     pub peer_key: [u8; KEY_LEN],
+}
+
+/// Says the session is over when it goes out of scope.
+///
+/// A session ends in more than one place — a frame budget reached, an idle socket, an error on
+/// the way through — and a thread it started has to hear about all of them. Held rather than
+/// cleared by hand, so a path added later cannot forget.
+struct Ending(Arc<AtomicBool>);
+
+impl Drop for Ending {
+    /// Tells whoever is watching that the session has finished.
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 /// A reassembled frame on its way from the receive thread to the decode thread.
@@ -456,6 +513,12 @@ fn open(
         found.address, found.observed
     ));
 
+    // Why the host's own network address did not work, when it was tried and did not. Carried
+    // to the end rather than only said, so that a connection which gets all the way to the
+    // relay and fails there reports the thing somebody can act on instead of the last thing
+    // that went wrong.
+    let mut local_trouble: Option<String> = None;
+
     // One public address for both machines means one router between them and the internet,
     // and two machines behind one router usually cannot reach each other at that address —
     // the packet leaves, the router has no reason to send it back in, and the connection
@@ -488,10 +551,22 @@ fn open(
             // tried it: a host on a subnet this machine has no route to answers immediately with
             // `No route to host` rather than by going quiet, so the one case the address exists
             // to handle badly was the one case that ended the whole connection.
-            Err(err) => say.note(format!(
-                "{} is not reachable from here ({err})",
-                found.local
-            )),
+            //
+            // Kept as well as said, because this is the note that turns out to matter when
+            // every path has failed. Two machines on one network that cannot reach each
+            // other on it is the shape of a firewall or a permission rather than of a
+            // network, and the relay's own failure says nothing about that.
+            Err(err) => {
+                local_trouble = Some(format!(
+                    "{} could not be reached on this network ({err})",
+                    found.local
+                ));
+
+                say.note(format!(
+                    "{} is not reachable from here ({err})",
+                    found.local
+                ));
+            }
         }
     }
 
@@ -537,7 +612,18 @@ fn open(
     // Through the one that answered the lookup. A relay pairs two peers presenting the same
     // token, so it has to be a server they are both registered with — and that one has just
     // proved both that it knows the host and that it is the nearest of them to here.
-    let relayed = rendezvous::relay(transport, found.server, config.peer_key, me)?;
+    //
+    // A relay that never opens is the last thing to go wrong, and on a network where the two
+    // machines should have met directly it is rarely the thing worth reporting. So the reason
+    // the near path failed is put in front of it, because that is the one somebody here can do
+    // something about.
+    let relayed =
+        rendezvous::relay(transport, found.server, config.peer_key, me).map_err(|err| {
+            match local_trouble {
+                Some(near) => io::Error::new(err.kind(), format!("{near}, and {err}")),
+                None => err,
+            }
+        })?;
     let established = dial(
         transport,
         relayed.address,
@@ -568,6 +654,9 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         cursor,
         audio,
         report,
+        files,
+        landed,
+        stop,
         ..
     } = hooks;
     let say = Say(report);
@@ -662,7 +751,29 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
         }
     }
 
+    // A file moves on a clock of its own, on a handle of its own. This loop is busy with the
+    // picture and would otherwise only push a chunk when a frame arrived, which on a still
+    // screen is twice a second.
+    // Ends with this function however it ends, which is what stops the file thread outliving
+    // the session and holding a duplicate of its socket.
+    let session = Ending(Arc::new(AtomicBool::new(true)));
+
+    if let Some(files) = files.as_ref() {
+        if let Ok(split) = sender.split() {
+            crate::net::sender::spawn_files(Arc::clone(files), split, Arc::clone(&session.0));
+        }
+    }
+
     loop {
+        // Checked once a packet, which a live session delivers several times a second even on
+        // a screen where nothing moves: the host repeats the picture and answers every ping.
+        if stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Relaxed))
+        {
+            break;
+        }
+
         if last_ping.elapsed() >= PING_INTERVAL {
             last_ping = Instant::now();
             let ping = ClockPing { t1_us: now_us() };
@@ -676,7 +787,18 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
 
         let bytes = match receiver.recv_into(&mut recv_buf) {
             Ok(bytes) => bytes,
-            Err(err) if is_timeout(&err) => break,
+            Err(err) if is_timeout(&err) => {
+                say.send(Report::Gone(Departure::Silent));
+                break;
+            }
+            // The host's port is closed: whatever was listening there is not any more. That is
+            // the host gone without a word, not something wrong with this machine, and a window
+            // should say so rather than show a socket error.
+            Err(err) if host_is_gone(&err) => {
+                say.note(format!("the host stopped answering ({err})"));
+                say.send(Report::Gone(Departure::Silent));
+                break;
+            }
             Err(err) => return Err(err),
         };
 
@@ -724,6 +846,11 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
                         }
                     }
                 }
+                Ok(ControlType::Goodbye) if Goodbye::decode(bytes).is_ok() => {
+                    say.note("the host ended the session".to_owned());
+                    say.send(Report::Gone(Departure::Left));
+                    break;
+                }
                 _ => {}
             }
 
@@ -748,6 +875,27 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
                     }
                 }
                 Err(_) => malformed += 1,
+            }
+
+            continue;
+        }
+
+        // Files have their own state machine and their own thread to send from. Nothing here
+        // is on the picture's path: this only hands the packet over and carries on.
+        if channel_of(bytes) == Ok(Channel::File) {
+            if let Some(files) = files.as_ref() {
+                let told = files.lock().map(|mut files| files.arrived(bytes));
+
+                match told {
+                    Ok(Ok(Some(event))) => {
+                        if let Some(sink) = landed.as_ref() {
+                            let _ = sink.try_send(event);
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(err)) => say.note(format!("files: {err}")),
+                    Err(_) => {}
+                }
             }
 
             continue;

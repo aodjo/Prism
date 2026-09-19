@@ -18,9 +18,10 @@ use windows::Win32::Foundation::{GetLastError, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSE_EVENT_FLAGS,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
@@ -75,6 +76,20 @@ impl WindowsInjector {
             i32::from(dy),
             0,
             MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
+        ))
+    }
+
+    /// Puts the pointer a fraction of the way across and down the primary display.
+    ///
+    /// The one place the two platforms agree without translating: `SendInput` takes an
+    /// absolute position as exactly the range the wire carries, zero at one edge and 65535 at
+    /// the other.
+    fn place_pointer(&mut self, x: u16, y: u16) -> Result<(), InputError> {
+        self.send(mouse_input(
+            i32::from(x),
+            i32::from(y),
+            0,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE_NOCOALESCE,
         ))
     }
 
@@ -175,6 +190,7 @@ impl Injector for WindowsInjector {
             InputEvent::MouseButton { button, pressed } => self.press_button(button, pressed),
             InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
             InputEvent::Key { usage, pressed } => self.press_key(usage, pressed),
+            InputEvent::MouseTo { x, y } => self.place_pointer(x, y),
         }
     }
 

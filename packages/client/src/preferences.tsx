@@ -17,6 +17,7 @@ import type {
   PrismApi,
   Settings,
 } from './api.js';
+import { speak, t } from './i18n.js';
 import { Trouble, reason, short } from './ui.js';
 
 declare global {
@@ -49,9 +50,12 @@ const UNKNOWN: AccountState = {
  */
 function Band({ title, children }: { title: string; children: ReactNode }): JSX.Element {
   return (
-    <section className="border-b border-line-1 px-5 py-4 last:border-b-0">
-      <h2 className="m-0 mb-2.5 text-note font-semibold text-ink-3">{title}</h2>
-      {children}
+    <section className="mb-5 last:mb-0">
+      <h2 className="m-0 mb-2 px-1 text-fine font-medium text-muted-2">{title}</h2>
+      {/* One card per concern, ruled inside rather than boxed row by row. What separates two
+          rows is that they are two settings; what separates two cards is that they are about
+          different things, and only the second is worth a border. */}
+      <div className="overflow-hidden rounded-panel border border-line-2 bg-wash-1">{children}</div>
     </section>
   );
 }
@@ -64,12 +68,58 @@ function Band({ title, children }: { title: string; children: ReactNode }): JSX.
  * @param {ReactNode} props.children - The control.
  * @returns {JSX.Element} The row.
  */
-function Row({ label, children }: { label: string; children: ReactNode }): JSX.Element {
+function Row({
+  label,
+  note,
+  children,
+}: {
+  label: ReactNode;
+  note?: ReactNode;
+  children: ReactNode;
+}): JSX.Element {
   return (
-    <div className="flex min-h-[32px] items-center justify-between gap-4">
-      <span className="text-note-2 text-muted">{label}</span>
-      <div className="flex-none">{children}</div>
+    <div className="flex min-h-[46px] items-center justify-between gap-4 border-t border-line-1 px-4 py-2.5 first:border-t-0">
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span className="truncate text-note-2 text-ink-2">{label}</span>
+        {note !== undefined && note !== '' && (
+          <span className="truncate text-fine-2 text-dim">{note}</span>
+        )}
+      </span>
+      <div className="flex flex-none items-center gap-2.5">{children}</div>
     </div>
+  );
+}
+
+/**
+ * A switch, drawn rather than the one the system draws.
+ *
+ * A checkbox says a thing is selected; a switch says a thing is on. Every one of these turns
+ * something on, and the browser's own control reads as neither at this size.
+ *
+ * @param {object} props - What to draw.
+ * @param {boolean} props.on - Whether it is.
+ * @param {(on: boolean) => void} props.onChange - Called with what it became.
+ * @returns {JSX.Element} The switch.
+ */
+function Switch({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }): JSX.Element {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      className={`relative h-[22px] w-[38px] flex-none rounded-pill border transition-colors duration-150 ${
+        on ? 'border-violet bg-violet' : 'border-line-4 bg-wash-3'
+      }`}
+      onClick={() => {
+        onChange(!on);
+      }}
+    >
+      <span
+        className={`absolute top-1/2 block size-[16px] -translate-y-1/2 rounded-full bg-white transition-[left] duration-150 ${
+          on ? 'left-[19px]' : 'left-[2px]'
+        }`}
+      />
+    </button>
   );
 }
 
@@ -94,8 +144,15 @@ const NUMBER =
   '[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none ' +
   '[&::-webkit-outer-spin-button]:appearance-none';
 
-/** The one shape every switch in this window has. */
-const TOGGLE = 'size-[15px] accent-violet';
+/**
+ * The one shape every dropdown in this window has.
+ *
+ * The browser's own arrow is left where it is. Drawing one means an inline SVG inside a class
+ * string, and a chevron is not worth a data URI nobody can read.
+ */
+const SELECT =
+  'rounded-tile border border-line-2 bg-wash-2 py-1.5 pr-2 pl-2.5 text-fine text-ink-2 ' +
+  'focus:border-[rgba(124,92,255,0.6)] focus:outline-none';
 
 /**
  * The settings.
@@ -132,6 +189,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
         prism.buildInfo(),
       ]);
 
+      speak(stored.language);
       setAccount(known);
       setSettings(stored);
       setBuild(made);
@@ -218,14 +276,41 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
   const configured = account.server.trim() !== '';
 
   return (
-    <div ref={body}>
+    // The padding is here rather than in what is showing these, because it belongs to them:
+    // both callers would otherwise have to know how far a card sits from an edge, and one of
+    // them would eventually be told a different number.
+    <div ref={body} className="px-5 pb-6">
+      <Band title={t('General')}>
+          <Row label={t('Language')}>
+            <select
+              className={SELECT}
+              value={settings?.language ?? ''}
+              onChange={(event) => {
+                void (async () => {
+                  await prism.setSettings({ language: event.target.value });
+                  speak(event.target.value);
+
+                  // Drawn again from the top, because every sentence already on screen was
+                  // built with the language before this one and React has no reason to ask for
+                  // any of them a second time. A window that is not this one keeps what it has
+                  // until it is opened again.
+                  location.reload();
+                })();
+              }}
+            >
+              <option value="">{t('Follow the system')}</option>
+              <option value="en">English</option>
+              <option value="ko">한국어</option>
+            </select>
+          </Row>
+        </Band>
+
         {configured && (
-          <Band title="Account">
+          <Band title={t('Account')}>
             {enrolment ? (
               <div className="text-center">
                 <p className="mx-auto mb-3 max-w-[42ch] text-tiny leading-normal text-dim">
-                  Scan this with an authenticator app. It is shown once — the server keeps only
-                  enough to check codes, which is not enough to show it again.
+                  {t('Scan this with an authenticator app. It is shown once — the server keeps only enough to check codes, which is not enough to show it again.')}
                 </p>
 
                 <img
@@ -235,12 +320,12 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                   height={200}
                   className="mx-auto mb-3 block rounded-lg bg-white p-2"
                 />
-                <Row label="Or type">
+                <Row label={t('Or type')}>
                   <code className="select-all font-mono text-fine tracking-[0.06em] text-ink">
                     {enrolment.secret}
                   </code>
                 </Row>
-                <Row label="">
+                <Row label={null}>
                   <button
                     type="button"
                     className="btn-primary-sm"
@@ -248,22 +333,21 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                       setEnrolment(null);
                     }}
                   >
-                    Done
+                    {t('Done')}
                   </button>
                 </Row>
               </div>
             ) : account.email === null ? (
               <>
                 <p className="mb-3 max-w-[42ch] text-tiny leading-normal text-dim">
-                  Sign in and your machines find each other. Without an account they still pair,
-                  by reading a code off one screen.
+                  {t('Sign in and your machines find each other. Without an account they still pair, by reading a code off one screen.')}
                 </p>
-                <Row label="Email">
+                <Row label={t('Email')}>
                   <input
                     type="email"
                     spellCheck={false}
                     autoComplete="username"
-                    placeholder="you@example.com"
+                    placeholder={t('you@example.com')}
                     className={FIELD}
                     value={email}
                     onChange={(event) => {
@@ -271,7 +355,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                     }}
                   />
                 </Row>
-                <Row label="Password">
+                <Row label={t('Password')}>
                   <input
                     type="password"
                     className={FIELD}
@@ -281,7 +365,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                     }}
                   />
                 </Row>
-                <Row label="Code">
+                <Row label={t('Code')}>
                   <input
                     type="text"
                     inputMode="numeric"
@@ -297,7 +381,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                 {/* Only once a code has been sent. Before that there is nothing to type, and
                     a box for a code nobody has been sent reads as a step somebody missed. */}
                 {proof !== null && (
-                  <Row label="Emailed code">
+                  <Row label={t('Emailed code')}>
                     <input
                       type="text"
                       inputMode="numeric"
@@ -321,13 +405,16 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                     disabled={busy}
                     onClick={signIn}
                   >
-                    Sign in
+                    {t('Sign in')}
                   </button>
                 </div>
               </>
             ) : (
               <>
-                <Row label={account.email}>
+                <Row
+                  label={account.email}
+                  note={t('{count} machines on this account', { count: account.devices.length })}
+                >
                   <button
                     type="button"
                     className="btn-secondary"
@@ -337,23 +424,20 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                       })();
                     }}
                   >
-                    Sign out
+                    {t('Sign out')}
                   </button>
                 </Row>
-                  <div className="mt-2 flex flex-col gap-1">
                   {account.devices.map((device) => (
-                    <div
+                    <Row
                       key={device.publicKey}
-                      className="flex min-h-[30px] items-center justify-between gap-3"
+                      label={device.label || short(device.publicKey)}
+                      note={short(device.publicKey)}
                     >
-                      <span title={device.publicKey} className="truncate text-note-2 text-ink">
-                        {device.label || short(device.publicKey)}
-                      </span>
                       {device.isThisMachine ? (
                         // Named rather than made removable. A machine that removed itself would
                         // still be running, still trusted by everything else, and no longer
                         // listed anywhere.
-                        <span className="flex-none text-tiny text-dim">this machine</span>
+                        <span className="text-fine-2 text-dim">{t('This machine')}</span>
                       ) : (
                         <button
                           type="button"
@@ -368,12 +452,11 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                             })();
                           }}
                         >
-                          Forget
+                          {t('Forget')}
                         </button>
                       )}
-                    </div>
+                    </Row>
                   ))}
-                </div>
               </>
             )}
 
@@ -387,96 +470,99 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
         {/* Version and build number are two answers, not one. A person reads the version to
             know what they have; they report the build number when something is wrong with it,
             and it is the only one of the two that moves between two builds of a release. */}
-        <Band title="Updates">
-          <Row label="Version">
-            <span className="text-note-2 text-ink-3">
-              {build ? `${build.version} · build ${build.build}` : '—'}
+        <Band title={t('Updates')}>
+          <Row
+            label={build ? build.version : '—'}
+            note={
+              build ? t('build {build} · {channel}', { build: build.build, channel: build.channel }) : ''
+            }
+          >
+            <span className="text-fine-2 text-muted-2">
+              {update === 'checking'
+                ? t('Checking')
+                : update === 'current'
+                  ? t('Up to date')
+                  : update
+                    ? t('{version} is available', { version: update.version })
+                    : ''}
             </span>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={update === 'checking'}
+              onClick={() => {
+                void (async () => {
+                  // Checking checks. Installing replaces the application under somebody and
+                  // restarts it, and that is not a thing to do because they pressed a button
+                  // whose word was the other one.
+                  if (update && update !== 'checking' && update !== 'current') {
+                    try {
+                      await prism.installUpdate();
+                    } catch (error) {
+                      setTrouble(reason(error));
+                    }
+
+                    return;
+                  }
+
+                  setUpdate('checking');
+
+                  try {
+                    setUpdate((await prism.checkForUpdate()) ?? 'current');
+                  } catch (error) {
+                    setUpdate(null);
+                    setTrouble(reason(error));
+                  }
+                })();
+              }}
+            >
+              {update && update !== 'checking' && update !== 'current'
+                ? t('Install')
+                : t('Check now')}
+            </button>
           </Row>
-          <Row label="Automatic">
-            <input
-              type="checkbox"
-              className={TOGGLE}
-              checked={settings?.autoUpdate ?? true}
-              onChange={(event) => {
-                save({ autoUpdate: event.target.checked });
+          <Row label={t('Automatic')}>
+            <Switch
+              on={settings?.autoUpdate ?? true}
+              onChange={(on) => {
+                save({ autoUpdate: on });
               }}
             />
           </Row>
-          <Row label="Builds">
+          <Row label={t('Builds')}>
             <select
-              className="rounded-lg border border-line-2 bg-wash-1 px-2 py-1 text-note-2 text-ink-2"
+              className={SELECT}
               value={settings?.updateChannel || build?.channel || 'production'}
               onChange={(event) => {
                 save({ updateChannel: event.target.value });
                 setUpdate(null);
               }}
             >
-              <option value="production">Released</option>
-              <option value="development">Every build</option>
+              <option value="production">{t('Released')}</option>
+              <option value="development">{t('Every build')}</option>
               {/* Builds made on somebody's own machine and published straight to this account's
                   server. Offered because the machine being tested is usually not the machine the
                   fix was written on, and carrying a bundle between them by hand stops working
                   the moment there are three of them. */}
-              <option value="local">Built here</option>
+              <option value="local">{t('Built here')}</option>
             </select>
-          </Row>
-          <Row label="">
-            <div className="flex items-center gap-3">
-              <span className="text-note-2 text-muted">
-                {update === 'checking'
-                  ? 'Checking'
-                  : update === 'current'
-                    ? 'Up to date'
-                    : update
-                      ? `${update.version} is available`
-                      : ''}
-              </span>
-              <button
-                type="button"
-                className="rounded-full border border-line-2 bg-wash-2 px-3 py-1 text-note-2 text-ink-3"
-                onClick={() => {
-                  void (async () => {
-                    setUpdate('checking');
-
-                    try {
-                      const found = await prism.checkForUpdate();
-                      setUpdate(found ?? 'current');
-
-                      if (found) {
-                        await prism.installUpdate();
-                      }
-                    } catch (error) {
-                      setUpdate(null);
-                      setTrouble(error instanceof Error ? error.message : String(error));
-                    }
-                  })();
-                }}
-              >
-                {update && update !== 'checking' && update !== 'current' ? 'Install' : 'Check now'}
-              </button>
-            </div>
           </Row>
         </Band>
 
-        <Band title="Watching">
-          <Row label="Send input">
-            <input
-              type="checkbox"
-              className={TOGGLE}
-              checked={settings?.control ?? true}
-              onChange={(event) => {
-                save({ control: event.target.checked });
+        <Band title={t('Watching')}>
+          <Row label={t('Send input')}>
+            <Switch
+              on={settings?.control ?? true}
+              onChange={(on) => {
+                save({ control: on });
               }}
             />
           </Row>
-          <Row label="Smooth playback">
-            <input
-              type="checkbox"
-              className={TOGGLE}
-              checked={settings?.smooth ?? false}
-              onChange={(event) => {
-                save({ smooth: event.target.checked });
+          <Row label={t('Smooth playback')}>
+            <Switch
+              on={settings?.smooth ?? false}
+              onChange={(on) => {
+                save({ smooth: on });
               }}
             />
           </Row>
@@ -554,11 +640,11 @@ export function SharingTerms(): JSX.Element {
 
   return (
     <div className="flex flex-col">
-      <Row label="Name">
+      <Row label={t('Name')}>
         <input
           type="text"
           spellCheck={false}
-          placeholder="This machine"
+          placeholder={t('This machine')}
           className={WIDE}
           value={settings?.nickname ?? ''}
           onChange={(event) => {
@@ -570,7 +656,7 @@ export function SharingTerms(): JSX.Element {
           onBlur={flush}
         />
       </Row>
-      <Row label="Frame rate">
+      <Row label={t('Frame rate')}>
         <input
           type="number"
           min={1}
@@ -583,7 +669,7 @@ export function SharingTerms(): JSX.Element {
           }}
         />
       </Row>
-      <Row label="Bitrate">
+      <Row label={t('Bitrate')}>
         <input
           type="number"
           min={1}
@@ -596,7 +682,7 @@ export function SharingTerms(): JSX.Element {
           }}
         />
       </Row>
-      <Row label="Listen on">
+      <Row label={t('Listen on')}>
         <input
           type="text"
           spellCheck={false}

@@ -7,10 +7,14 @@
 use prism_core::net::packet::{
     AUDIO_HEADER_LEN, AudioPacket, CLOCK_PING_LEN, CLOCK_PONG_LEN, CONTROL_HEADER_LEN,
     CURSOR_POSITION_LEN, Channel, ClockPing, ClockPong, ControlType, CursorPosition,
-    FEC_HEADER_LEN, FEEDBACK_PACKET_LEN, FORMAT_VERSION, FecPacket, FeedbackPacket,
-    INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket, MAX_AUDIO_PAYLOAD, MAX_PACKET_SIZE,
-    MAX_PLAINTEXT_SIZE, MAX_VIDEO_PAYLOAD, MouseButton, SEAL_OVERHEAD, VIDEO_FLAGS_RESERVED_MASK,
-    VIDEO_HEADER_LEN, VideoPacket, channel_of, control_type_of,
+    FEC_HEADER_LEN, FEEDBACK_PACKET_LEN, FILE_ANSWER_LEN, FILE_ASK_FIXED_LEN,
+    FILE_CHUNK_HEADER_LEN, FILE_ENTRY_FIXED_LEN, FILE_HEADER_LEN, FILE_LISTING_FIXED_LEN,
+    FILE_OFFER_FIXED_LEN, FILE_REPORT_LEN, FORMAT_VERSION, FecPacket, FeedbackPacket, FileAnswer,
+    FileAsk, FileChunk, FileEntry, FileList, FileListing, FileOffer, FileRefusal, FileReport,
+    FileType, GOODBYE_LEN, Goodbye, INPUT_PACKET_LEN, InputEvent, InputKind, InputPacket,
+    MAX_AUDIO_PAYLOAD, MAX_FILE_NAME, MAX_FILE_PAYLOAD, MAX_PACKET_SIZE, MAX_PLAINTEXT_SIZE,
+    MAX_VIDEO_PAYLOAD, MouseButton, SEAL_OVERHEAD, VIDEO_FLAGS_RESERVED_MASK, VIDEO_HEADER_LEN,
+    VideoPacket, channel_of, control_type_of, file_type_of,
 };
 use serde_json::Value;
 
@@ -161,6 +165,10 @@ fn input_packets_round_trip_through_the_vectors() {
         v["inputKinds"]["key"].as_u64().unwrap()
     );
     assert_eq!(
+        InputKind::MouseTo as u64,
+        v["inputKinds"]["mouseTo"].as_u64().unwrap()
+    );
+    assert_eq!(
         MouseButton::Left as u64,
         v["mouseButtons"]["left"].as_u64().unwrap()
     );
@@ -185,9 +193,15 @@ fn input_packets_round_trip_through_the_vectors() {
                 dx: x,
                 dy: fields["y"].as_i64().unwrap() as i16,
             },
-            _ => InputEvent::Key {
+            3 => InputEvent::Key {
                 usage: x as u16,
                 pressed,
+            },
+            // Unsigned on the wire's own terms: the same two bytes the other kinds read as a
+            // signed number, read as a fraction of the screen.
+            _ => InputEvent::MouseTo {
+                x: fields["x"].as_u64().unwrap() as u16,
+                y: fields["y"].as_u64().unwrap() as u16,
             },
         };
 
@@ -347,6 +361,34 @@ fn cursor_positions_round_trip_through_the_vectors() {
 }
 
 #[test]
+fn goodbyes_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    assert_eq!(
+        GOODBYE_LEN as u64,
+        v["constants"]["goodbyeLen"].as_u64().unwrap()
+    );
+    assert_eq!(
+        ControlType::Goodbye as u64,
+        v["controlTypes"]["goodbye"].as_u64().unwrap()
+    );
+
+    for vector in v["goodbyes"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+
+        let mut buf = [0u8; GOODBYE_LEN];
+        let written = Goodbye.encode_into(&mut buf).unwrap();
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            Goodbye::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            Goodbye,
+            "decode {name}"
+        );
+    }
+}
+
+#[test]
 fn video_packets_round_trip_through_the_vectors() {
     let v = vectors();
 
@@ -415,6 +457,221 @@ fn feedback_packets_round_trip_through_the_vectors() {
 }
 
 #[test]
+fn file_constants_match_the_shared_vectors() {
+    let v = vectors();
+
+    assert_eq!(
+        Channel::File as u64,
+        v["channels"]["file"].as_u64().unwrap()
+    );
+
+    for (tag, name) in [
+        (FileType::Offer, "offer"),
+        (FileType::Answer, "answer"),
+        (FileType::Chunk, "chunk"),
+        (FileType::Report, "report"),
+        (FileType::List, "list"),
+        (FileType::Listing, "listing"),
+        (FileType::Ask, "ask"),
+    ] {
+        assert_eq!(tag as u64, v["fileTypes"][name].as_u64().unwrap(), "{name}");
+    }
+
+    for (refusal, name) in [
+        (FileRefusal::Declined, "declined"),
+        (FileRefusal::TooLarge, "tooLarge"),
+        (FileRefusal::BadName, "badName"),
+        (FileRefusal::NotWritable, "notWritable"),
+    ] {
+        assert_eq!(
+            refusal as u64,
+            v["fileRefusals"][name].as_u64().unwrap(),
+            "{name}"
+        );
+    }
+
+    for (value, name) in [
+        (FILE_HEADER_LEN, "fileHeaderLen"),
+        (FILE_CHUNK_HEADER_LEN, "fileChunkHeaderLen"),
+        (MAX_FILE_PAYLOAD, "maxFilePayload"),
+        (FILE_OFFER_FIXED_LEN, "fileOfferFixedLen"),
+        (FILE_ANSWER_LEN, "fileAnswerLen"),
+        (FILE_REPORT_LEN, "fileReportLen"),
+        (FILE_LISTING_FIXED_LEN, "fileListingFixedLen"),
+        (FILE_ENTRY_FIXED_LEN, "fileEntryFixedLen"),
+        (FILE_ASK_FIXED_LEN, "fileAskFixedLen"),
+        (MAX_FILE_NAME, "maxFileName"),
+    ] {
+        assert_eq!(
+            value as u64,
+            v["constants"][name].as_u64().unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn file_offers_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["fileOffers"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+        let offer = FileOffer {
+            id: fields["id"].as_u64().unwrap() as u32,
+            size: u64_field(fields, "size"),
+            chunks: fields["chunks"].as_u64().unwrap() as u32,
+            name: fields["name"].as_str().unwrap().to_owned(),
+        };
+
+        let mut buf = vec![0u8; offer.encoded_len()];
+        let written = offer.encode_into(&mut buf).unwrap();
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            FileOffer::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            offer,
+            "decode {name}"
+        );
+    }
+}
+
+#[test]
+fn file_answers_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["fileAnswers"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+        let answer = FileAnswer {
+            id: fields["id"].as_u64().unwrap() as u32,
+            accepted: fields["accepted"].as_bool().unwrap(),
+            refusal: FileRefusal::try_from(fields["refusal"].as_u64().unwrap() as u8).unwrap(),
+        };
+
+        let mut buf = [0u8; FILE_ANSWER_LEN];
+        let written = answer.encode_into(&mut buf).unwrap();
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            FileAnswer::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            answer,
+            "decode {name}"
+        );
+    }
+}
+
+#[test]
+fn file_chunks_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["fileChunks"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+        let payload = hex_to_bytes(vector["payloadHex"].as_str().unwrap());
+        let chunk = FileChunk {
+            id: fields["id"].as_u64().unwrap() as u32,
+            index: fields["index"].as_u64().unwrap() as u32,
+            payload: &payload,
+        };
+
+        let mut buf = vec![0u8; chunk.encoded_len()];
+        let written = chunk.encode_into(&mut buf).unwrap();
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+
+        let bytes = hex_to_bytes(expected_hex);
+        assert_eq!(FileChunk::decode(&bytes).unwrap(), chunk, "decode {name}");
+    }
+}
+
+#[test]
+fn file_reports_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["fileReports"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+        let report = FileReport {
+            id: fields["id"].as_u64().unwrap() as u32,
+            have: fields["have"].as_u64().unwrap() as u32,
+            arrived: fields["arrived"].as_u64().unwrap() as u32,
+        };
+
+        let mut buf = [0u8; FILE_REPORT_LEN];
+        let written = report.encode_into(&mut buf).unwrap();
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            FileReport::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            report,
+            "decode {name}"
+        );
+    }
+}
+
+#[test]
+fn file_listings_and_asks_round_trip_through_the_vectors() {
+    let v = vectors();
+
+    for vector in v["fileLists"].as_array().unwrap() {
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let mut buf = [0u8; FILE_HEADER_LEN];
+        let written = FileList::encode_into(&mut buf).unwrap();
+
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex);
+        assert_eq!(
+            FileList::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            FileList
+        );
+    }
+
+    for vector in v["fileListings"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let fields = &vector["fields"];
+        let listing = FileListing {
+            more: fields["more"].as_bool().unwrap(),
+            files: fields["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|file| FileEntry {
+                    size: u64_field(file, "size"),
+                    name: file["name"].as_str().unwrap().to_owned(),
+                })
+                .collect(),
+        };
+
+        let mut buf = vec![0u8; listing.encoded_len()];
+        let written = listing.encode_into(&mut buf).unwrap();
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            FileListing::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            listing,
+            "decode {name}"
+        );
+    }
+
+    for vector in v["fileAsks"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let expected_hex = vector["hex"].as_str().unwrap();
+        let ask = FileAsk {
+            name: vector["fields"]["name"].as_str().unwrap().to_owned(),
+        };
+
+        let mut buf = vec![0u8; ask.encoded_len()];
+        let written = ask.encode_into(&mut buf).unwrap();
+        assert_eq!(bytes_to_hex(&buf[..written]), expected_hex, "encode {name}");
+        assert_eq!(
+            FileAsk::decode(&hex_to_bytes(expected_hex)).unwrap(),
+            ask,
+            "decode {name}"
+        );
+    }
+}
+
+#[test]
 fn malformed_packets_are_rejected() {
     let v = vectors();
 
@@ -432,10 +689,21 @@ fn malformed_packets_are_rejected() {
                 Ok(ControlType::ClockPing) => ClockPing::decode(&bytes).is_err(),
                 Ok(ControlType::ClockPong) => ClockPong::decode(&bytes).is_err(),
                 Ok(ControlType::CursorPosition) => CursorPosition::decode(&bytes).is_err(),
+                Ok(ControlType::Goodbye) => Goodbye::decode(&bytes).is_err(),
             },
             Ok(Channel::Input) => InputPacket::decode(&bytes).is_err(),
             Ok(Channel::Fec) => FecPacket::decode(&bytes).is_err(),
             Ok(Channel::Audio) => AudioPacket::decode(&bytes).is_err(),
+            Ok(Channel::File) => match file_type_of(&bytes) {
+                Err(_) => true,
+                Ok(FileType::Offer) => FileOffer::decode(&bytes).is_err(),
+                Ok(FileType::Answer) => FileAnswer::decode(&bytes).is_err(),
+                Ok(FileType::Chunk) => FileChunk::decode(&bytes).is_err(),
+                Ok(FileType::Report) => FileReport::decode(&bytes).is_err(),
+                Ok(FileType::List) => FileList::decode(&bytes).is_err(),
+                Ok(FileType::Listing) => FileListing::decode(&bytes).is_err(),
+                Ok(FileType::Ask) => FileAsk::decode(&bytes).is_err(),
+            },
         };
 
         assert!(rejected, "{name} should have been rejected: {reason}");

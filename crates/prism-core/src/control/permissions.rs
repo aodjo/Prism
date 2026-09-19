@@ -105,14 +105,41 @@ impl Permissions {
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use objc2_core_foundation::{CFBoolean, CFDictionary, CFString};
+
     use super::{Grant, Permissions};
 
     // SAFETY: `AXIsProcessTrusted` and `AXIsProcessTrustedWithOptions` are stable
-    // Accessibility entry points that report and optionally ask for the trust state. They
-    // live in ApplicationServices, which is named because nothing else here pulls it in.
+    // Accessibility entry points that report and optionally ask for the trust state, and
+    // `kAXTrustedCheckOptionPrompt` is the constant key the second one reads. They live in
+    // ApplicationServices, which is named because nothing else here pulls it in.
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C-unwind" {
         fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: Option<&CFDictionary>) -> bool;
+        static kAXTrustedCheckOptionPrompt: Option<&'static CFString>;
+    }
+
+    /// Asks for Accessibility, which is also what puts this copy of the application on the list.
+    ///
+    /// Reading the trust state is not enough. The list in System Settings holds an entry per
+    /// signed copy, and an entry made by an earlier build — signed another way — stays switched
+    /// on while this build is refused, so turning it on does nothing. Asking with the prompt is
+    /// what adds this build to the list, where switching it on counts; clearing an entry an
+    /// earlier build left is the caller's, since it means starting a process.
+    fn ask_for_input() -> bool {
+        // SAFETY: a constant the framework defines, read once it has been linked.
+        let Some(prompt) = (unsafe { kAXTrustedCheckOptionPrompt }) else {
+            // SAFETY: takes no arguments and only reports the trust state.
+            return unsafe { AXIsProcessTrusted() };
+        };
+
+        let options =
+            CFDictionary::<CFString, CFBoolean>::from_slices(&[prompt], &[CFBoolean::new(true)]);
+
+        // SAFETY: the dictionary is a valid CFDictionary for the length of the call, keyed by
+        // the constant the function documents.
+        unsafe { AXIsProcessTrustedWithOptions(Some((*options).as_ref())) }
     }
 
     /// Returns what this machine currently allows, without prompting for anything.
@@ -134,11 +161,21 @@ mod platform {
     pub fn request(grant: Grant) -> bool {
         match grant {
             Grant::Screen => objc2_core_graphics::CGRequestScreenCaptureAccess(),
-            // Accessibility has no request call that does not need an options dictionary, and
-            // the prompt it raises only offers the settings pane anyway. Reporting the state
-            // and letting the caller open the pane is the same journey with one less dialog.
-            // SAFETY: takes no arguments and only reports the trust state.
-            Grant::Input => unsafe { AXIsProcessTrusted() },
+            Grant::Input => ask_for_input(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::kAXTrustedCheckOptionPrompt;
+
+        #[test]
+        fn the_prompt_is_asked_for_under_the_key_the_framework_reads() {
+            // Read, never used: asking would put a system dialog in front of whoever runs this.
+            // SAFETY: a constant the framework defines, read once it has been linked.
+            let key = unsafe { kAXTrustedCheckOptionPrompt }.expect("the framework defines it");
+
+            assert_eq!(key.to_string(), "AXTrustedCheckOptionPrompt");
         }
     }
 }

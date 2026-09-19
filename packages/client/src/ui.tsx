@@ -8,6 +8,37 @@
 
 import type { JSX, ReactNode } from 'react';
 
+/**
+ * How each permission reads, in the order the design puts them.
+ *
+ * Shared by the first-run screen, which asks for all of them, and the home window, which asks
+ * for whichever ones sharing turned out to be missing. One list, so the two never describe the
+ * same switch in System Settings two ways.
+ */
+export const GRANTS = [
+  {
+    id: 'screen',
+    glyph: '▣',
+    name: 'Screen Recording',
+    why: 'Capture this display so it can be streamed.',
+    tint: 'border-[rgba(124,92,255,0.28)] bg-[rgba(124,92,255,0.16)] text-violet',
+  },
+  {
+    id: 'input',
+    glyph: '⌘',
+    name: 'Accessibility',
+    why: 'Pass keyboard and mouse input to this machine.',
+    tint: 'border-[rgba(53,214,255,0.28)] bg-[rgba(53,214,255,0.16)] text-cyan',
+  },
+  {
+    id: 'network',
+    glyph: '⇄',
+    name: 'Local Network',
+    why: 'Discover your other devices on this network.',
+    tint: 'border-[rgba(77,232,176,0.28)] bg-[rgba(77,232,176,0.16)] text-mint',
+  },
+] as const;
+
 /** One blurred shape in the backdrop, placed as a share of the window. */
 export interface BlobShape {
   /** The file under `assets/`. */
@@ -173,7 +204,7 @@ export function Primary({
   return (
     <button
       type="button"
-      className={small ? 'btn-primary-sm no-drag' : 'btn-primary no-drag'}
+      className={small ? 'btn-primary-sm' : 'btn-primary'}
       disabled={disabled}
       onClick={onClick}
     >

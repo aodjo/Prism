@@ -296,6 +296,34 @@ fn a_packet_at_the_far_edge_of_the_window_is_still_accepted() {
 }
 
 #[test]
+fn a_jump_of_the_whole_window_still_refuses_the_counter_it_left() {
+    // The two tests above deliver every counter, so the window only ever moves by one and the
+    // case where it moves by its own width is never reached. Moving by exactly that much keeps
+    // nothing of what came before except the counter being left behind, which is still inside
+    // the window at its far edge — and clearing that one along with the rest made a packet the
+    // opener had already accepted replayable.
+    let (mut sealer, mut opener) = pair();
+
+    let first = sealed(&mut sealer, b"first");
+    let mut arriving = first.clone();
+    assert_eq!(opener.open(&mut arriving).expect("opens"), b"first");
+
+    // Sixty-four are sent and only the last arrives, which is the whole window in one step.
+    let mut jumped = sealed(&mut sealer, b"jumped");
+    for _ in 1..64 {
+        jumped = sealed(&mut sealer, b"jumped");
+    }
+    assert_eq!(opener.open(&mut jumped).expect("opens"), b"jumped");
+
+    let mut again = first;
+    assert_eq!(
+        opener.open(&mut again),
+        Err(SealError::Replay { counter: 0 })
+    );
+    assert_eq!(opener.replayed(), 1);
+}
+
+#[test]
 fn a_forged_packet_claiming_a_far_future_counter_does_not_move_the_window() {
     // The property the ordering of the two checks exists for. If the counter were judged
     // first, anyone able to write a packet at this port could name a counter of two to the

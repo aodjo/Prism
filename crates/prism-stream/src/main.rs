@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use prism_core::control::client::{Report, Reporter};
+use prism_core::control::client::{Departure, Report, Reporter};
 use prism_stream::ipc;
 
 /// What a run came to, and whether the shell heard why on the channel it reads messages on.
@@ -64,7 +64,42 @@ fn serve() -> Outcome {
         })
     };
 
-    let outcome = watch(&start, &say);
+    // Standard input stays open behind this. It used to be closed the moment `Start` had been
+    // read, because there was nothing else to say — and that is exactly what made the files a
+    // session can move something only this process could offer.
+    let (asked, arriving) = std::sync::mpsc::channel();
+
+    std::thread::Builder::new()
+        .name("prism-stream-commands".into())
+        .spawn(move || {
+            let mut input = io::stdin().lock();
+
+            // A message this build has no name for ends the reading, because the length prefix
+            // is the only thing keeping the pipe in step and a body it could not parse has
+            // already been consumed. The stream carries on; it simply stops being driven.
+            while let Ok(Some(command)) = ipc::read::<ipc::Command>(&mut input) {
+                if asked.send(command).is_err() {
+                    return;
+                }
+            }
+        })
+        .ok();
+
+    let talk = ipc::Talkback {
+        asked: Some(arriving),
+        tell: {
+            let out = Arc::clone(&out);
+
+            Box::new(move |event| {
+                let Ok(mut out) = out.lock() else {
+                    return;
+                };
+                let _ = ipc::write(&mut *out, &event);
+            })
+        },
+    };
+
+    let outcome = watch(&start, &say, &talk);
 
     let told = match out.lock() {
         Ok(mut out) => ipc::write(
@@ -86,7 +121,7 @@ fn serve() -> Outcome {
 
 /// Opens the window and shows the host until the stream ends.
 #[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
-fn watch(start: &ipc::Start, say: &Reporter) -> Result<(), String> {
+fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(), String> {
     use std::time::Duration;
 
     use prism_core::control::client::{ClientConfig, decodable};
@@ -143,12 +178,15 @@ fn watch(start: &ipc::Start, say: &Reporter) -> Result<(), String> {
 
     display::run(
         config,
-        start.width,
-        start.height,
-        if start.smooth { SMOOTH_PACING_US } else { 0 },
-        start.control,
-        false,
+        display::Shown {
+            width: start.width,
+            height: start.height,
+            pacing_us: if start.smooth { SMOOTH_PACING_US } else { 0 },
+            capture_input: start.control,
+            synthetic_input: false,
+        },
         say,
+        talk,
     )
     .map_err(|err| err.to_string())
 }
@@ -158,8 +196,8 @@ fn watch(start: &ipc::Start, say: &Reporter) -> Result<(), String> {
 /// Said plainly rather than crashing: this binary exists on every platform the workspace builds,
 /// and a platform whose client is not written yet should say so.
 #[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
-fn watch(start: &ipc::Start, say: &Reporter) -> Result<(), String> {
-    let _ = (start, say);
+fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(), String> {
+    let _ = (start, say, talk);
 
     Err("this build has no window to show a stream in".to_owned())
 }
@@ -185,6 +223,12 @@ fn translate(report: Report) -> ipc::Event {
             fps: counters.fps,
             kbps: counters.kbps,
             frames: counters.frames,
+        },
+        Report::Gone(how) => ipc::Event::Gone {
+            how: match how {
+                Departure::Left => ipc::Departure::Left,
+                Departure::Silent => ipc::Departure::Silent,
+            },
         },
     }
 }
