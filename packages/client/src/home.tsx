@@ -553,7 +553,7 @@ function Home(): JSX.Element {
             dragged past the bottom takes the page with it instead of being clipped. */}
         <div
           ref={field}
-          className="relative mt-4 min-h-0 flex-1"
+          className="relative mt-11 min-h-0 flex-1"
           style={{ minHeight: down * STEP }}
           onPointerDown={(event) => {
             if (editing && event.target === event.currentTarget) {
