@@ -440,18 +440,6 @@ impl Held {
         Ok(snapshot)
     }
 
-    /// Ends the stream, if one is running.
-    ///
-    /// Returns as soon as the client has been told to go, not once it has: the phase becomes
-    /// `stopped` when the process actually ends, and that arrives through the watcher like
-    /// every other change.
-    ///
-    /// The Electron shell asked politely first and insisted after a second and a bit, because
-    /// SDL turns a terminate signal into a quit event the stream only reads between frames —
-    /// so a stream whose host had gone quiet did not notice for as long as its idle timeout.
-    /// The standard library has only the insistent kind of kill, so that is what this sends;
-    /// what it costs is the client's own tidy shutdown, not anything the person watching sees.
-    ///
     /// Asks the running stream for something.
     ///
     /// # Errors
@@ -465,6 +453,18 @@ impl Held {
             .ask(command)
     }
 
+    /// Ends the stream, if one is running.
+    ///
+    /// Returns as soon as the client has been told to go, not once it has: the phase becomes
+    /// `stopped` when the process actually ends, and that arrives through the watcher like
+    /// every other change.
+    ///
+    /// The Electron shell asked politely first and insisted after a second and a bit, because
+    /// SDL turns a terminate signal into a quit event the stream only reads between frames —
+    /// so a stream whose host had gone quiet did not notice for as long as its idle timeout.
+    /// The standard library has only the insistent kind of kill, so that is what this sends;
+    /// what it costs is the client's own tidy shutdown, not anything the person watching sees.
+    ///
     /// # Errors
     ///
     /// Fails only if a thread died holding the state, which nothing here does.
@@ -529,7 +529,35 @@ impl Held {
 fn absorb(shared: &Arc<Shared>, run: u64, source: ChildStdout) {
     let mut source = BufReader::new(source);
 
-    while let Ok(Some(event)) = ipc::read::<ipc::Event>(&mut source) {
+    loop {
+        let event = match ipc::read::<ipc::Event>(&mut source) {
+            Ok(Some(event)) => event,
+            // The pipe ended, which is what a process closing it means. `conclude` settles the
+            // rest.
+            Ok(None) => return,
+            // A message that could not be read. The length said where the next one starts, so a
+            // reader that failed here no longer knows where in the pipe it is and cannot go on.
+            //
+            // But the stream itself is still running, and leaving it there is the worst of the
+            // two: its pipe fills, it blocks on the write, and the shell goes on showing
+            // `connecting` for a session that will never report again and a window that will
+            // never close. So the run is ended rather than abandoned, which puts it through
+            // `conclude` like any other.
+            Err(error) => {
+                if let Ok(mut inner) = shared.inner.lock()
+                    && inner.run == run
+                {
+                    inner.remember(format!("the stream stopped making sense ({error})"));
+
+                    if let Some(child) = inner.child.as_mut() {
+                        let _ = child.kill();
+                    }
+                }
+
+                return;
+            }
+        };
+
         let Ok(mut inner) = shared.inner.lock() else {
             return;
         };
@@ -633,6 +661,11 @@ fn conclude(shared: &Arc<Shared>, run: u64) {
         return;
     }
 
+    // Let go of the pipe into the stream before waiting on it. `Child::wait` closes the one it
+    // still owns for exactly this reason, and this one was taken out of the child at spawn so
+    // that files could be asked for — which makes closing it this end's job.
+    inner.asking = None;
+
     let ended_well = inner
         .child
         .take()
@@ -647,9 +680,6 @@ fn conclude(shared: &Arc<Shared>, run: u64) {
 
     let session = inner.take_session();
     inner.host = None;
-    // Nothing left to ask through. A file offered after this would be written into a pipe whose
-    // reader has gone, which fails late and says the wrong thing about why.
-    inner.asking = None;
     inner.moving.clear();
     inner.offered.clear();
     inner.offered_more = false;
