@@ -41,6 +41,8 @@ use sdl3_sys::video::{SDL_GetWindowProperties, SDL_PROP_WINDOW_COCOA_WINDOW_POIN
 pub enum Tool {
     /// Hand the pointer and the keyboard to the machine being watched, or take them back.
     Control,
+    /// Give the pointer to the far machine as movement rather than as a place, or stop.
+    Aim,
     /// Take the window down one step: out of full screen, or into the Dock.
     Shrink,
     /// Fill the screen, and leave it again.
@@ -60,6 +62,7 @@ impl Tool {
     fn identifier(self) -> &'static str {
         match self {
             Tool::Control => "kr.presm.prism.control",
+            Tool::Aim => "kr.presm.prism.aim",
             Tool::Shrink => "kr.presm.prism.shrink",
             Tool::Fullscreen => "kr.presm.prism.fullscreen",
             Tool::Send => "kr.presm.prism.send",
@@ -81,6 +84,7 @@ impl Tool {
     fn label(self) -> &'static str {
         match self {
             Tool::Control => "제어",
+            Tool::Aim => "마우스 가두기",
             Tool::Shrink => "축소",
             Tool::Fullscreen => "전체 화면",
             Tool::Send => "파일 보내기",
@@ -98,6 +102,7 @@ impl Tool {
     fn symbol(self) -> &'static str {
         match self {
             Tool::Control => "cursorarrow",
+            Tool::Aim => "cursorarrow.motionlines",
             Tool::Shrink => "arrow.down.right.and.arrow.up.left",
             Tool::Fullscreen => "arrow.up.left.and.arrow.down.right",
             Tool::Send => "square.and.arrow.up",
@@ -109,8 +114,9 @@ impl Tool {
 }
 
 /// The controls, in the order they appear.
-const TOOLS: [Tool; 7] = [
+const TOOLS: [Tool; 8] = [
     Tool::Control,
+    Tool::Aim,
     Tool::Shrink,
     Tool::Fullscreen,
     Tool::Send,
@@ -121,6 +127,9 @@ const TOOLS: [Tool; 7] = [
 
 /// The symbol the control item carries while the machine is being controlled.
 const CONTROLLING: &str = "cursorarrow.rays";
+
+/// The symbol the aim item carries while the pointer is caged in this window.
+const AIMING: &str = "scope";
 
 /// How large the symbols on the controls are drawn, in points.
 ///
@@ -454,6 +463,17 @@ impl Toolbar {
 
         for (tool, item) in self.controls.ivars().items.borrow().iter() {
             if *tool == Tool::Control {
+                item.setImage(symbol_image(symbol).as_deref());
+            }
+        }
+    }
+
+    /// Redraws the aim item to say whether the pointer is caged in this window.
+    pub fn set_aiming(&self, aiming: bool) {
+        let symbol = if aiming { AIMING } else { Tool::Aim.symbol() };
+
+        for (tool, item) in self.controls.ivars().items.borrow().iter() {
+            if *tool == Tool::Aim {
                 item.setImage(symbol_image(symbol).as_deref());
             }
         }

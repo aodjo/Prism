@@ -209,6 +209,10 @@ fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(),
 /// another when three are open; the application second, because that is what tells them from
 /// everything else on the desktop. A shell that sent no name leaves the application alone,
 /// which is what every build before this one showed.
+///
+/// Only where there is a window to title. A build without one never calls this, and leaving it
+/// unconditional is dead code on every platform whose client is not written yet.
+#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
 fn titled(label: &str) -> String {
     if label.is_empty() {
         return "Prism".to_owned();
@@ -253,7 +257,11 @@ fn capped(size: u16) -> u32 {
     if size < 65_534 { u32::from(size) } else { 0 }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "window",
+    any(target_os = "macos", target_os = "windows")
+))]
 mod tests {
     use super::*;
 

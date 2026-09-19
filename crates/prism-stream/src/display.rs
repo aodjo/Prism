@@ -220,10 +220,25 @@ fn where_clicked(event: &Event, shown: Fitted) -> Option<InputEvent> {
 /// moved instead leaves the two pointers wherever they each happened to start, and they never
 /// meet.
 ///
+/// Unless the pointer is caged, which is what `aiming` says. A game that hides the cursor reads
+/// how far the mouse moved and puts the cursor back in the middle itself, so there is no place
+/// to send: the far pointer is not where this one points, and a stream of destinations fights
+/// the game for it. Worse, a pointer that is not caged stops at the edge of this window, which
+/// in a game is a player who cannot turn any further right. Caged, the pointer disappears here,
+/// never reaches an edge, and what crosses is the movement itself.
+///
 /// Key repeats are dropped. The host's own operating system generates repeats from the
 /// key being held, so forwarding the client's as well would double them.
-fn to_input_event(event: &Event, shown: Fitted) -> Option<InputEvent> {
+fn to_input_event(event: &Event, shown: Fitted, aiming: bool) -> Option<InputEvent> {
     match event {
+        Event::MouseMotion { xrel, yrel, .. } if aiming => {
+            // Whole pixels, because that is the unit the far machine moves its pointer in.
+            // Fractions of one would be dropped there and the aim would drift short.
+            let dx = xrel.round() as i16;
+            let dy = yrel.round() as i16;
+
+            (dx != 0 || dy != 0).then_some(InputEvent::MouseMove { dx, dy })
+        }
         Event::MouseMotion { x, y, .. } => {
             let (x, y) = to_fraction(*x, *y, shown);
 
@@ -511,6 +526,23 @@ fn announce_control(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
     });
 }
 
+/// Says that the pointer has been caged in this window, or let go.
+///
+/// Worth saying plainly either way. Caging takes the cursor off this machine, and somebody who
+/// did it by accident is looking at a desktop with no pointer on it; the line is where the way
+/// out is written down.
+fn announce_aim(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
+    if let Some(bar) = bar {
+        bar.set_aiming(on);
+    }
+
+    say.note(if on {
+        "display: the pointer is caged and sent as movement, control option to let it go"
+    } else {
+        "display: the pointer is this machine's again"
+    });
+}
+
 /// How the stream is to be shown, as against what is to be shown.
 ///
 /// A handful of values that all answer the same question — what this window does with what
@@ -689,6 +721,13 @@ pub fn run(
     // free to leave the window, and only where it points inside it goes across.
     let mut controlling = capture_input;
 
+    // Whether the pointer is caged in this window and sent on as movement rather than as a
+    // place. Off from the start: it takes the cursor away from this machine, and nothing should
+    // do that until somebody asks. What asks for it is a game — anything that hides the cursor
+    // and steers by how far the mouse moved.
+    let mut aiming = false;
+    let mouse = sdl.mouse();
+
     // The size the pointer's coordinates are measured against, which is the window's own and
     // not the drawable's: the two differ on a screen with more than one pixel to a point.
     let mut area = window.size();
@@ -725,7 +764,26 @@ pub fn run(
             match tool {
                 toolbar::Tool::Control if capture_input => {
                     controlling = !controlling;
+
+                    // Letting go of control lets go of the pointer with it. A caged cursor on
+                    // a session that has stopped sending anywhere is a cursor nobody can find.
+                    if !controlling && aiming {
+                        aiming = false;
+                        mouse.set_relative_mouse_mode(&window, false);
+                    }
+
                     announce_control(bar.as_ref(), say, controlling);
+                }
+                // The pointer goes to the far machine as movement rather than as a place, and
+                // disappears from this one. For a game that hides the cursor and steers by how
+                // far the mouse moved, which is every first-person one.
+                toolbar::Tool::Aim if capture_input && controlling => {
+                    aiming = !aiming;
+                    mouse.set_relative_mouse_mode(&window, aiming);
+                    announce_aim(bar.as_ref(), say, aiming);
+                }
+                toolbar::Tool::Aim => {
+                    say.note("display: take control first, then the pointer can be caged");
                 }
                 // Asked for on a session that is only watching. Said rather than ignored,
                 // because a control that does nothing when pressed is a fault to look for.
@@ -882,6 +940,15 @@ pub fn run(
             }
             if capture_input && is_control_toggle(&event) {
                 controlling = !controlling;
+
+                // The one chord everybody reaches for to get their own machine back has to
+                // get the cursor back too, since a caged one is the half that is hardest to
+                // undo without it.
+                if !controlling && aiming {
+                    aiming = false;
+                    mouse.set_relative_mouse_mode(&window, false);
+                }
+
                 announce_control(bar.as_ref(), say, controlling);
                 continue;
             }
@@ -899,14 +966,18 @@ pub fn run(
                 let shown = shown_in(picture, area);
 
                 if let Some(sender) = input_slot.get() {
-                    if controlling {
+                    // Where a click was made, so that the first one after control was taken
+                    // lands where it was aimed. Not while the pointer is caged: there is no
+                    // place then, and sending one would throw the far pointer to wherever in
+                    // this window the caged cursor happens to be held.
+                    if controlling && !aiming {
                         if let Some(place) = where_clicked(&event, shown) {
                             if sender.send(place).is_ok() {
                                 sent_input += 1;
                             }
                         }
                     }
-                    if let Some(input) = to_input_event(&event, shown) {
+                    if let Some(input) = to_input_event(&event, shown, aiming) {
                         if let Ok(stamped) = sender.send(input) {
                             sent_input += 1;
                             predict(&mut cursor, stamped, input);
@@ -1046,7 +1117,7 @@ const SESSION_WIND_DOWN: Duration = Duration::from_millis(1500);
 
 #[cfg(test)]
 mod tests {
-    use super::{shown_in, to_fraction};
+    use super::{InputEvent, shown_in, to_fraction};
 
     /// A window the shape of the picture in it, so the picture fills it.
     fn filled() -> prism_core::render::Fitted {
@@ -1094,5 +1165,45 @@ mod tests {
         let shown = shown_in(None, (1280, 752));
 
         assert_eq!(to_fraction(1279.0, 751.0, shown), (65535, 65535));
+    }
+
+    /// One pointer movement, as SDL reports it.
+    fn motion(x: f32, y: f32, xrel: f32, yrel: f32) -> sdl3::event::Event {
+        sdl3::event::Event::MouseMotion {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            mousestate: sdl3::mouse::MouseState::from_sdl_state(0),
+            x,
+            y,
+            xrel,
+            yrel,
+        }
+    }
+
+    #[test]
+    fn a_free_pointer_says_where_it_is() {
+        let sent = super::to_input_event(&motion(639.5, 375.5, 12.0, -4.0), filled(), false);
+
+        assert!(matches!(sent, Some(InputEvent::MouseTo { .. })), "{sent:?}");
+    }
+
+    #[test]
+    fn a_caged_pointer_says_how_far_it_moved() {
+        // Which is the only thing a game that hides the cursor can use. Where it is would be
+        // wherever the cage happens to hold it, and that is not where the player is looking.
+        let sent = super::to_input_event(&motion(639.5, 375.5, 12.0, -4.0), filled(), true);
+
+        assert_eq!(sent, Some(InputEvent::MouseMove { dx: 12, dy: -4 }));
+    }
+
+    #[test]
+    fn a_caged_pointer_that_did_not_move_says_nothing() {
+        // SDL reports motion for a pointer held still against the edge of its cage. Sending
+        // a movement of nothing is a packet an hour of aiming would produce thousands of.
+        assert_eq!(
+            super::to_input_event(&motion(0.0, 0.0, 0.2, -0.1), filled(), true),
+            None
+        );
     }
 }
