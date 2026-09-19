@@ -275,7 +275,12 @@ impl Toolbar {
         // Beside the title rather than under it, which is the shape the window has room for:
         // the picture starts immediately below, and a two-storey title bar would take a strip
         // of it away for no more than what one row already says.
-        ns_window.setToolbarStyle(NSWindowToolbarStyle::Unified);
+        //
+        // Compact rather than the full unified height, which is the same row drawn shorter. The
+        // picture is what somebody came to look at and the bar above it is overhead, so the
+        // question is how little of the window it can take rather than how comfortable it looks
+        // on its own — and every point saved here is a point of the far machine's screen.
+        ns_window.setToolbarStyle(NSWindowToolbarStyle::UnifiedCompact);
         // Handed over rather than kept: the window owns the toolbar from here, and nothing in
         // this type touches it again — the one thing full screen used to change about it is now
         // asked of the application instead.
