@@ -724,18 +724,15 @@ pub fn run(
                         "display: this session is watching only, so there is nothing to control",
                     );
                 }
-                toolbar::Tool::Fit => {
-                    if let Some((across, down)) = picture {
-                        // The picture is counted in pixels and a window is sized in points, so
-                        // on a screen that draws two pixels to a point this asked for a window
-                        // twice the size it meant. What came back was whatever the screen could
-                        // fit, which is the one size this control exists to avoid — the picture
-                        // was never shown at its own scale, and a stream arriving smaller than
-                        // the window looked soft with nothing saying why.
-                        let _ = window.set_size(
-                            (f64::from(across) / scale).round() as u32,
-                            (f64::from(down) / scale).round() as u32,
-                        );
+                // One step down from wherever the window is. Full screen leaves full screen; a
+                // window on the desk goes to the Dock. The control beside it is the one that
+                // went up, so the way back is always the button next to the one that got here.
+                toolbar::Tool::Shrink => {
+                    if filling {
+                        filling = false;
+                        let _ = window.set_fullscreen(false);
+                    } else if let Some(bar) = bar.as_ref() {
+                        bar.miniaturize();
                     }
                 }
                 toolbar::Tool::Fullscreen => {

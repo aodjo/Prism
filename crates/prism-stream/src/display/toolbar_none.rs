@@ -19,8 +19,8 @@ use sdl3::video::Window;
 pub enum Tool {
     /// Hand the pointer and the keyboard to the machine being watched, or take them back.
     Control,
-    /// Make the window the size of the picture arriving in it.
-    Fit,
+    /// Take the window down one step: out of full screen, or into the Dock.
+    Shrink,
     /// Fill the screen, and leave it again.
     Fullscreen,
     /// Send a file to the machine being watched.
@@ -73,4 +73,7 @@ impl Toolbar {
     pub fn sync_fullscreen(&self) -> bool {
         false
     }
+
+    /// Does nothing, because there is no window held here to put anywhere.
+    pub fn miniaturize(&self) {}
 }
