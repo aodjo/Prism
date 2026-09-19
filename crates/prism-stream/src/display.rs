@@ -691,7 +691,16 @@ pub fn run(
                 }
                 toolbar::Tool::Fit => {
                     if let Some((across, down)) = picture {
-                        let _ = window.set_size(across, down);
+                        // The picture is counted in pixels and a window is sized in points, so
+                        // on a screen that draws two pixels to a point this asked for a window
+                        // twice the size it meant. What came back was whatever the screen could
+                        // fit, which is the one size this control exists to avoid — the picture
+                        // was never shown at its own scale, and a stream arriving smaller than
+                        // the window looked soft with nothing saying why.
+                        let _ = window.set_size(
+                            (f64::from(across) / scale).round() as u32,
+                            (f64::from(down) / scale).round() as u32,
+                        );
                     }
                 }
                 toolbar::Tool::Fullscreen => {
