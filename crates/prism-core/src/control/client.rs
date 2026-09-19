@@ -513,6 +513,12 @@ fn open(
         found.address, found.observed
     ));
 
+    // Why the host's own network address did not work, when it was tried and did not. Carried
+    // to the end rather than only said, so that a connection which gets all the way to the
+    // relay and fails there reports the thing somebody can act on instead of the last thing
+    // that went wrong.
+    let mut local_trouble: Option<String> = None;
+
     // One public address for both machines means one router between them and the internet,
     // and two machines behind one router usually cannot reach each other at that address —
     // the packet leaves, the router has no reason to send it back in, and the connection
@@ -545,10 +551,22 @@ fn open(
             // tried it: a host on a subnet this machine has no route to answers immediately with
             // `No route to host` rather than by going quiet, so the one case the address exists
             // to handle badly was the one case that ended the whole connection.
-            Err(err) => say.note(format!(
-                "{} is not reachable from here ({err})",
-                found.local
-            )),
+            //
+            // Kept as well as said, because this is the note that turns out to matter when
+            // every path has failed. Two machines on one network that cannot reach each
+            // other on it is the shape of a firewall or a permission rather than of a
+            // network, and the relay's own failure says nothing about that.
+            Err(err) => {
+                local_trouble = Some(format!(
+                    "{} could not be reached on this network ({err})",
+                    found.local
+                ));
+
+                say.note(format!(
+                    "{} is not reachable from here ({err})",
+                    found.local
+                ));
+            }
         }
     }
 
@@ -594,7 +612,18 @@ fn open(
     // Through the one that answered the lookup. A relay pairs two peers presenting the same
     // token, so it has to be a server they are both registered with — and that one has just
     // proved both that it knows the host and that it is the nearest of them to here.
-    let relayed = rendezvous::relay(transport, found.server, config.peer_key, me)?;
+    //
+    // A relay that never opens is the last thing to go wrong, and on a network where the two
+    // machines should have met directly it is rarely the thing worth reporting. So the reason
+    // the near path failed is put in front of it, because that is the one somebody here can do
+    // something about.
+    let relayed =
+        rendezvous::relay(transport, found.server, config.peer_key, me).map_err(|err| {
+            match local_trouble {
+                Some(near) => io::Error::new(err.kind(), format!("{near}, and {err}")),
+                None => err,
+            }
+        })?;
     let established = dial(
         transport,
         relayed.address,

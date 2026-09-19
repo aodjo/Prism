@@ -743,7 +743,19 @@ pub fn connect(
 
     let sender = match direct {
         Ok(sender) => sender,
-        Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+        // Interruption is the one failure that is not a reason to relay: it means somebody
+        // here stopped sharing, and the answer to that is to stop, not to find another way.
+        //
+        // Everything else falls through, for the reason the client side already gives at the
+        // same point in its own chain: a chain of three ways to reach a machine that stops at
+        // the first thing to go wrong never reaches the step written for exactly that case.
+        // Waiting only on a timeout was the narrower rule, and it left the common case out.
+        // Two machines behind one router — a virtual machine beside its host is the everyday
+        // one — punch at an address that hairpins, the router answers ICMP unreachable, and
+        // the wait ends in `ConnectionRefused` rather than quietly. The host then gave up
+        // while the client went on to the relay and waited alone for a peer that had already
+        // stopped trying.
+        Err(err) if err.kind() != io::ErrorKind::Interrupted => {
             relayed = true;
 
             // Both routers give every destination a different mapping, so there is no address
