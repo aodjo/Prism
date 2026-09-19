@@ -239,23 +239,50 @@ observes is what the peer actually is.
 
 ## Making it reachable
 
-The server needs one **UDP** port open. It defaults to 47300.
+The server needs two **UDP** ports open: the one it binds, 47300 by default, and the one above
+it, 47301, which is where the relay listens.
 
-On a VPS, that means the provider's firewall and whatever runs on the box:
+Both, or neither works the way it looks like it does. Opening only the signalling port leaves a
+region that introduces two machines perfectly and then cannot carry a byte between the ones that
+could not meet — and the failure names neither the port nor the firewall. The server answers the
+relay request, the peers are told where to present their tokens, the tokens go to a port nothing
+will deliver to, and fifteen seconds later both sides say `the relay never opened, so the other
+side did not arrive`. Every direct session keeps working throughout, so a region in this state
+looks healthy until somebody is behind a NAT that will not traverse.
+
+On a VPS, that means the provider's firewall and whatever runs on the box — **both**, and they are
+not the same thing. A region has already been found with `47301/udp` allowed in its own rules and
+still receiving nothing, because the cloud's security list in front of it had never been told. The
+box says the port is open, the process says it is listening, and the packets stop one hop earlier
+where neither of them can see.
 
 ```sh
 ufw allow 47300/udp
+ufw allow 47301/udp
 ```
 
+What settles it is a count rather than an opinion. Send a few datagrams at the relay port from
+somewhere else and see whether they arrive:
+
+```sh
+iptables -L INPUT -v -n | grep 4730   # before and after; the relay port's count must move
+```
+
+A count that has stayed at zero since the server started is a port nothing has ever reached.
+
 On a machine at home — which works, and is the cheapest option if a machine is already
-running — it also needs a port forward on the router:
+running — it also needs a port forward on the router, one rule for each:
 
 | Field | Value |
 |---|---|
 | Protocol | **UDP** (not TCP, and not "both" if that costs a rule) |
-| External port | 47300 |
+| External port | 47300, and 47301 |
 | Internal address | the server's LAN address |
-| Internal port | 47300 |
+| Internal port | the same as the external one |
+
+A region brought up on a port other than the default takes the port above whatever it was
+given, because the relay is bound at `--bind` plus one. Two regions on one machine therefore
+need a gap of at least two between them.
 
 A home connection also needs its public address to be stable, or peers configured with it will
 lose the server when it changes. A dynamic DNS name avoids that; peers accept a name as readily
