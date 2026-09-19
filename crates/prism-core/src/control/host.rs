@@ -1083,6 +1083,12 @@ fn stream(
     })
     .map_err(|err| err.to_string())?;
 
+    // Held for as long as somebody is watching. A display that sleeps stops being handed to the
+    // capture, so the far side is left looking at the last frame before it went dark — with the
+    // session still open, the counters still moving, and nothing anywhere saying why the screen
+    // stopped. Given back when this returns.
+    let _awake = crate::power::Awake::hold("Prism is sharing this screen");
+
     let started = Instant::now();
     let mut frames = 0u64;
     let mut waiting: Option<Instant> = None;

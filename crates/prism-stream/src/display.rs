@@ -674,6 +674,12 @@ pub fn run(
     // measured and the wrong one every other time.
     let mut showing_stats = false;
 
+    // Held for as long as the window is showing another machine. Watching a screen looks to an
+    // idle timer exactly like watching a film does — minutes at a time with nobody touching
+    // anything — and a screen that sleeps under somebody's eyes is the session appearing to
+    // have ended. Given back when this function returns, whatever ends it.
+    let _awake = prism_core::power::Awake::hold("Prism is showing another machine");
+
     // Whether what happens in this window is sent on to the far machine. On from the start,
     // because nothing is seized to make it so: the pointer stays this machine's, visible and
     // free to leave the window, and only where it points inside it goes across.

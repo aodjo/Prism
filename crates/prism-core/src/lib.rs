@@ -19,6 +19,7 @@ pub mod encode;
 pub mod identity;
 pub mod input;
 pub mod net;
+pub mod power;
 pub mod render;
 pub mod stats;
 pub mod store;
