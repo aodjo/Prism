@@ -37,6 +37,8 @@ pub struct Surface {
     overlay: TextOverlay,
     cursor: CursorOverlay,
     gpu: Gpu,
+    /// Whether the statistics panel is drawn over the picture.
+    stats: bool,
 }
 
 impl Surface {
@@ -68,6 +70,7 @@ impl Surface {
             overlay,
             cursor,
             gpu: (device, context),
+            stats: false,
         })
     }
 
@@ -99,6 +102,15 @@ impl Surface {
         self.overlay.update(lines);
     }
 
+    /// Says whether the statistics panel is drawn at all.
+    ///
+    /// Off until somebody asks for it. The panel is a black box over the top left of the far
+    /// machine's desktop, which is where its menu bar and its windows' buttons are — a thing
+    /// worth having while a session is being measured, and in the way of somebody working.
+    pub fn show_stats(&mut self, on: bool) {
+        self.stats = on;
+    }
+
     /// Draws one picture with the overlays on top and presents it.
     ///
     /// Returns `false` when the display is still busy with the frame before; the frame is
@@ -123,17 +135,19 @@ impl Surface {
             self.overlay.quad(target.0, target.1),
             self.overlay.quad(target.0, target.1),
         ];
-        let count = match cursor_at {
-            Some(at) => {
-                // A place on the far screen, which is the picture and not the window around it.
-                let whole = (target.0 as f32, target.1 as f32);
-                let at = prism_core::render::fit(size_of(picture), whole).to_target(at, whole);
 
-                quads[1] = self.cursor.quad(at, target.0, target.1);
-                2
-            }
-            None => 1,
-        };
+        // The statistics quad is already in place; what decides is how many of the array are
+        // drawn. Off, and the cursor takes the first slot instead.
+        let mut count = usize::from(self.stats);
+
+        if let Some(at) = cursor_at {
+            // A place on the far screen, which is the picture and not the window around it.
+            let whole = (target.0 as f32, target.1 as f32);
+            let at = prism_core::render::fit(size_of(picture), whole).to_target(at, whole);
+
+            quads[count] = self.cursor.quad(at, target.0, target.1);
+            count += 1;
+        }
 
         let (texture, index) = picture.texture();
         self.renderer.present(texture, index, &quads[..count])

@@ -41,8 +41,8 @@ declare global {
  */
 const DEFAULT_FPS = 60;
 
-/** And at what rate. */
-const DEFAULT_BITRATE_BPS = 24_000_000;
+/** And at what rate. Kept in step with the shell's own default in `settings.rs`. */
+const DEFAULT_BITRATE_BPS = 40_000_000;
 
 const prism = window.prism;
 

@@ -48,6 +48,8 @@ pub enum Tool {
     Send,
     /// Ask the machine being watched what it is offering.
     Fetch,
+    /// Show what the session is doing, or put it away again.
+    Stats,
     /// End the session.
     Disconnect,
 }
@@ -61,6 +63,7 @@ impl Tool {
             Tool::Fullscreen => "kr.presm.prism.fullscreen",
             Tool::Send => "kr.presm.prism.send",
             Tool::Fetch => "kr.presm.prism.fetch",
+            Tool::Stats => "kr.presm.prism.stats",
             Tool::Disconnect => "kr.presm.prism.disconnect",
         }
     }
@@ -81,6 +84,7 @@ impl Tool {
             Tool::Fullscreen => "전체 화면",
             Tool::Send => "파일 보내기",
             Tool::Fetch => "파일 가져오기",
+            Tool::Stats => "진단",
             Tool::Disconnect => "연결 끊기",
         }
     }
@@ -97,18 +101,20 @@ impl Tool {
             Tool::Fullscreen => "arrow.up.left.and.arrow.down.right",
             Tool::Send => "square.and.arrow.up",
             Tool::Fetch => "square.and.arrow.down",
+            Tool::Stats => "ladybug",
             Tool::Disconnect => "power",
         }
     }
 }
 
 /// The controls, in the order they appear.
-const TOOLS: [Tool; 6] = [
+const TOOLS: [Tool; 7] = [
     Tool::Control,
     Tool::Fit,
     Tool::Fullscreen,
     Tool::Send,
     Tool::Fetch,
+    Tool::Stats,
     Tool::Disconnect,
 ];
 

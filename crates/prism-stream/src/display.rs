@@ -302,6 +302,10 @@ struct Showing {
     clock_offset_us: i64,
     /// Whether the far machine is being controlled, or `None` where it cannot be.
     control: Option<bool>,
+    /// The size of the pictures arriving, in pixels, once one has.
+    picture: Option<(u32, u32)>,
+    /// The size of the area they are drawn into, in pixels.
+    drawable: (u32, u32),
 }
 
 /// Builds the lines the overlay shows.
@@ -321,8 +325,31 @@ fn hud_lines(
         missed,
         clock_offset_us,
         control,
+        picture,
+        drawable,
     } = session;
-    let mut lines = Vec::with_capacity(8);
+    let mut lines = Vec::with_capacity(9);
+
+    // What is arriving against what it is drawn into. A picture smaller than the area it fills
+    // is stretched to fit, and stretching is the one cause of a soft image that no bitrate will
+    // fix — so the two numbers are put side by side rather than left to be worked out.
+    lines.push(match picture {
+        Some((across, down)) => {
+            let stretch = f64::from(drawable.0) / f64::from(across.max(1));
+
+            format!(
+                "picture  {across}x{down} into {}x{}{}",
+                drawable.0,
+                drawable.1,
+                if stretch > 1.02 {
+                    format!(", stretched {stretch:.2}x")
+                } else {
+                    String::new()
+                }
+            )
+        }
+        None => "picture  waiting".to_owned(),
+    });
 
     match latency.summarize() {
         Some(summary) => lines.push(format!(
@@ -639,6 +666,11 @@ pub fn run(
     let mut hud_frames = 0u64;
     let mut sent_input = 0u64;
 
+    // Whether the statistics panel is on screen. Off to begin with: it is a black box over the
+    // corner of somebody else's desktop, which is the right trade while a session is being
+    // measured and the wrong one every other time.
+    let mut showing_stats = false;
+
     // Whether what happens in this window is sent on to the far machine. On from the start,
     // because nothing is seized to make it so: the pointer stays this machine's, visible and
     // free to leave the window, and only where it points inside it goes across.
@@ -714,6 +746,10 @@ pub fn run(
                             files.ask_for_listing();
                         }
                     }
+                }
+                toolbar::Tool::Stats => {
+                    showing_stats = !showing_stats;
+                    surface.show_stats(showing_stats);
                 }
                 toolbar::Tool::Disconnect => break 'main,
             }
@@ -904,7 +940,10 @@ pub fn run(
                     }
                 }
 
-                if last_hud.elapsed() >= HUD_INTERVAL {
+                // Only while somebody is looking at it. Rasterising text on the processor is
+                // the one piece of work on this thread that the picture does not need, and a
+                // panel nobody has asked for should not cost a frame anything.
+                if showing_stats && last_hud.elapsed() >= HUD_INTERVAL {
                     let rate = hud_frames as f64 / last_hud.elapsed().as_secs_f64();
                     let underway = moving
                         .as_ref()
@@ -921,6 +960,8 @@ pub fn run(
                             missed,
                             clock_offset_us: clock_offset,
                             control: capture_input.then_some(controlling),
+                            picture,
+                            drawable: (drawable_width, drawable_height),
                         },
                         &underway,
                     ));

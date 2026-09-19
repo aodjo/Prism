@@ -27,6 +27,8 @@ pub enum Tool {
     Send,
     /// Ask the machine being watched what it is offering.
     Fetch,
+    /// Show what the session is doing, or put it away again.
+    Stats,
     /// End the session.
     Disconnect,
 }

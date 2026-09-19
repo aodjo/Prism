@@ -103,6 +103,13 @@ impl Default for Settings {
     /// it makes no difference, since the port is discovered either way — but without one, a
     /// machine on an operating-system-chosen port is a machine nobody can reach: the other end
     /// has no way to learn a number nothing told it.
+    ///
+    /// The bitrate is where a session starts rather than what it is held to: congestion control
+    /// takes it as its opening figure and moves from there, down as fast as a path needs and up
+    /// again when it will carry more. So the number to choose is what a link that can afford it
+    /// should open at, not the least any link might manage — and a whole desktop at sixty frames
+    /// is soft at twenty-four megabits in a way a person reads as a bad picture rather than as a
+    /// setting.
     fn default() -> Self {
         Self {
             rendezvous: PRISM_RENDEZVOUS.to_owned(),
@@ -110,7 +117,7 @@ impl Default for Settings {
             nickname: String::new(),
             bind: "0.0.0.0:47200".to_owned(),
             fps: 60,
-            bitrate_bps: 24_000_000,
+            bitrate_bps: 40_000_000,
             sharing: false,
             control: true,
             smooth: false,
