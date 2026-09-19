@@ -1087,7 +1087,17 @@ fn stream(
     let mut frames = 0u64;
     let mut waiting: Option<Instant> = None;
 
-    while keep_going(config, stop, frames) && !shared.ending.load(Ordering::Relaxed) {
+    // The third reason to stop, beside somebody unsharing and the session being ended here: the
+    // client has gone. Until this was watched, the only thing that ended a session from the far
+    // end was a send coming back refused — so a client that stopped answering without its port
+    // closing left the host capturing and encoding for nobody, and telling anybody who asked
+    // that it was being watched.
+    let alive = sender.alive();
+
+    while keep_going(config, stop, frames)
+        && !shared.ending.load(Ordering::Relaxed)
+        && alive.load(Ordering::Relaxed)
+    {
         match pump.pump(&mut sender, config.adaptive)? {
             Pumped::Idle => {
                 // Not a still screen: that sends its last frame again. This is a capture that

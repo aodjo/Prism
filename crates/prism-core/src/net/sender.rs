@@ -11,7 +11,7 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::clock::now_us;
 use crate::input::{Injector, LOCAL_HOLD, PlatformInjector};
@@ -134,6 +134,20 @@ impl Drop for SliceSender {
         self.alive.store(false, Ordering::Relaxed);
     }
 }
+
+/// How long a host goes without hearing from its client before deciding it has gone.
+///
+/// The client has had a timeout of its own since there was a client; the host had none, and
+/// ended a session only when its own send came back refused. That covers a client whose port
+/// has closed on a network that returns the refusal — and nothing else. A client killed while
+/// the machine it was on stayed up, a laptop that slept, a relay carrying for a peer that has
+/// gone: in every one of those the host went on capturing, encoding and sending to nobody, and
+/// went on saying it was being watched. Ending an application to install an update is the
+/// everyday way to produce it.
+///
+/// Longer than the client's ten seconds so that a stall both ends can see is decided by the end
+/// with somebody watching it. The client closes its window, stops sending, and this follows.
+const CLIENT_SILENCE: Duration = Duration::from_secs(15);
 
 /// The shortest gap between two keyframes the host will produce because it was asked to.
 ///
@@ -911,19 +925,31 @@ impl SliceSender {
             let mut input = HostInput::new(inject_input);
             let mut latency = LatencyRecorder::new(4096);
             let mut injected = 0u64;
+            let mut heard = Instant::now();
 
             while alive.load(Ordering::Relaxed) {
                 let bytes = match receiver.recv_into(&mut recv_buf) {
                     Ok(bytes) => bytes,
                     // Nothing came within the timeout, which is what the timeout is for: the
                     // loop goes round, looks at whether the session is still there, and waits
-                    // again if it is.
+                    // again if it is — until the silence has gone on long enough to mean the
+                    // client is not coming back.
                     Err(err)
                         if matches!(
                             err.kind(),
                             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                         ) =>
                     {
+                        if heard.elapsed() >= CLIENT_SILENCE {
+                            eprintln!(
+                                "host: nothing from the client for {} seconds; ending the session",
+                                CLIENT_SILENCE.as_secs()
+                            );
+                            alive.store(false, Ordering::Relaxed);
+
+                            return;
+                        }
+
                         continue;
                     }
                     // A connected UDP socket reports the far machine having nothing listening
@@ -936,13 +962,19 @@ impl SliceSender {
                             io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
                         ) =>
                     {
+                        alive.store(false, Ordering::Relaxed);
+
                         return;
                     }
                     Err(err) => {
                         eprintln!("host: return path recv failed: {err} ({:?})", err.kind());
+                        alive.store(false, Ordering::Relaxed);
+
                         return;
                     }
                 };
+
+                heard = Instant::now();
                 let arrived_us = now_us();
 
                 match channel_of(bytes) {
