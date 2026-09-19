@@ -28,7 +28,7 @@ use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationPresentationOptions, NSEvent, NSImage, NSMenu, NSMenuItem,
     NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode, NSToolbarItem, NSToolbarItemIdentifier,
-    NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
+    NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSString};
 use sdl3::video::Window;
@@ -127,6 +127,11 @@ struct Held {
     pressed: Arc<Mutex<VecDeque<Tool>>>,
     /// Files chosen from the menu that nobody has read yet.
     chosen: Arc<Mutex<VecDeque<String>>>,
+    /// The window, so the yellow button can be answered here rather than by the system.
+    ///
+    /// Held strongly, which is not a cycle: a button's target is a weak reference, so the
+    /// window does not hold this back.
+    window: Retained<NSWindow>,
     /// The items, kept so the toolbar can be asked for them and so one can be redrawn.
     ///
     /// `RefCell` rather than a lock: the class is main-thread only, and every path that
@@ -190,6 +195,23 @@ define_class!(
             }
         }
 
+        /// Takes the window down one step: out of a zoom if it is in one, into the Dock if not.
+        ///
+        /// The yellow button's own job is only the second of those, and a window filling the
+        /// desk is left with nothing but the green button — which is the button somebody just
+        /// pressed to get here. Giving the same button both steps means the way back out is
+        /// always the one below the one that went in.
+        #[unsafe(method(shrink:))]
+        fn shrink(&self, _sender: &NSObject) {
+            let window = &self.ivars().window;
+
+            if window.isZoomed() {
+                window.zoom(None);
+            } else {
+                window.miniaturize(None);
+            }
+        }
+
         /// Records that one of the items was pressed.
         ///
         /// The window's loop reads the queue on its next turn rather than acting here, so a
@@ -250,6 +272,7 @@ impl Toolbar {
         let controls = Controls::alloc(marker).set_ivars(Held {
             pressed: Arc::clone(&pressed),
             chosen: Arc::clone(&chosen),
+            window: ns_window.clone(),
             items: RefCell::new(Vec::new()),
         });
         // SAFETY: `init` on `NSObject` takes no arguments and returns the object it was sent
@@ -280,6 +303,25 @@ impl Toolbar {
         // this type touches it again — the one thing full screen used to change about it is now
         // asked of the application instead.
         ns_window.setToolbar(Some(&toolbar));
+
+        // The yellow button, which SDL leaves out of the window's style mask and so leaves
+        // greyed out and dead. Added here rather than asked of SDL, and then answered here as
+        // well: what it does is a step down from wherever the window is, which the system's own
+        // action does not do.
+        ns_window.setStyleMask(ns_window.styleMask() | NSWindowStyleMask::Miniaturizable);
+
+        if let Some(button) = ns_window.standardWindowButton(NSWindowButton::MiniaturizeButton) {
+            // SAFETY: `shrink:` is defined on `Controls` above and takes the single sender
+            // argument a control sends with it. The target is a weak reference, and `controls`
+            // outlives the window: the toolbar holds it for the life of the session, and the
+            // session ends with the window.
+            unsafe {
+                button.setTarget(Some(&*controls));
+                button.setAction(Some(sel!(shrink:)));
+            }
+
+            button.setEnabled(true);
+        }
 
         Some(Self {
             pressed,
