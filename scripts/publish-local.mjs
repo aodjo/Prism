@@ -25,7 +25,7 @@
  *   another one where there is a choice. Without any, every rebuild carries a different
  *   ad-hoc identity — a keychain prompt each time, and a screen recording grant to give again.
  * - An operator to say yes in a browser, which it opens. Nothing is typed here, and the
- *   answer is kept for an hour so that a run of four builds is one approval.
+ *   answer is kept for a month, so that a day spent on one problem is one approval.
  *
  * @module
  */
@@ -285,12 +285,13 @@ function keep(token) {
 /**
  * When a freshly issued token stops being worth trying.
  *
- * A little short of the hour the server gives it, so that a run which starts just inside the
- * window does not find the session gone halfway through its upload.
+ * A day short of the thirty the server gives it, so that a run which starts just inside the
+ * window does not find the session gone halfway through its upload. Being wrong here costs one
+ * needless approval rather than a failed publish, which is why it rounds this way.
  *
  * @returns {number} A unix time.
  */
-const SESSION_UNTIL = () => Math.floor(Date.now() / 1000) + 55 * 60;
+const SESSION_UNTIL = () => Math.floor(Date.now() / 1000) + 29 * 24 * 60 * 60;
 
 /**
  * Asks a browser for permission to publish, and waits until somebody answers.
@@ -305,7 +306,7 @@ const SESSION_UNTIL = () => Math.floor(Date.now() / 1000) + 55 * 60;
  *
  * @async
  * @param {string} what - What is asking, in the words shown to whoever approves it.
- * @returns {Promise<string>} A session token, good for half an hour.
+ * @returns {Promise<string>} A session token, good for a month.
  * @throws {Error} If it is refused, or nobody answers in time.
  */
 async function allowed(what) {
@@ -351,7 +352,7 @@ async function allowed(what) {
 
     const { token, email } = await waited.json();
 
-    console.log(`Allowed by ${email}. This machine will not have to ask again for an hour.`);
+    console.log(`Allowed by ${email}. This machine will not have to ask again for a month.`);
     keep(token);
 
     return token;

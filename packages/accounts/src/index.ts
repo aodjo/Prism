@@ -101,14 +101,19 @@ const PUBLISH_GRANT_SECONDS = 10 * 60;
 /**
  * How long the session a publish grant opens is good for.
  *
- * An hour, which is a run of builds rather than one. Approving in a browser is cheap but it is
- * not free, and somebody fixing one thing publishes four times before they are done — asking
- * again between each is asking about a decision they have already made.
+ * The same as signing in, because it is the same decision. An hour was a run of builds, which
+ * sounded like enough until somebody spent a day on one problem: the browser opened again every
+ * hour to ask about something they had already answered, and an approval asked for that often
+ * is one nobody reads before clicking.
  *
- * It is an ordinary session, so it can be ended from the dashboard like any other, which is
- * faster than any expiry.
+ * What makes the length safe is not the length. It is an ordinary session, so it shows in the
+ * dashboard and can be ended there the moment anybody wants it gone — which is immediate, where
+ * an expiry is never sooner than itself.
+ *
+ * It is also, for now, an ordinary session in the other sense: everything an operator may do,
+ * this may do. Scoping it to the build endpoints is worth doing and is not done here.
  */
-const PUBLISH_SESSION_SECONDS = 60 * 60;
+const PUBLISH_SESSION_SECONDS = SESSION_SECONDS;
 
 /** How many bytes the second factor's shared secret is. */
 const TOTP_BYTES = 20;
