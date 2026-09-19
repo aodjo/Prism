@@ -66,25 +66,9 @@ impl Toolbar {
         let _ = (files, more);
     }
 
-    /// Does nothing, because there are no controls to move into a drawer.
-    pub fn add_drawer(&mut self) {}
-
     /// Returns `false`, because nothing here keeps track of the window.
     #[must_use]
     pub fn sync_fullscreen(&self) -> bool {
-        false
-    }
-
-    /// Does nothing, because there is no drawer to show.
-    pub fn pointer_moved(&self, x: f32, y: f32) {
-        let _ = (x, y);
-    }
-
-    /// Returns `false`, because there is no drawer for a place to be over.
-    #[must_use]
-    pub fn covers(&self, x: f32, y: f32) -> bool {
-        let _ = (x, y);
-
         false
     }
 }

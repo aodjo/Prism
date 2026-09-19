@@ -26,15 +26,14 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSEvent, NSImage, NSMenu, NSMenuItem, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
-    NSToolbarItem, NSToolbarItemIdentifier, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
+    NSApplication, NSApplicationPresentationOptions, NSEvent, NSImage, NSMenu, NSMenuItem,
+    NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode, NSToolbarItem, NSToolbarItemIdentifier,
+    NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSString};
 use sdl3::video::Window;
 use sdl3_sys::properties::SDL_GetPointerProperty;
 use sdl3_sys::video::{SDL_GetWindowProperties, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER};
-
-use crate::drawer::{Anchor, Drawer, Entry};
 
 /// One control in the title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,47 +114,6 @@ const TOOLS: [Tool; 6] = [
 
 /// The symbol the control item carries while the machine is being controlled.
 const CONTROLLING: &str = "cursorarrow.rays";
-
-/// The controls the drawer holds while the window fills the screen, in order.
-///
-/// Not the toolbar's list: fitting the window to the picture means nothing on a window that is
-/// the size of the screen, and the one that fills the screen is, here, the one that leaves it.
-const DRAWN: [Tool; 5] = [
-    Tool::Control,
-    Tool::Fullscreen,
-    Tool::Send,
-    Tool::Fetch,
-    Tool::Disconnect,
-];
-
-/// How close to the top edge, in points, the pointer has to come for the drawer to appear.
-///
-/// The edge itself, give or take: a window filling the screen has its top at the top of the
-/// screen, and the pointer stops there however far the mouse goes on moving.
-const REVEAL_EDGE: f32 = 3.0;
-
-/// How far down the pointer can go, in points, before the handle it revealed goes away again.
-///
-/// Past the handle and a little more, so reaching for it does not make it vanish on the way.
-const REVEAL_BAND: f32 = 90.0;
-
-/// What a control in the drawer says and shows.
-fn drawn(tool: Tool, controlling: bool) -> Entry {
-    match tool {
-        Tool::Fullscreen => Entry {
-            symbol: "arrow.down.right.and.arrow.up.left",
-            label: "전체 화면 나가기".to_owned(),
-        },
-        Tool::Control if controlling => Entry {
-            symbol: CONTROLLING,
-            label: tool.label().to_owned(),
-        },
-        _ => Entry {
-            symbol: tool.symbol(),
-            label: tool.label().to_owned(),
-        },
-    }
-}
 
 /// What the delegate holds.
 struct Held {
@@ -258,17 +216,14 @@ impl Controls {
 
 /// The controls in a window's title bar, and the presses they have collected.
 ///
-/// And the same controls in a drawer at the left edge, for while the window fills the screen:
-/// the title bar is gone then, and so is everything that was in it. Only the picture shows,
-/// with a handle at the edge that opens the controls beside it.
+/// The same controls in full screen, because the title bar is not gone there — macOS slides it
+/// down when the pointer reaches the top of the screen and takes it away again afterwards. What
+/// this asks for is that the toolbar travel with it, which is not what a window does by default.
 pub struct Toolbar {
     pressed: Arc<Mutex<VecDeque<Tool>>>,
     chosen: Arc<Mutex<VecDeque<String>>>,
     controls: Retained<Controls>,
-    toolbar: Retained<NSToolbar>,
     window: Retained<NSWindow>,
-    /// The drawer, once the window has something under it to be laid over.
-    drawer: Option<Drawer>,
     /// Whether the window was filling the screen the last time anybody looked.
     filling: Cell<bool>,
 }
@@ -315,99 +270,58 @@ impl Toolbar {
         // the picture starts immediately below, and a two-storey title bar would take a strip
         // of it away for no more than what one row already says.
         ns_window.setToolbarStyle(NSWindowToolbarStyle::Unified);
+        // Handed over rather than kept: the window owns the toolbar from here, and nothing in
+        // this type touches it again — the one thing full screen used to change about it is now
+        // asked of the application instead.
         ns_window.setToolbar(Some(&toolbar));
 
         Some(Self {
             pressed,
             chosen,
             controls,
-            toolbar,
             window: ns_window,
-            drawer: None,
             filling: Cell::new(false),
         })
     }
 
-    /// Puts the drawer the controls move into while the window fills the screen.
-    ///
-    /// Separate from [`Toolbar::install`] and after the picture's own view exists, because
-    /// views stack in the order they are added: one added before the picture's would be under
-    /// it, and a drawer nobody can see is not a way to leave full screen.
-    pub fn add_drawer(&mut self) {
-        let Some(content) = self.window.contentView() else {
-            return;
-        };
-
-        let entries: Vec<Entry> = DRAWN.iter().map(|tool| drawn(*tool, false)).collect();
-        let pressed = Arc::clone(&self.pressed);
-
-        self.drawer = Drawer::install(&content, None, &entries, false, Anchor::Top, move |index| {
-            if let (Some(tool), Ok(mut queue)) = (DRAWN.get(index), pressed.lock()) {
-                queue.push_back(*tool);
-            }
-        });
-    }
-
-    /// Returns whether the window fills the screen, and moves the controls to match.
+    /// Returns whether the window fills the screen, and asks for the title bar to behave.
     ///
     /// Asked of the window every turn rather than remembered from the control that asked for
     /// it, because that control is not the only way in or out: the green button, the menu and
     /// Escape all change it without a word to anything here.
     ///
-    /// Filling the screen hides the toolbar and shows nothing in its place but the picture. The
-    /// drawer waits, out of sight, for the pointer to reach the top edge.
+    /// The controls stay in the title bar in full screen rather than moving into a drawer of
+    /// this program's own. macOS already slides a full screen window's title bar down when the
+    /// pointer reaches the top of the screen, and that is the gesture somebody arrives with;
+    /// what had to be asked for is only that the toolbar hide and return along with it, which
+    /// is not the default and is why the toolbar used to be hidden outright instead.
     pub fn sync_fullscreen(&self) -> bool {
         let filling = self
             .window
             .styleMask()
             .contains(NSWindowStyleMask::FullScreen);
 
-        if filling != self.filling.replace(filling) {
-            self.toolbar.setVisible(!filling);
-
-            if let Some(drawer) = self.drawer.as_ref() {
-                drawer.set_shown(false);
-            }
+        if filling == self.filling.replace(filling) {
+            return filling;
         }
 
-        filling
-    }
-
-    /// Shows the drawer's handle when the pointer reaches the top edge, and hides it once the
-    /// pointer has gone back down into the picture.
-    ///
-    /// In the window's own coordinates, which count down from the top as the pointer's do. Only
-    /// while the window fills the screen: otherwise the controls are in the toolbar, where
-    /// they always are. An open column keeps the handle where it is until it is closed.
-    pub fn pointer_moved(&self, x: f32, y: f32) {
-        let Some(drawer) = self.drawer.as_ref() else {
-            return;
+        let Some(marker) = MainThreadMarker::new() else {
+            return filling;
         };
 
-        if !self.filling.get() {
-            return;
-        }
+        // Set on the application rather than answered from a window delegate, which is where
+        // AppKit would normally ask: this window's delegate belongs to SDL, and taking it over
+        // would cost every event SDL reads through it.
+        NSApplication::sharedApplication(marker).setPresentationOptions(if filling {
+            NSApplicationPresentationOptions::FullScreen
+                | NSApplicationPresentationOptions::AutoHideMenuBar
+                | NSApplicationPresentationOptions::AutoHideDock
+                | NSApplicationPresentationOptions::AutoHideToolbar
+        } else {
+            NSApplicationPresentationOptions::empty()
+        });
 
-        if y <= REVEAL_EDGE {
-            drawer.set_shown(true);
-        } else if drawer.is_shown()
-            && !drawer.is_open()
-            && y > REVEAL_BAND
-            && !drawer.covers(f64::from(x), f64::from(y))
-        {
-            drawer.set_shown(false);
-        }
-    }
-
-    /// Returns whether a place in the window is over the drawer.
-    ///
-    /// In the window's own coordinates, which count down from the top as the pointer's do. A
-    /// click there is a click on a control, and must not reach the far machine as well.
-    #[must_use]
-    pub fn covers(&self, x: f32, y: f32) -> bool {
-        self.drawer
-            .as_ref()
-            .is_some_and(|drawer| drawer.covers(f64::from(x), f64::from(y)))
+        filling
     }
 
     /// Returns the next control that was pressed, or `None` if none was.
@@ -496,10 +410,6 @@ impl Toolbar {
             if *tool == Tool::Control {
                 item.setImage(symbol_image(symbol).as_deref());
             }
-        }
-
-        if let Some(drawer) = self.drawer.as_ref() {
-            drawer.set_entry(0, &drawn(Tool::Control, controlling));
         }
     }
 }
