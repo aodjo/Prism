@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Embedded into the stream binary itself, not shipped beside it.
+
+  The stream process is a bare executable inside the shell's bundle: it has no bundle of its
+  own, so the only identity macOS can read off it is whatever its signature carries. Left to
+  itself `codesign` derives that from the file name and calls it `prism-stream` — an identity
+  unrelated to the application it is part of, and one that survives nothing, because the name
+  is the only thing it was ever derived from.
+
+  A `__TEXT,__info_plist` section is what a single-file executable has instead of a bundle.
+  `codesign` reads the identifier out of it, so the signature says this is part of Prism
+  however many times Tauri re-signs the file on its way into the bundle.
+-->
+<plist version="1.0">
+  <dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.prism.client.stream</string>
+    <key>CFBundleName</key>
+    <string>Prism Stream</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+  </dict>
+</plist>
