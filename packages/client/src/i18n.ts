@@ -75,6 +75,7 @@ const KO: Record<string, string> = {
   Devices: '기기',
   'Add device': '기기 추가',
   'Stop sharing': '공유 중지',
+  'View log': '로그 보기',
   'Share this machine': '이 컴퓨터 공유',
   'Sharing this machine': '이 컴퓨터를 공유하는 중',
   'Not shared': '공유 안 함',

@@ -807,15 +807,29 @@ function Home(): JSX.Element {
           </div>
         )}
 
+        {/* The last line the stream wrote, which is the one that says how it ended. What led
+            there is kept behind a disclosure rather than printed: forty lines of a child
+            process's diagnostics is not a sentence anybody reads, and showing the last three
+            of them — as this did — is the worst cut of all, because the line that names the
+            cause is almost always just above it. */}
         <Trouble
           message={
             trouble ??
             (stream.phase === 'failed' && stream.log.length > 0
-              ? stream.log.slice(-3).join('\n')
+              ? (stream.log.at(-1) ?? null)
               : null)
           }
           className="mt-3 flex-none"
         />
+
+        {trouble === null && stream.phase === 'failed' && stream.log.length > 1 && (
+          <details className="mt-2 flex-none">
+            <summary className="cursor-pointer text-note text-dim">{t('View log')}</summary>
+            <pre className="mt-2 max-h-40 overflow-y-auto rounded-panel border border-line-1 bg-wash-1 p-3 text-fine whitespace-pre-wrap text-muted-2 select-text">
+              {stream.log.join('\n')}
+            </pre>
+          </details>
+        )}
 
         {/* What sharing is waiting on, one row a grant, each with the way to it. The window
             does the finding; the one step it cannot take is the switch in System Settings, and
