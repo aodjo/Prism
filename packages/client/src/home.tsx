@@ -1,28 +1,36 @@
 /**
  * The home window.
  *
- * This machine at the top, every machine it can reach below it, and what has been watched
- * lately under that. Nothing here draws a screen: a picture of a remote machine would have had
- * to cross into JavaScript to arrive, and it never does — the stream is decoded and drawn by a
- * process of its own. So this window is names, addresses and figures, which is all it can
- * honestly be.
+ * A pegboard with blocks on it. What each block shows is its own business; this file decides
+ * which blocks there are, where they sit, and what happens when one is pressed. Nothing here
+ * draws a screen: a picture of a remote machine would have had to cross into JavaScript to
+ * arrive, and it never does — the stream is decoded and drawn by a process of its own.
+ *
+ * The arrangement is kept in the settings, so a board somebody built is the board they open
+ * tomorrow. A machine that has never been arranged gets one laid out from whatever the account
+ * has, which is a better first screen than an empty grid with an invitation on it.
  */
 
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { JSX, ReactNode } from 'react';
+import type { JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import type {
   AccountDeviceView,
   Available,
+  Block,
   HostSnapshot,
   PrismApi,
   Session,
   Settings,
   StreamState,
 } from './api.js';
-import { ago, latency, span, when } from './format.js';
-import { Preferences, SharingTerms } from './preferences.js';
+import { Body, titleOf } from './blocks.js';
+import type { Ground } from './blocks.js';
+import { STEP, holes, startingBoard } from './board.js';
+import { AddPanel, BlockPanel, Frame, Pegboard } from './editor.js';
+import { Gear, Language, Panes, SignOut } from './icons.js';
+import { Preferences } from './preferences.js';
 import { speak, t } from './i18n.js';
 import { Backdrop, GRANTS, HOME_SKY, Trouble, Wordmark, reason, short } from './ui.js';
 
@@ -35,9 +43,9 @@ declare global {
 /**
  * What a machine sends before anybody has changed the settings.
  *
- * Stated here as well as in the main process because this window draws the figures before the
- * settings have arrived, and a card that says nothing for a moment and then something is worse
- * than one that says the truth immediately.
+ * Stated here as well as in the shell because this window draws the figures before the settings
+ * have arrived, and a block that says nothing for a moment and then something is worse than one
+ * that says the truth immediately.
  */
 const DEFAULT_FPS = 60;
 
@@ -48,6 +56,27 @@ const prism = window.prism;
 
 /** The phases where a stream is running or on its way to running. */
 const RUNNING: ReadonlySet<string> = new Set(['connecting', 'streaming']);
+
+/** Nothing is happening, and nothing has happened yet. */
+const NOTHING: StreamState = {
+  phase: 'idle',
+  host: null,
+  terms: null,
+  stats: null,
+  departed: null,
+  log: [],
+  moving: [],
+  offered: [],
+  offeredMore: false,
+  arrived: [],
+};
+
+/** The languages the menu offers, in the order it cycles through them. */
+const LANGUAGES: readonly { id: string; name: string }[] = [
+  { id: '', name: 'Follow the system' },
+  { id: 'ko', name: '한국어' },
+  { id: 'en', name: 'English' },
+];
 
 /**
  * The machines this one can watch: the account's others that are shared right now.
@@ -65,94 +94,6 @@ function watchable(devices: readonly AccountDeviceView[], mine: string): string[
     .map((device) => device.publicKey);
 }
 
-/** Nothing is happening, and nothing has happened yet. */
-const NOTHING: StreamState = {
-  phase: 'idle',
-  host: null,
-  terms: null,
-  stats: null,
-  departed: null,
-  log: [],
-  moving: [],
-  offered: [],
-  offeredMore: false,
-  arrived: [],
-};
-
-/** How many sessions the list shows before somebody asks for the rest. */
-const RECENT = 3;
-
-/** Which machines the grid is showing. */
-type Which = 'all' | 'online' | 'pinned';
-
-/** The three filters, in the order they are offered. */
-const WHICH: readonly { id: Which; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'online', label: 'Online' },
-  { id: 'pinned', label: 'Pinned' },
-];
-
-/**
- * The colour a machine is marked with, assigned by key rather than by position.
- *
- * A colour that moved when the list reordered would be worse than no colour at all: the whole
- * of what it is for is recognising the same machine twice in a list of similar names.
- */
-const MARKS: readonly string[] = [
-  'rgba(124, 92, 255, 0.85)',
-  'rgba(77, 232, 176, 0.85)',
-  'rgba(53, 214, 255, 0.85)',
-  'rgba(255, 92, 168, 0.85)',
-];
-
-/** The frame every machine in the grid has. */
-const CARD =
-  'group relative flex items-center gap-3 rounded-card border bg-wash-3 py-[18px] pr-4 pl-5';
-
-/**
- * Picks a machine's mark from its key.
- *
- * @param {string} key - The machine's public key, as hex.
- * @returns {string} Its colour, the same one every time.
- */
-function markOf(key: string): string {
-  let sum = 0;
-
-  for (let at = 0; at < key.length; at += 1) {
-    sum = (sum * 31 + key.charCodeAt(at)) % 65_536;
-  }
-
-  return MARKS[sum % MARKS.length] as string;
-}
-
-/**
- * One measurement, said in the colour it is measured in.
- *
- * @param {object} props - What to draw.
- * @param {string} props.tone - The Tailwind text colour.
- * @param {string} props.wash - The tint behind it.
- * @param {ReactNode} props.children - The figure and its unit.
- * @returns {JSX.Element} The chip.
- */
-function Chip({
-  tone,
-  wash,
-  children,
-}: {
-  tone: string;
-  wash: string;
-  children: ReactNode;
-}): JSX.Element {
-  return (
-    <span
-      className={`inline-flex items-center rounded-pill px-[11px] py-1.5 text-fine font-medium ${tone}`}
-      style={{ background: wash }}
-    >
-      {children}
-    </span>
-  );
-}
-
 /**
  * The home window.
  *
@@ -161,87 +102,59 @@ function Chip({
 function Home(): JSX.Element {
   const [machines, setMachines] = useState<readonly string[]>([]);
   const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
-  const [account, setAccount] = useState<{ email: string | null }>({
-    email: null,
-  });
+  const [account, setAccount] = useState<{ email: string | null }>({ email: null });
   const [settings, setSettings] = useState<Settings | null>(null);
   const [stream, setStream] = useState<StreamState>(NOTHING);
   const [history, setHistory] = useState<readonly Session[]>([]);
   /** What this machine's own session is doing, or `null` when it is not shared. */
   const [mine, setMine] = useState<HostSnapshot | null>(null);
-  const [query, setQuery] = useState('');
-  const [which, setWhich] = useState<Which>('all');
-  const [everything, setEverything] = useState(false);
   const [trouble, setTrouble] = useState<string | null>(null);
+
+  /** The blocks, as they stand. */
+  const [board, setBoard] = useState<readonly Block[]>([]);
+  /** Whether the board is being arranged. */
+  const [editing, setEditing] = useState(false);
+  /** What it looked like when arranging started, which is what undoing goes back to. */
+  const [before, setBefore] = useState<readonly Block[] | null>(null);
+  /** Which block is being worked on. */
+  const [picked, setPicked] = useState<string | null>(null);
+  /** Which block's panel is open. */
+  const [opened, setOpened] = useState<string | null>(null);
+  /** Whether the block picker is open. */
+  const [adding, setAdding] = useState(false);
+  /** Whether the menu under the face is open. */
+  const [menu, setMenu] = useState(false);
+  /** How many holes fit across the board, measured rather than assumed. */
+  const [across, setAcross] = useState(36);
+  const field = useRef<HTMLDivElement | null>(null);
+
   /**
-   * The grants sharing is waiting on, while the window is showing them, by id. Null when it is
-   * not showing them.
+   * The grants sharing is waiting on, while the window is showing them, by id.
    *
    * Asked when somebody turns sharing on and something is missing, rather than said as an error
-   * afterwards: the switch does nothing until these are allowed, so the window names each one
-   * and opens the way to it.
+   * afterwards: the switch does nothing until these are allowed.
    */
   const [asking, setAsking] = useState<readonly string[] | null>(null);
-  /**
-   * Which of those have already been sent to System Settings.
-   *
-   * Screen recording is read once for the life of a process, so once it has been allowed the
-   * only thing left to offer for it is starting Prism again.
-   */
+  /** Which of those have already been sent to System Settings. */
   const [asked, setAsked] = useState<ReadonlySet<string>>(new Set());
-  /**
-   * How the host went, when a stream window closed because the machine it showed went away.
-   *
-   * Nobody here closed that window, so the home window says why it went until it is dismissed.
-   */
+  /** How the host went, when a stream window closed because the machine it showed went away. */
   const [gone, setGone] = useState<'left' | 'silent' | null>(null);
   /** Whether the settings are open over the window. */
   const [tuning, setTuning] = useState(false);
-  /** Whether the terms this machine is shared on are open beside the switch. */
-  const [terms, setTerms] = useState(false);
   /** The newer build the shell found at launch, until it is installed or waved away. */
   const [update, setUpdate] = useState<Available | null>(null);
-  /** What went wrong installing it, which is the only place that would otherwise be silent. */
   const [updateError, setUpdateError] = useState('');
   const [installing, setInstalling] = useState(false);
-  const search = useRef<HTMLInputElement | null>(null);
 
-  const machineName = useCallback(
+  const nameOf = useCallback(
     (key: string): string =>
       devices.find((device) => device.publicKey === key)?.label || short(key),
     [devices],
   );
 
-  /** Where a machine is, as far as this one knows. */
-  const machineWhere = useCallback(
-    (key: string): string => {
-      const address = settings?.addresses[key];
-
-      if (address) {
-        return address;
-      }
-
-      return settings?.rendezvous ? 'Through the rendezvous server' : 'No address yet';
-    },
-    [settings],
-  );
-
-  /** How a machine is doing: watched, reachable, or neither. */
-  const machineState = useCallback(
-    (key: string): 'live' | 'idle' | 'off' => {
-      if (stream.host === key && RUNNING.has(stream.phase)) {
-        return 'live';
-      }
-
-      return settings?.addresses[key] || settings?.rendezvous ? 'idle' : 'off';
-    },
-    [settings, stream],
-  );
-
-  /** The most recent session on a machine, or `null` if it has never been watched. */
-  const lastOn = useCallback(
-    (key: string): Session | null => history.find((one) => one.host === key) ?? null,
-    [history],
+  const platformOf = useCallback(
+    (key: string): string => devices.find((device) => device.publicKey === key)?.platform ?? '',
+    [devices],
   );
 
   useEffect(() => {
@@ -262,11 +175,8 @@ function Home(): JSX.Element {
       setMine(own);
       setStream(state);
       setHistory(past);
-
-      // The account's machines, and only those. What this machine happens to trust locally is
-      // not the same question: that file is a cache of the account's answer, and anything in
-      // it that the account does not name is something nobody may reach from here.
       setMachines(watchable(signedIn.devices, identity.publicKey));
+      setBoard(stored.board);
     })();
   }, []);
 
@@ -276,16 +186,11 @@ function Home(): JSX.Element {
     prism.onStream((state) => {
       setStream(state);
 
-      // Once the stream has ended, not while the last of it is still arriving. The shell sends
-      // one state for the end of a run, and the next run starts with this cleared.
       if (state.departed !== null && !RUNNING.has(state.phase)) {
         setGone(state.departed);
       }
     });
 
-    // The account is asked again whenever this window comes forward and every so often while it
-    // is showing, so a machine that starts sharing somewhere else turns up here without anybody
-    // restarting anything — and one that stops goes.
     prism.onAccount((state) => {
       setDevices(state.devices);
       setAccount({ email: state.email });
@@ -295,33 +200,48 @@ function Home(): JSX.Element {
     prism.onUpdate(setUpdate);
   }, []);
 
-  const pinned = useMemo(() => new Set(settings?.pinned ?? []), [settings]);
+  // How wide the board is decides how many holes there are, so it is measured rather than
+  // guessed. A window dragged narrower has fewer holes across, and a block wider than what is
+  // left is held to the edge instead of hanging off it.
+  useEffect(() => {
+    const element = field.current;
 
-  /** What the grid is showing, pinned machines first and each group in its own order. */
-  const shown = useMemo(() => {
-    const wanted = query.trim().toLowerCase();
+    if (!element) {
+      return;
+    }
 
-    return machines
-      .filter((key) => wanted === '' || machineName(key).toLowerCase().includes(wanted))
-      .filter((key) => {
-        if (which === 'online') {
-          return machineState(key) !== 'off';
-        }
+    const measure = (): void => {
+      setAcross(holes(element.clientWidth));
+    };
 
-        if (which === 'pinned') {
-          return pinned.has(key);
-        }
+    measure();
 
-        return true;
-      })
-      .sort((one, two) => Number(pinned.has(two)) - Number(pinned.has(one)));
-  }, [machines, query, which, pinned, machineName, machineState]);
+    const watcher = new ResizeObserver(measure);
+    watcher.observe(element);
 
-  /** Whether this machine is handing its screen out, or on its way to. */
-  const shared = mine !== null && mine.phase !== 'stopped' && mine.phase !== 'failed';
+    return () => {
+      watcher.disconnect();
+    };
+  }, []);
 
-  /** Whether somebody is actually watching it. */
-  const watched = mine?.phase === 'streaming';
+  // A machine nobody has arranged gets a board laid out from what the account has. Done once
+  // the account and the settings have both arrived, and only when nothing is saved: a board
+  // somebody built is theirs, including one they emptied.
+  useEffect(() => {
+    if (settings === null || settings.board.length > 0 || board.length > 0) {
+      return;
+    }
+
+    setBoard(startingBoard(machines, across));
+  }, [settings, machines, across, board.length]);
+
+  /** Writes the arrangement down, and keeps the window's copy in step with it. */
+  const commit = useCallback((next: readonly Block[]): void => {
+    setBoard(next);
+    void prism.setSettings({ board: next }).then(setSettings, (error: unknown) => {
+      setTrouble(reason(error));
+    });
+  }, []);
 
   const watch = useCallback(
     (key: string): void => {
@@ -341,17 +261,14 @@ function Home(): JSX.Element {
   /**
    * Shows the grants sharing is waiting on, or starts sharing when there are none.
    *
-   * Asked of the system rather than read out of an error message, which is text and would tie
-   * this to its wording.
-   *
    * @async
    * @returns {Promise<boolean>} Whether sharing started.
    */
   const shareOrAsk = useCallback(async (): Promise<boolean> => {
-    const held = await prism.permissions();
+    const grants = await prism.permissions();
 
-    if (held.missing.length > 0) {
-      setAsking(held.missing.map((grant) => grant.id));
+    if (grants.missing.length > 0) {
+      setAsking(grants.missing.map((grant) => grant.id));
 
       return false;
     }
@@ -361,6 +278,12 @@ function Home(): JSX.Element {
 
     return true;
   }, []);
+
+  /** Whether this machine is handing its screen out, or on its way to. */
+  const shared = mine !== null && mine.phase !== 'stopped' && mine.phase !== 'failed';
+
+  /** Whether somebody is actually watching it. */
+  const watched = mine?.phase === 'streaming';
 
   /** Starts or stops handing this machine's screen out. */
   const flip = useCallback((): void => {
@@ -381,8 +304,7 @@ function Home(): JSX.Element {
   }, [shared, shareOrAsk]);
 
   // Allowing happens in System Settings, which is to say while this window is not the one being
-  // looked at. Asked again when it comes back, so the list shrinks as switches are turned on and
-  // sharing starts by itself once the last one is — which is what the button was pressed for.
+  // looked at. Asked again when it comes back, so the list shrinks as switches are turned on.
   useEffect(() => {
     if (!asking) {
       return;
@@ -401,55 +323,16 @@ function Home(): JSX.Element {
     };
   }, [asking, shareOrAsk]);
 
-  /** Adds a machine to the front of the list, or takes it back out. */
-  const pin = (key: string): void => {
-    void (async () => {
-      const next = pinned.has(key)
-        ? [...pinned].filter((one) => one !== key)
-        : [...pinned, key];
-
-      setSettings(await prism.setSettings({ pinned: next }));
-    })();
-  };
-
   useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      if (!event.metaKey && !event.ctrlKey) {
+    const close = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') {
         return;
       }
 
-      if (event.key === 'k') {
-        event.preventDefault();
-        search.current?.focus();
-      }
-
-      // Only ever starts. Ending a session somebody else is in the middle of is not something
-      // to do by reflex, so the keystroke does nothing once this machine is shared.
-      if (event.key === 'Enter' && !shared) {
-        event.preventDefault();
-        flip();
-      }
-    };
-
-    document.addEventListener('keydown', onKey);
-
-    return () => {
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [shared, flip]);
-
-  const listed = everything ? history : history.slice(0, RECENT);
-
-  useEffect(() => {
-    if (!tuning && !terms) {
-      return;
-    }
-
-    const close = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        setTuning(false);
-        setTerms(false);
-      }
+      setTuning(false);
+      setMenu(false);
+      setAdding(false);
+      setOpened(null);
     };
 
     window.addEventListener('keydown', close);
@@ -457,381 +340,205 @@ function Home(): JSX.Element {
     return () => {
       window.removeEventListener('keydown', close);
     };
-  }, [tuning, terms]);
-
-  /**
-   * Whether this is the only machine there is.
-   *
-   * Which is where everybody starts and where most people sit for a while, so it is a state to
-   * design rather than the full window with its contents missing. Searching one machine,
-   * filtering it, and counting it are all questions that answer themselves.
-   */
-  const alone = machines.length === 0;
-
-  /** Where this machine can be reached, once it is listening somewhere. */
-  const reachable =
-    mine?.local === null || mine?.local === undefined
-      ? null
-      : mine.observed && mine.observed !== mine.local
-        ? `${mine.local}  ·  seen at ${mine.observed}`
-        : mine.local;
+  }, []);
 
   /**
    * What this machine would send, as one line.
    *
    * The display it is on rather than one it was told about, because the thing being shared is
-   * the screen this window is on. Multiplied by the backing scale, since a Mac reports the
-   * size it draws at and the encoder is handed the pixels behind it.
+   * the screen this window is on. Multiplied by the backing scale, since a Mac reports the size
+   * it draws at and the encoder is handed the pixels behind it.
    */
   const specs = useMemo(() => {
-    const across = Math.round(window.screen.width * window.devicePixelRatio);
+    const across2 = Math.round(window.screen.width * window.devicePixelRatio);
     const down = Math.round(window.screen.height * window.devicePixelRatio);
     const rate = settings?.fps ?? DEFAULT_FPS;
     const megabits = Math.round((settings?.bitrateBps ?? DEFAULT_BITRATE_BPS) / 1e6);
 
-    return `${across} × ${down}  ·  ${rate} fps  ·  ${megabits} Mbps`;
+    return `${across2} × ${down}  |  ${rate} fps  |  ${megabits} Mbps`;
   }, [settings?.fps, settings?.bitrateBps]);
+
+  const ground: Ground = useMemo(
+    () => ({
+      devices,
+      machines,
+      stream,
+      mine,
+      history,
+      settings,
+      specs,
+      nameOf,
+      platformOf,
+      watch,
+      flip,
+      tune: () => {
+        setTuning(true);
+      },
+    }),
+    [devices, machines, stream, mine, history, settings, specs, nameOf, platformOf, watch, flip],
+  );
+
+  /** How tall the board has to be to hold everything on it. */
+  const down = board.reduce((low, one) => Math.max(low, one.y + one.h), 12) + 2;
+
+  const working = board.find((one) => one.id === opened) ?? null;
+  const chosen = board.find((one) => one.id === picked) ?? null;
+  const language = LANGUAGES.find((one) => one.id === (settings?.language ?? '')) ?? LANGUAGES[0];
 
   return (
     <div className="relative h-full w-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <Backdrop sky={HOME_SKY} />
 
-      {/* The strip the window is carried by. It has to be a band of its own rather than a
-          class on the header, because the shell moves the window for the element under the
-          pointer and never for its children — so a header holding a search field and two
-          buttons would drag from three narrow gaps. */}
+      {/* The strip the window is carried by. A band of its own rather than a class on the
+          header, because the shell moves the window for the element under the pointer and never
+          for its children. */}
       <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-[3] h-[46px]" />
 
-      <div className="relative z-[1] mx-auto flex w-full max-w-[1440px] flex-col px-[72px] pt-[46px] pb-[52px]">
-        <header className="flex h-10 flex-none items-center gap-4">
+      <div className="relative z-[1] flex min-h-full w-full flex-col px-8 pt-[26px] pb-[26px]">
+        <header className="relative z-[5] flex h-8 flex-none items-center gap-4">
           <Wordmark size="sm" />
           <div data-tauri-drag-region className="h-full flex-1" />
-          <div
-            hidden={alone}
-            className="flex w-[460px] min-w-0 shrink items-center gap-[9px] rounded-pill border border-line-1 bg-wash-3 py-2.5 pr-4 pl-5"
-          >
-            <input
-              ref={search}
-              type="text"
-              spellCheck={false}
-              placeholder={t('Search devices, sessions, files')}
-              value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-              }}
-              className="min-w-0 flex-1 border-0 bg-transparent p-0 text-note text-ink placeholder:text-dim focus:outline-none"
-            />
-            <kbd className="flex-none font-sans text-tiny font-medium text-dim-2">⌘K</kbd>
-          </div>
-          {/* The gear and the face are one drawing in the design, and one control here: both
-              of them open the only place there is to change anything. */}
-          <button
-            type="button"
-            className="flex-none rounded-pill"
-            title={account.email ?? 'Not signed in'}
-            aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
-            onClick={() => {
-              setTuning(true);
-            }}
-          >
-            <img src="assets/account.svg" alt="" className="block h-7 w-14" />
-          </button>
-        </header>
 
-        <div className="mt-[30px] flex h-9 flex-none items-center gap-3">
-          <h1 className="m-0 text-[26px] leading-none font-semibold tracking-[-0.5px] text-ink">
-            {t('Devices')}
-          </h1>
-          <span
-            hidden={alone}
-            className="rounded-pill bg-[rgba(255,255,255,0.09)] px-[9px] py-1 text-fine font-medium text-muted-2"
-          >
-            {machines.length + 1}
-          </span>
-          <div data-tauri-drag-region className="h-full flex-1" />
-          <div
-            hidden={alone}
-            className="flex items-center gap-0.5 rounded-pill border border-line-1 bg-wash-3 p-[3px]"
-          >
-            {WHICH.map((one) => (
+          {editing ? (
+            <>
               <button
-                key={one.id}
                 type="button"
-                aria-pressed={which === one.id}
+                className="text-note font-medium text-dim transition-colors hover:text-ink-3"
                 onClick={() => {
-                  setWhich(one.id);
+                  if (before) {
+                    commit(before);
+                  }
+
+                  setEditing(false);
+                  setPicked(null);
                 }}
-                className={`rounded-pill px-3.5 py-1.5 text-[12.5px] font-medium transition-colors ${
-                  which === one.id
-                    ? 'bg-[rgba(255,255,255,0.13)] text-ink'
-                    : 'text-muted-2 hover:text-ink-3'
-                }`}
               >
-                {one.label}
+                {t('Undo')}
               </button>
-            ))}
-          </div>
-          {/* Files, beside the machines rather than inside a session, because what arrived is
-              worth finding after the stream that carried it has closed. It also has to be
-              reachable before anything is moving: the window is what a file is sent from, and
-              one that only opened by itself could never be opened to start one. */}
-          <button
-            type="button"
-            onClick={prism.openTransfers}
-            className="inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
-          >
-            <span>{t('Files')}</span>
-            {stream.moving.length > 0 && (
-              <span className="rounded-pill bg-mint px-1.5 text-label font-semibold text-on-light tabular-nums">
-                {stream.moving.length}
-              </span>
-            )}
-          </button>
-          <button
-            type="button"
-            hidden={alone}
-            onClick={prism.openSettings}
-            className="inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
-          >
-            <span className="text-ui">+</span>
-            <span>{t('Add device')}</span>
-          </button>
-        </div>
-
-        {/* This machine, given the top of the window because it is the one machine that is
-            always here and the one switch somebody came to flip. Everything below it is a
-            machine somebody might watch; this is the one they might be watched on. */}
-        <div className="relative mt-6 flex-none overflow-hidden rounded-card border border-line-4 bg-gradient-to-r from-[rgba(255,255,255,0.08)] to-[rgba(255,255,255,0.03)]">
-          <div className="pointer-events-none absolute top-[-151px] left-[59%] h-[400px] w-[700px] mix-blend-screen">
-            <img
-              src="assets/resume-glow.svg"
-              alt=""
-              className="absolute inset-x-[-12.86%] inset-y-[-22.5%] block max-w-none"
-            />
-          </div>
-
-          <div className="relative flex items-center gap-6 px-7 py-6">
-            <div className="flex min-w-0 flex-1 flex-col gap-2.5">
-              <span className="truncate text-[30px] leading-none font-semibold tracking-[-0.7px] text-ink">
-                {t('This machine')}
-                {/* The name its owner gave it, after the one everybody's machine has. Somebody
-                    with two of these is looking at two cards that say the same thing, and the
-                    thing that tells them apart is the part they chose. */}
-                {settings?.nickname ? (
-                  <span className="font-normal text-muted-2"> ({settings.nickname})</span>
-                ) : null}
-              </span>
-              {/* What it is doing, not where it is. Nobody types an address any more — the
-                  account is what finds a machine — so putting one here is asking somebody to
-                  read a number they will never use. It stays on the hover for the one case
-                  that still needs it: a deployment with no rendezvous server, where the other
-                  end has to be told by hand. */}
-              <span title={reachable ?? undefined} className="truncate text-[13.5px] text-muted-2">
-                {mine?.phase === 'failed'
-                  ? t('Sharing failed')
-                  : shared
-                    ? mine?.local === null
-                      ? t('Opening')
-                      : t('Shared')
-                    : t('Not shared')}
-              </span>
-              <span
-                className={`truncate text-[12.5px] ${mine?.error ? 'text-danger-ink' : 'text-dim'}`}
+              <button
+                type="button"
+                className="rounded-pill bg-white px-[18px] py-2 text-note font-medium text-on-light"
+                onClick={() => {
+                  commit(board);
+                  setEditing(false);
+                  setPicked(null);
+                }}
               >
-                {/* What this machine would send, rather than a sentence about waiting. The
-                    line above already says whether it is shared, so saying it again in prose
-                    spent the one line that could have carried something. */}
-                {mine?.error ??
-                  (watched
-                    ? t('{name} is watching this machine', { name: machineName(mine?.peer ?? '') })
-                    : specs)}
-              </span>
-            </div>
+                {t('Done')}
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="text-fine text-dim">{account.email ?? ''}</span>
+              <button
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={menu}
+                aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
+                onClick={() => {
+                  setMenu(!menu);
+                }}
+                className={`size-7 flex-none rounded-pill bg-violet transition-shadow ${
+                  menu ? 'ring-2 ring-white' : ''
+                }`}
+              />
+            </>
+          )}
 
-            <div className="flex flex-none flex-col items-end gap-3.5">
-              {watched && (
-                <Chip tone="text-violet" wash="rgba(124, 92, 255, 0.13)">
-                  {(Number(mine?.bitrateBps ?? 0n) / 1e6).toFixed(0)} Mbps
-                </Chip>
-              )}
+          {menu && (
+            <>
+              <button
+                type="button"
+                aria-hidden
+                tabIndex={-1}
+                className="fixed inset-0 z-[4] cursor-default"
+                onClick={() => {
+                  setMenu(false);
+                }}
+              />
+              <div
+                role="menu"
+                className="absolute top-10 right-0 z-[5] w-[252px] overflow-hidden rounded-panel border border-line-4 bg-[rgba(20,20,26,0.98)] py-1.5 shadow-[0_18px_48px_rgba(0,0,0,0.6)]"
+              >
+                <div className="flex items-center gap-[11px] px-3.5 py-3">
+                  <span className="size-8 flex-none rounded-pill bg-violet" />
+                  <span className="flex min-w-0 flex-col gap-1">
+                    <span className="truncate text-note font-medium text-ink">
+                      {settings?.nickname || t('This machine')}
+                    </span>
+                    <span className="truncate text-tiny text-dim">{account.email ?? ''}</span>
+                  </span>
+                </div>
 
-              <div className="flex items-center gap-2.5">
+                <div className="border-t border-line-1" />
+
                 <button
                   type="button"
-                  aria-label={t('Sharing terms')}
-                  aria-expanded={terms}
-                  title={t('Frame rate, bitrate and where it listens')}
-                  className={`flex size-9 flex-none items-center justify-center rounded-pill border border-line-4 text-ink transition-colors ${
-                    terms ? 'bg-[rgba(255,255,255,0.12)]' : ''
-                  }`}
+                  role="menuitem"
+                  className="flex w-full items-center gap-[11px] px-3.5 py-2.5 text-note font-medium text-ink hover:bg-wash-2"
                   onClick={() => {
-                    setTerms(!terms);
+                    setBefore(board);
+                    setEditing(true);
+                    setMenu(false);
                   }}
                 >
-                  {/* The same drawing as the one in the header, taken out of it rather than
-                      redrawn, so the two gears cannot drift apart.
-
-                      Stencilled rather than drawn: an SVG behind `src` is its own document, and
-                      the `currentColor` in it resolves against that document's black rather
-                      than against this button. Masking paints the shape with the button's own
-                      colour, which is the thing that was meant all along. */}
-                  <span
-                    aria-hidden
-                    className="block size-[17px] bg-current [mask-image:url(assets/gear.svg)] [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain]"
-                  />
+                  <Panes size={16} />
+                  {t('Arrange this screen')}
                 </button>
 
-              {/* Beside the switch rather than instead of it. This sends away whoever is watching
-                  now and leaves the machine shared for the next time; the switch is for nobody
-                  at all. Somebody who wants their own mouse back has two different things they
-                  might mean, and both are one click. */}
-              {watched && (
+                <div className="border-t border-line-1" />
+
                 <button
                   type="button"
-                  className="btn-secondary px-5 py-3.5 text-[15px]"
+                  role="menuitem"
+                  className="flex w-full items-center gap-[11px] px-3.5 py-2.5 text-note font-medium text-ink-3 hover:bg-wash-2"
                   onClick={() => {
-                    void prism.disconnectViewer().catch((error: unknown) => {
+                    const at = LANGUAGES.findIndex((one) => one.id === (settings?.language ?? ''));
+                    const next = LANGUAGES[(at + 1) % LANGUAGES.length] as { id: string };
+
+                    speak(next.id);
+                    void prism.setSettings({ language: next.id }).then(setSettings);
+                  }}
+                >
+                  <Language size={16} />
+                  <span className="flex-1 text-left">{t('Language')}</span>
+                  <span className="text-tiny text-muted-2">{t(language?.name ?? '')}</span>
+                </button>
+
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-[11px] px-3.5 py-2.5 text-note font-medium text-ink-3 hover:bg-wash-2"
+                  onClick={() => {
+                    setMenu(false);
+                    setTuning(true);
+                  }}
+                >
+                  <Gear size={16} />
+                  {t('Settings')}
+                </button>
+
+                <div className="border-t border-line-1" />
+
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-[11px] px-3.5 py-2.5 text-note font-medium text-rose hover:bg-wash-2"
+                  onClick={() => {
+                    setMenu(false);
+                    void prism.accountSignOut().catch((error: unknown) => {
                       setTrouble(reason(error));
                     });
                   }}
                 >
-                  {t('Disconnect')}
-                </button>
-              )}
-
-              {shared ? (
-                <button type="button" className="btn-danger px-6 py-3.5 text-[15px]" onClick={flip}>
-                  {t('Stop sharing')}
-                </button>
-              ) : (
-                <button type="button" className="btn-primary-md" onClick={flip}>
-                  {t('Share this machine')}
-                  <span className="btn-key">⌘↵</span>
-                </button>
-              )}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* A modal rather than a popover hanging off the card. What is being set here is
-            typed — a name, a rate, an address — and a panel that closes when a click lands
-            slightly wrong is a panel that throws away what was being typed into it. */}
-        {terms && (
-          <div
-            className="fixed inset-0 z-[3] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]"
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget) {
-                setTerms(false);
-              }
-            }}
-          >
-            <div className="max-h-full w-full max-w-[460px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-              <div className="mb-2 flex items-center justify-between">
-                <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
-                  {t('Sharing this machine')}
-                </h2>
-                <button
-                  type="button"
-                  aria-label={t('Close sharing terms')}
-                  className="rounded-pill px-2 text-ui text-dim transition-colors hover:text-ink"
-                  onClick={() => {
-                    setTerms(false);
-                  }}
-                >
-                  ✕
+                  <SignOut size={16} />
+                  {t('Sign out')}
                 </button>
               </div>
-              <SharingTerms />
+            </>
+          )}
+        </header>
 
-              {/* It says Done rather than Save because nothing here is waiting to be saved: a
-                  figure applies as it is typed. What the button is for is ending the detour,
-                  and having somewhere deliberate to click that is not the corner. */}
-              <div className="mt-3 flex justify-end">
-                <button
-                  type="button"
-                  className="btn-primary-sm"
-                  onClick={() => {
-                    setTerms(false);
-                  }}
-                >
-                  {t('Done')}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Asked rather than done quietly. Installing replaces the application under a process
-            that is running it, and the last step is a restart — which is not something to do to
-            somebody who may be watching another machine at that moment. One question, and then
-            everything that follows from the answer happens without asking again.
-
-            No dismissing it by clicking away: the answer is one of the two buttons, because a
-            modal that vanishes on a stray click is one somebody never decides about. */}
-        {update && (
-          <div className="fixed inset-0 z-[4] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
-            <div className="w-full max-w-[420px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
-              <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
-                새로운 빌드가 있습니다
-              </h2>
-              <p className="mt-3 mb-0 text-ui text-dim">
-                {update.version} 을 설치하면 Prism이 다시 시작됩니다.
-              </p>
-              {update.notes.trim() !== '' && (
-                <p className="mt-2 mb-0 max-h-24 overflow-y-auto text-ui text-dim">
-                  {update.notes}
-                </p>
-              )}
-              {updateError !== '' && (
-                <p className="mt-3 mb-0 text-ui text-danger-ink">{updateError}</p>
-              )}
-              <div className="mt-4 flex justify-end gap-2">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={installing}
-                  onClick={() => {
-                    setUpdate(null);
-                    setUpdateError('');
-                  }}
-                >
-                  나중에
-                </button>
-                <button
-                  type="button"
-                  className="btn-primary-sm"
-                  disabled={installing}
-                  onClick={() => {
-                    setInstalling(true);
-                    setUpdateError('');
-                    // Nothing follows a success: the process is replaced. Reaching the next
-                    // line at all means it failed, and then the reason is worth more than a
-                    // window that has quietly gone back to how it was.
-                    void prism
-                      .installUpdate()
-                      .catch((error: unknown) => {
-                        setUpdateError(
-                          error instanceof Error ? error.message : String(error),
-                        );
-                      })
-                      .finally(() => {
-                        setInstalling(false);
-                      });
-                  }}
-                >
-                  {installing ? '설치 중…' : '설치'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* The last line the stream wrote, which is the one that says how it ended. What led
-            there is kept behind a disclosure rather than printed: forty lines of a child
-            process's diagnostics is not a sentence anybody reads, and showing the last three
-            of them — as this did — is the worst cut of all, because the line that names the
-            cause is almost always just above it. */}
         <Trouble
           message={
             trouble ??
@@ -842,320 +549,387 @@ function Home(): JSX.Element {
           className="mt-3 flex-none"
         />
 
-        {trouble === null && stream.phase === 'failed' && stream.log.length > 1 && (
-          <details className="mt-2 flex-none">
-            <summary className="cursor-pointer text-note text-dim">{t('View log')}</summary>
-            <pre className="mt-2 max-h-40 overflow-y-auto rounded-panel border border-line-1 bg-wash-1 p-3 text-fine whitespace-pre-wrap text-muted-2 select-text">
-              {stream.log.join('\n')}
-            </pre>
-          </details>
-        )}
+        {/* The board. Its height follows what is on it rather than the window, so a block
+            dragged past the bottom takes the page with it instead of being clipped. */}
+        <div
+          ref={field}
+          className="relative mt-4 min-h-0 flex-1"
+          style={{ minHeight: down * STEP }}
+          onPointerDown={(event) => {
+            if (editing && event.target === event.currentTarget) {
+              setPicked(null);
+            }
+          }}
+        >
+          <Pegboard shown={editing} />
 
-        {/* What sharing is waiting on, one row a grant, each with the way to it. The window
-            does the finding; the one step it cannot take is the switch in System Settings, and
-            for screen recording a restart after it, because a running Prism goes on calling a
-            grant given to it missing until it starts again. No dismissing it by clicking the
-            backdrop: nothing is shared until these are allowed, and a modal that vanishes on a
-            stray click is one that says nothing. */}
-        {asking && (
-          <div className="fixed inset-0 z-[4] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
-            <div className="w-full max-w-[460px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
-              <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
-                {t('Allow these to share this machine')}
-              </h2>
-              <p className="mt-3 mb-0 text-ui text-dim">
-                {t('Turn each one on in System Settings, then come back.')}
-              </p>
-
-              <div className="mt-4">
-                {GRANTS.filter((grant) => asking.includes(grant.id)).map((grant) => {
-                  const restart = grant.id === 'screen' && asked.has(grant.id);
-
-                  return (
-                    <div
-                      key={grant.id}
-                      className="flex items-center gap-3 py-3 not-first:border-t not-first:border-line-1"
-                    >
-                      <span
-                        className={`flex size-[34px] flex-none items-center justify-center rounded-badge border text-ui font-medium ${grant.tint}`}
-                      >
-                        {grant.glyph}
-                      </span>
-                      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="text-ui font-medium text-ink">{t(grant.name)}</span>
-                        <span className="text-fine text-muted-2">{t(grant.why)}</span>
-                      </span>
-                      <button
-                        type="button"
-                        className="btn-secondary flex-none"
-                        onClick={() => {
-                          void (async () => {
-                            if (restart) {
-                              await prism.restart();
-
-                              return;
-                            }
-
-                            try {
-                              await prism.requestPermission(grant.id);
-                              setAsked((was) => new Set(was).add(grant.id));
-                              await shareOrAsk();
-                            } catch (error) {
-                              setTrouble(reason(error));
-                            }
-                          })();
-                        }}
-                      >
-                        {restart ? t('Restart PRISM') : t('Open System Settings')}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="mt-4 flex justify-end">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => {
-                    setAsking(null);
-                  }}
-                >
-                  {t('Close')}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {gone && (
-          <div className="fixed inset-0 z-[4] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
-            <div
-              role="alertdialog"
-              aria-labelledby="gone-title"
-              className="w-full max-w-[400px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]"
-            >
-              <h2
-                id="gone-title"
-                className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink"
-              >
-                {gone === 'left'
-                  ? t('The host disconnected')
-                  : t('The connection to the host was lost')}
-              </h2>
-              {gone === 'silent' && (
-                <p className="mt-3 mb-0 text-ui text-dim">
-                  {t('Check that the host is on and connected to the network.')}
-                </p>
-              )}
-
-              <div className="mt-5 flex justify-end">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  autoFocus
-                  onClick={() => {
-                    setGone(null);
-                  }}
-                >
-                  {t('OK')}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {alone ? (
-          /* The one thing left to do, said once. Every other machine on the account turns up
-             here by itself once it is shared, so what is missing is not a button here but a
-             switch over there — or, before that, a second installation. */
-          <div className="mt-12 flex-none">
-            {/* A machine that is shared is the one being watched, not the one watching, and
-                telling it there is nothing to watch reads as something being wrong with it.
-                It is ready; what it is ready for is the other machine's to do. */}
-            <h2 className="m-0 text-[19px] leading-none font-semibold tracking-[-0.3px] text-ink-2">
-              {shared ? t('Your other devices can watch this machine') : t('Nothing to watch yet')}
-            </h2>
-            <p className="mt-3 mb-0 max-w-[46ch] text-note leading-relaxed text-muted-2">
-              {shared
-                ? t('To watch another machine from here, turn on sharing on it.')
-                : devices.some((device) => !device.isThisMachine)
-                  ? t('Turn on sharing on the machine you want to watch, and it turns up here.')
-                  : t(
-                      'Install PRISM on the machine you want to watch, sign in to the same account, and turn on sharing.',
-                    )}
-            </p>
-          </div>
-        ) : (
-          <>
-        <h2 className="mt-10 flex-none text-ui font-medium tracking-[0.2px] text-muted-2">
-          {t('Other devices')}
-        </h2>
-
-        {/* Three across at the width the design was drawn at, two when the window is narrow
-            enough that a third would be a column of clipped names. */}
-        <div className="mt-2.5 grid flex-none grid-cols-[repeat(auto-fill,minmax(290px,1fr))] gap-3">
-          {shown.map((key) => {
-            const state = machineState(key);
-            const seen = lastOn(key);
-            const held = pinned.has(key);
-            const live = state === 'live' && stream.phase === 'streaming';
-
-            return (
-              <div
-                key={key}
-                className={`${CARD} ${state === 'off' ? 'border-line-1' : 'border-line-4'}`}
-              >
-                {/* The whole card is the target. Laid over it rather than wrapped around it,
-                    because the star is a control of its own and a button inside a button is
-                    not a thing a browser will build. */}
-                <button
-                  type="button"
-                  aria-label={`Watch ${machineName(key)}`}
-                  onClick={() => {
-                    watch(key);
-                  }}
-                  className="absolute inset-0 z-0 rounded-card transition-colors hover:bg-[rgba(255,255,255,0.04)]"
-                />
-
-                <div className="pointer-events-none relative z-[1] flex min-w-0 flex-1 items-center gap-3">
-                  {/* Two states, as the design has them: a machine there is some way to reach,
-                      and one there is not. Whether it is being watched right now is the line
-                      underneath, where it can be said rather than encoded. */}
-                  <img
-                    src={`assets/status-${state === 'off' ? 'off' : 'live'}.svg`}
-                    alt=""
-                    className="block size-[7px] flex-none overflow-visible"
-                  />
-                  <span className="flex min-w-0 flex-1 flex-col gap-1">
-                    <span
-                      title={key}
-                      className={`truncate text-[15.5px] font-semibold tracking-[-0.2px] ${
-                        state === 'off' ? 'text-muted-2' : 'text-ink'
-                      }`}
-                    >
-                      {machineName(key)}
-                    </span>
-                    <span title={machineWhere(key)} className="truncate text-fine text-dim">
-                      {live && stream.stats
-                        ? `Streaming now · ${stream.stats.fps.toFixed(0)} fps · ${stream.stats.mbps.toFixed(0)} Mbps`
-                        : state === 'live'
-                          ? 'Connecting'
-                          : seen
-                            ? `Last seen ${ago(seen.endedAt)}`
-                            : machineWhere(key)}
-                    </span>
-                  </span>
-
-                  {(live && stream.stats ? true : seen !== null) && (
-                    <span className="flex-none rounded-pill bg-[rgba(255,255,255,0.07)] px-2.5 py-[5px] text-fine-2 font-medium text-muted">
-                      {live && stream.stats
-                        ? `${latency(stream.stats.rttMs)} ms`
-                        : `${latency(seen?.rttMs ?? 0)} ms`}
-                    </span>
-                  )}
-
-                  <button
-                    type="button"
-                    aria-pressed={held}
-                    aria-label={held ? `Unpin ${machineName(key)}` : `Pin ${machineName(key)}`}
-                    onClick={() => {
-                      pin(key);
-                    }}
-                    className={`pointer-events-auto flex-none rounded-pill px-2 py-[5px] text-tiny font-medium transition-opacity ${
-                      held
-                        ? 'bg-[rgba(255,176,92,0.14)] text-amber'
-                        : 'text-dim-2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
-                    }`}
-                  >
-                    ★
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-
-          {shown.length === 0 && (
-            <div className="col-span-full py-6 text-note text-dim">
-              {machines.length === 0
-                ? 'No other machines yet. Sign in on another one and it turns up here.'
-                : query.trim() === ''
-                  ? `No ${which} devices.`
-                  : `Nothing here is called “${query.trim()}”.`}
-            </div>
-          )}
-        </div>
-
-        <div className="mt-10 flex flex-none items-center gap-2.5">
-          <h2 className="m-0 text-ui font-medium tracking-[0.2px] text-muted-2">
-            {t('Recent sessions')}
-          </h2>
-          <div className="flex-1" />
-          {history.length > RECENT && (
-            <button
-              type="button"
-              className="text-[12.5px] text-dim transition-colors hover:text-ink-3"
-              onClick={() => {
-                setEverything(!everything);
+          {board.map((one) => (
+            <Frame
+              key={one.id}
+              block={one}
+              editing={editing}
+              picked={picked === one.id}
+              across={across}
+              onPick={() => {
+                setPicked(one.id);
+              }}
+              onEdit={() => {
+                setPicked(one.id);
+                setOpened(one.id);
+              }}
+              onChange={(next) => {
+                commit(board.map((other) => (other.id === next.id ? next : other)));
               }}
             >
-              {everything ? 'Show fewer' : 'View all'}
-            </button>
+              <Body block={one} ground={ground} />
+            </Frame>
+          ))}
+
+          {board.length === 0 && (
+            <div className="flex h-full flex-col items-start justify-center gap-3">
+              <h2 className="m-0 text-heading font-semibold text-ink-2">
+                {t('Nothing on this screen yet')}
+              </h2>
+              <p className="m-0 max-w-[46ch] text-note text-muted-2">
+                {t('Arrange this screen, then add the blocks you want on it.')}
+              </p>
+            </div>
           )}
         </div>
 
-        <div className="mt-2.5 flex flex-none flex-col gap-2">
-          {listed.length === 0 ? (
-            <p className="m-0 py-3 text-note-2 text-dim">
-              {t('Every session you end is listed here, with what it came to.')}
-            </p>
-          ) : (
-            listed.map((one) => (
+        {/* The bar along the bottom. In view it is this machine and what it is doing; while the
+            board is being arranged it is what arranging can do. */}
+        <div className="sticky bottom-0 z-[3] mt-4 flex flex-none items-center gap-3.5 rounded-pill border border-line-4 bg-[rgba(5,5,7,0.92)] py-[9px] pr-4 pl-[30px] backdrop-blur-[6px]">
+          {editing ? (
+            <>
               <button
-                key={`${one.host}-${one.startedAt}`}
                 type="button"
-                disabled={!machines.includes(one.host)}
+                className="inline-flex items-center gap-2 rounded-pill bg-violet px-4 py-2.5 text-note font-medium text-white"
                 onClick={() => {
-                  watch(one.host);
+                  setAdding(true);
                 }}
-                className="flex w-full items-center gap-3.5 rounded-xl border border-line-1 bg-[rgba(255,255,255,0.04)] px-4 py-[13px] text-left transition-colors enabled:hover:bg-wash-3 disabled:cursor-default"
               >
-                <i
-                  className="block size-1.5 flex-none rounded-[2px]"
-                  style={{ background: markOf(one.host) }}
-                />
-                <span className="truncate text-control font-medium text-ink-2">
-                  {machineName(one.host)}
+                <span aria-hidden className="text-ui leading-none">
+                  +
                 </span>
-                <span className="flex-none text-[12.5px] text-dim">{when(one.endedAt)}</span>
-                <span className="flex-1" />
-                <span className="flex-none text-fine text-dim">{latency(one.rttMs)} ms avg</span>
-                <span className="flex-none text-[12.5px] font-medium text-muted">
-                  {span(one.endedAt - one.startedAt)}
-                </span>
-                <span className="flex-none text-[15px] text-dim-2">›</span>
+                {t('Add a block')}
               </button>
-            ))
+              <span className="text-fine text-dim">
+                {t('Drag a block to move it, and its corner to resize it.')}
+              </span>
+              <span className="flex-1" />
+              {chosen && (
+                <span className="text-fine text-ink-3 tabular-nums">
+                  {titleOf(chosen, ground)} | {chosen.w} × {chosen.h}
+                </span>
+              )}
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  commit(startingBoard(machines, across));
+                  setPicked(null);
+                }}
+              >
+                {t('Default layout')}
+              </button>
+            </>
+          ) : (
+            <>
+              <span
+                aria-hidden
+                className={`size-2 flex-none rounded-pill ${shared ? 'bg-mint' : 'bg-dim'}`}
+              />
+              <span className="truncate text-note font-medium text-ink">
+                {watched
+                  ? t('{name} is watching this machine', { name: nameOf(mine?.peer ?? '') })
+                  : shared
+                    ? t('Sharing this machine')
+                    : t('Not shared')}
+              </span>
+              <span className="truncate text-fine text-dim tabular-nums">{specs}</span>
+              <span className="flex-1" />
+              <button type="button" className="btn-secondary" onClick={prism.openTransfers}>
+                {t('Files')}
+                {stream.moving.length > 0 && (
+                  <span className="ml-2 rounded-pill bg-mint px-1.5 text-label font-semibold text-on-light tabular-nums">
+                    {stream.moving.length}
+                  </span>
+                )}
+              </button>
+              {watched && (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    void prism.disconnectViewer().catch((error: unknown) => {
+                      setTrouble(reason(error));
+                    });
+                  }}
+                >
+                  {t('Disconnect')}
+                </button>
+              )}
+              <button
+                type="button"
+                className={shared ? 'btn-danger px-4 py-2.5 text-note' : 'btn-primary-sm'}
+                onClick={flip}
+              >
+                {shared ? t('Stop sharing') : t('Share this machine')}
+              </button>
+            </>
           )}
-        </div>          </>
-        )}
-
+        </div>
       </div>
+
+      {/* While a session is opening. The stream draws itself in a window of its own and that
+          window does not exist yet, so the wait belongs here — where the machine being opened
+          is already named and there is something to press to give up on it. */}
+      {stream.phase === 'connecting' && (
+        <div className="fixed inset-0 z-[7] grid place-items-center bg-[rgba(5,5,7,0.96)]">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute top-1/2 left-1/2 h-[460px] w-[720px] -translate-x-1/2 -translate-y-1/2 opacity-60 blur-[120px]"
+            style={{
+              background:
+                'linear-gradient(90deg, rgba(53,214,255,0.3), rgba(124,92,255,0.34), rgba(255,92,168,0.24))',
+            }}
+          />
+
+          <button
+            type="button"
+            className="btn-secondary absolute top-6 right-8"
+            onClick={() => {
+              void prism.disconnect().catch((error: unknown) => {
+                setTrouble(reason(error));
+              });
+            }}
+          >
+            {t('Disconnect')}
+          </button>
+
+          <div className="relative flex flex-col items-center gap-3.5">
+            <span className="text-[34px] leading-none font-semibold tracking-[-0.8px] text-ink">
+              {nameOf(stream.host ?? '')}
+            </span>
+            <span className="text-control font-medium text-muted-2">{t('Opening')}</span>
+            <span className="relative mt-6 block h-1 w-[360px] overflow-hidden rounded-pill bg-wash-4">
+              <span className="absolute inset-y-0 left-0 block w-1/3 rounded-pill bg-gradient-to-r from-transparent via-violet to-transparent motion-safe:animate-[sweep_1.6s_ease-in-out_infinite]" />
+            </span>
+          </div>
+
+          <p className="absolute bottom-16 m-0 text-fine text-dim">
+            {t('If this sits here, check that sharing is on over there.')}
+          </p>
+        </div>
+      )}
+
+      {adding && (
+        <AddPanel
+          board={board}
+          across={across}
+          machines={machines.map((key) => ({
+            key,
+            name: nameOf(key),
+            platform: platformOf(key),
+          }))}
+          onAdd={(block) => {
+            commit([...board, block]);
+            setPicked(block.id);
+            setAdding(false);
+          }}
+          onClose={() => {
+            setAdding(false);
+          }}
+        />
+      )}
+
+      {working && (
+        <BlockPanel
+          block={working}
+          title={titleOf(working, ground)}
+          onChange={(next) => {
+            setBoard(board.map((other) => (other.id === next.id ? next : other)));
+          }}
+          onRemove={() => {
+            commit(board.filter((other) => other.id !== working.id));
+            setOpened(null);
+            setPicked(null);
+          }}
+          onClose={() => {
+            commit(board);
+            setOpened(null);
+          }}
+        />
+      )}
+
+      {/* Asked rather than done quietly. Installing replaces the application under a process
+          that is running it, and the last step is a restart. */}
+      {update && (
+        <div className="fixed inset-0 z-[8] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
+          <div className="w-full max-w-[420px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
+            <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+              새로운 빌드가 있습니다
+            </h2>
+            <p className="mt-3 mb-0 text-ui text-dim">
+              {update.version} 을 설치하면 Prism이 다시 시작됩니다.
+            </p>
+            {update.notes.trim() !== '' && (
+              <p className="mt-2 mb-0 max-h-24 overflow-y-auto text-ui text-dim">{update.notes}</p>
+            )}
+            {updateError !== '' && <p className="mt-3 mb-0 text-ui text-danger-ink">{updateError}</p>}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={installing}
+                onClick={() => {
+                  setUpdate(null);
+                  setUpdateError('');
+                }}
+              >
+                나중에
+              </button>
+              <button
+                type="button"
+                className="btn-primary-sm"
+                disabled={installing}
+                onClick={() => {
+                  setInstalling(true);
+                  setUpdateError('');
+                  void prism
+                    .installUpdate()
+                    .catch((error: unknown) => {
+                      setUpdateError(error instanceof Error ? error.message : String(error));
+                    })
+                    .finally(() => {
+                      setInstalling(false);
+                    });
+                }}
+              >
+                {installing ? '설치 중…' : '설치'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* What sharing is waiting on, one row a grant, each with the way to it. */}
+      {asking && (
+        <div className="fixed inset-0 z-[8] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
+          <div className="w-full max-w-[460px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
+            <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
+              {t('Allow these to share this machine')}
+            </h2>
+            <p className="mt-3 mb-0 text-ui text-dim">
+              {t('Turn each one on in System Settings, then come back.')}
+            </p>
+
+            <div className="mt-4">
+              {GRANTS.filter((grant) => asking.includes(grant.id)).map((grant) => {
+                const restart = grant.id === 'screen' && asked.has(grant.id);
+
+                return (
+                  <div
+                    key={grant.id}
+                    className="flex items-center gap-3 py-3 not-first:border-t not-first:border-line-1"
+                  >
+                    <span
+                      className={`flex size-[34px] flex-none items-center justify-center rounded-badge border text-ui font-medium ${grant.tint}`}
+                    >
+                      {grant.glyph}
+                    </span>
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="text-ui font-medium text-ink">{t(grant.name)}</span>
+                      <span className="text-fine text-muted-2">{t(grant.why)}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-secondary flex-none"
+                      onClick={() => {
+                        void (async () => {
+                          if (restart) {
+                            await prism.restart();
+
+                            return;
+                          }
+
+                          try {
+                            await prism.requestPermission(grant.id);
+                            setAsked((was) => new Set(was).add(grant.id));
+                            await shareOrAsk();
+                          } catch (error) {
+                            setTrouble(reason(error));
+                          }
+                        })();
+                      }}
+                    >
+                      {restart ? t('Restart PRISM') : t('Open System Settings')}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setAsking(null);
+                }}
+              >
+                {t('Close')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {gone && (
+        <div className="fixed inset-0 z-[8] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
+          <div
+            role="alertdialog"
+            aria-labelledby="gone-title"
+            className="w-full max-w-[400px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]"
+          >
+            <h2
+              id="gone-title"
+              className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink"
+            >
+              {gone === 'left'
+                ? t('The host disconnected')
+                : t('The connection to the host was lost')}
+            </h2>
+            {gone === 'silent' && (
+              <p className="mt-3 mb-0 text-ui text-dim">
+                {t('Check that the host is on and connected to the network.')}
+              </p>
+            )}
+
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                autoFocus
+                onClick={() => {
+                  setGone(null);
+                }}
+              >
+                {t('OK')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Over the window rather than beside it. Settings are a detour from what somebody came
           to do, and a detour that dims what it interrupts is one they can see their way back
-          from — a second window is a second thing to find, raise and close.
-
-          Held against the window rather than against the page: the page scrolls, and a sheet
-          positioned inside it opens wherever the scroll happens to be rather than in front of
-          the person. Bounded too, so that a sheet taller than the window scrolls within itself
-          instead of running off the bottom edge with no way to reach the rest. */}
+          from. */}
       {tuning && (
         <div
-          className="fixed inset-0 z-[2] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]"
+          className="fixed inset-0 z-[7] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]"
           onMouseDown={(event) => {
-            // Only the backdrop itself. A drag that started inside the sheet and ended out
-            // here is somebody selecting text, not somebody dismissing it.
             if (event.target === event.currentTarget) {
               setTuning(false);
             }
@@ -1164,7 +938,7 @@ function Home(): JSX.Element {
           <div className="max-h-full w-full max-w-[520px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.96)] shadow-[0_24px_60px_rgba(0,0,0,0.45)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <div className="flex items-center justify-between px-5 pt-4 pb-1">
               <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
-                Settings
+                {t('Settings')}
               </h2>
               <button
                 type="button"

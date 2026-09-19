@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS devices (
   -- its network or being put to sleep never gets to say so. It says it is shared every half
   -- minute while it is, and one that stops saying so drops off the others' lists on its own.
   shared_until INTEGER NOT NULL DEFAULT 0,
+  -- Which operating system it runs: `macos`, `windows`, `linux`, or empty from a build that
+  -- never said. What the home screen marks each machine with, so a list of five names is five
+  -- machines somebody recognises rather than five names they have to read.
+  platform TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (email, public_key)
 );
 

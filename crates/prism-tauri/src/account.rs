@@ -90,6 +90,9 @@ struct Device {
     /// it. Every machine is offered then, as every machine was before any server said.
     #[serde(default)]
     shared: Option<bool>,
+    /// Which operating system it runs, or empty from a server or build that never said.
+    #[serde(default)]
+    platform: String,
 }
 
 /// The salt to hash a password with.
@@ -192,6 +195,8 @@ struct DeviceBody {
     public_key: String,
     /// What to call it.
     label: String,
+    /// Which operating system it runs, so the others can mark it with the right one.
+    platform: String,
 }
 
 /// The machines on an account.
@@ -225,6 +230,8 @@ pub struct DeviceView {
     pub is_this_machine: bool,
     /// Whether it is shared right now, which is what makes it somewhere to connect to.
     pub shared: bool,
+    /// Which operating system it runs: `macos`, `windows`, `linux`, or empty when it never said.
+    pub platform: String,
 }
 
 /// What is known about the account right now.
@@ -482,6 +489,7 @@ impl Client {
         let body = DeviceBody {
             public_key: public_key.to_owned(),
             label: label.to_owned(),
+            platform: std::env::consts::OS.to_owned(),
         };
 
         let reply = self.send(Verb::Post, "/v1/devices", Some(&body))?;
@@ -1219,6 +1227,7 @@ fn views(devices: &[Device], mine: &str) -> Vec<DeviceView> {
             label: device.label.clone(),
             is_this_machine: device.public_key == mine,
             shared: device.shared.unwrap_or(true),
+            platform: device.platform.clone(),
         })
         .collect()
 }
@@ -1710,6 +1719,7 @@ mod tests {
             public_key: public_key.to_owned(),
             label: label.to_owned(),
             shared: None,
+            platform: String::new(),
         }
     }
 

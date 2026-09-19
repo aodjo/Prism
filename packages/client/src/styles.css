@@ -19,3 +19,15 @@
   src: url('fonts/geist-latin.woff2') format('woff2');
 }
 
+
+/* The bar that runs while a session opens. Indeterminate, because nothing on either side knows
+   how long a handshake takes: a percentage here would be a number chosen to look reassuring. */
+@keyframes sweep {
+  0% {
+    left: -34%;
+  }
+
+  100% {
+    left: 100%;
+  }
+}

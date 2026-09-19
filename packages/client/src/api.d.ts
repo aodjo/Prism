@@ -51,6 +51,13 @@ export interface AccountDeviceView {
   readonly isThisMachine: boolean;
   /** Whether it is shared right now, which is what makes it somewhere to connect to. */
   readonly shared: boolean;
+  /**
+   * Which operating system it runs: `macos`, `windows`, `linux`, or empty when it never said.
+   *
+   * What the home screen marks each machine with, so a list of five names is five machines
+   * somebody recognises rather than five names they have to read.
+   */
+  readonly platform: string;
 }
 
 /**
@@ -181,7 +188,55 @@ export interface Settings {
   language: string;
   /** Whether somebody has been all the way through setup on this machine. */
   setupFinished: boolean;
+  /**
+   * The blocks on the home board, in the arrangement somebody left them.
+   *
+   * Empty until somebody moves something, and empty is what a fresh machine wants: the window
+   * lays out a default board from whatever machines the account has. Once anything is here it is
+   * the whole arrangement, so a block missing from this list was removed rather than not yet
+   * placed.
+   */
+  board: readonly Block[];
 }
+
+/**
+ * One block on the home board.
+ *
+ * Positions and sizes are in holes rather than pixels. The board is a lattice and a block can
+ * only ever sit on it, so a pixel here would be a number that has to be divided back on every
+ * read and would go wrong the first time the lattice changed.
+ */
+export interface Block {
+  /** What tells this block from the others on the board. */
+  id: string;
+  /** What it draws. */
+  kind: BlockKind;
+  /** Which machine it is about, as hex, for the kinds that are about one. */
+  host: string;
+  /** How many holes from the left edge of the board. */
+  x: number;
+  /** How many holes from the top. */
+  y: number;
+  /** How many holes across. */
+  w: number;
+  /** How many holes down. */
+  h: number;
+  /** What it is called, or empty to use the name the machine already has. */
+  label: string;
+  /** Which figures it shows. */
+  fields: readonly string[];
+  /** Its colour: one entry for a flat colour, several for a gradient across them. */
+  accent: readonly string[];
+}
+
+/**
+ * The kinds of block the board can hold.
+ *
+ * `machine` is one machine given a tile of its own; `machines` is all of them as a list; `mine`
+ * is this computer and its switch; `sessions` is what has been watched lately; `terms` is what
+ * this machine is shared on; `link` is how the current session is doing.
+ */
+export type BlockKind = 'machine' | 'machines' | 'mine' | 'sessions' | 'terms' | 'link';
 
 /** What this build is, in the two numbers that answer different questions. */
 export interface Build {
