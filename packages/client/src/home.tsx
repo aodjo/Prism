@@ -394,7 +394,9 @@ function Home(): JSX.Element {
           for its children. */}
       <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-[3] h-[46px]" />
 
-      <div className="relative z-[1] flex min-h-full w-full flex-col px-8 pt-[26px] pb-[26px]">
+      {/* Room at the bottom for the bar that floats over it, so the last row of blocks can be
+          scrolled clear of it rather than ending underneath. */}
+      <div className="relative z-[1] flex min-h-full w-full flex-col px-8 pt-[26px] pb-[108px]">
         <header className="relative z-[5] flex h-8 flex-none items-center gap-4">
           <Wordmark size="sm" />
           <div data-tauri-drag-region className="h-full flex-1" />
@@ -599,7 +601,11 @@ function Home(): JSX.Element {
 
         {/* The bar along the bottom. In view it is this machine and what it is doing; while the
             board is being arranged it is what arranging can do. */}
-        <div className="sticky bottom-0 z-[3] mt-4 flex flex-none items-center gap-3.5 rounded-pill border border-line-4 bg-[rgba(5,5,7,0.92)] py-[9px] pr-4 pl-[30px] backdrop-blur-[6px]">
+        {/* Held against the window rather than against the page. What it carries — whether this
+            machine is shared, and the one switch that changes that — is not something to have to
+            scroll back to, and a board taller than the window is exactly when somebody is
+            furthest from it. */}
+        <div className="fixed inset-x-8 bottom-[26px] z-[4] flex items-center gap-3.5 rounded-pill border border-line-4 bg-[rgba(5,5,7,0.92)] py-[9px] pr-4 pl-[30px] backdrop-blur-[6px]">
           {editing ? (
             <>
               <button
