@@ -313,7 +313,16 @@ impl Toolbar {
             .styleMask()
             .contains(NSWindowStyleMask::FullScreen);
 
-        self.filling.set(filling);
+        let was = self.filling.replace(filling);
+
+        // Asserted while the screen is filled and given back the moment it is not. Only then:
+        // a window on a desk shares these options with everything else the system is doing, and
+        // holding them to a figure of this window's choosing every turn of the loop is this
+        // program deciding what the menu bar and the Dock do while somebody is not even looking
+        // at it.
+        if !filling && !was {
+            return filling;
+        }
 
         let Some(marker) = MainThreadMarker::new() else {
             return filling;
@@ -330,7 +339,8 @@ impl Toolbar {
 
         let app = NSApplication::sharedApplication(marker);
 
-        // Read before written, so the usual turn of the loop costs a getter and nothing else.
+        // Read before written, so the usual turn of a full screen costs a getter and nothing
+        // else.
         if app.presentationOptions() != wanted {
             app.setPresentationOptions(wanted);
         }

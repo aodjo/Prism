@@ -29,6 +29,13 @@ use crate::net::packet::{InputEvent, MouseButton};
 /// games.
 const TAP: CGEventTapLocation = CGEventTapLocation::HIDEventTap;
 
+/// How long the screen's measured shape is trusted before the system is asked again.
+///
+/// Half a second. A resolution change is something a person does and then looks at, so being
+/// right within that is being right immediately; asking on every event instead would put a call
+/// into the window server on the path a hand moves along.
+const BOUNDS_LIFETIME: Duration = Duration::from_millis(500);
+
 /// What every event this injects carries in its source's user data field.
 ///
 /// Looking like hardware is the point, and it leaves nothing to tell the machine's own mouse
@@ -67,6 +74,14 @@ struct Press {
 pub struct MacInjector {
     source: objc2_core_foundation::CFRetained<CGEventSource>,
     bounds: CGRect,
+    /// When the screen's shape was last asked for.
+    ///
+    /// It was asked once, when the session opened, and kept for the life of it. A screen that
+    /// changed size afterwards — somebody choosing another resolution, a virtual machine's
+    /// display being resized, a laptop meeting a monitor — left every place the far side
+    /// pointed at being worked out against a screen that no longer existed, and the edges of
+    /// the new one unreachable because the clamp still belonged to the old.
+    measured: Instant,
     position: CGPoint,
     buttons: [bool; 3],
     keys: HeldKeys,
@@ -87,20 +102,32 @@ impl MacInjector {
         (self.position.x, self.position.y)
     }
 
+    /// The screen's shape, asked of the system again when what is held has gone stale.
+    ///
+    /// Not on every event: pointer motion arrives as fast as a hand moves, and this is a call
+    /// into the window server. Twice a second is quick enough that a resolution change is over
+    /// before anybody has finished noticing it, and rare enough to cost nothing.
+    fn screen(&mut self) -> CGRect {
+        if self.measured.elapsed() >= BOUNDS_LIFETIME {
+            self.bounds = CGDisplayBounds(CGMainDisplayID());
+            self.measured = Instant::now();
+        }
+
+        self.bounds
+    }
+
     /// Moves the pointer by a relative amount and posts the motion.
     ///
     /// The delta is written onto the event as well as being folded into the position,
     /// because a game reading raw pointer input wants the movement, not where the cursor
     /// ended up.
     fn move_pointer(&mut self, dx: f64, dy: f64) -> Result<(), InputError> {
-        self.position.x = (self.position.x + dx).clamp(
-            self.bounds.origin.x,
-            self.bounds.origin.x + self.bounds.size.width - 1.0,
-        );
-        self.position.y = (self.position.y + dy).clamp(
-            self.bounds.origin.y,
-            self.bounds.origin.y + self.bounds.size.height - 1.0,
-        );
+        let bounds = self.screen();
+
+        self.position.x = (self.position.x + dx)
+            .clamp(bounds.origin.x, bounds.origin.x + bounds.size.width - 1.0);
+        self.position.y = (self.position.y + dy)
+            .clamp(bounds.origin.y, bounds.origin.y + bounds.size.height - 1.0);
 
         let (kind, button) = match self.held_button() {
             Some(MouseButton::Left) => (CGEventType::LeftMouseDragged, CGMouseButton::Left),
@@ -319,6 +346,7 @@ impl Injector for MacInjector {
         Ok(Self {
             source,
             bounds,
+            measured: Instant::now(),
             position,
             buttons: [false; 3],
             keys: HeldKeys::default(),
@@ -341,7 +369,7 @@ impl Injector for MacInjector {
             // of every click on both edges of it, and a motion of nothing between a press and
             // its release is a drag of nothing, which is not what the person did.
             InputEvent::MouseTo { x, y } => {
-                let target = place_on(self.bounds, x, y);
+                let target = place_on(self.screen(), x, y);
                 let (dx, dy) = (target.x - self.position.x, target.y - self.position.y);
 
                 if dx == 0.0 && dy == 0.0 {
