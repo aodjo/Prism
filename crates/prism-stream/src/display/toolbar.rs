@@ -26,9 +26,10 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationPresentationOptions, NSEvent, NSImage, NSMenu, NSMenuItem,
-    NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode, NSToolbarItem, NSToolbarItemIdentifier,
-    NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
+    NSApplication, NSApplicationPresentationOptions, NSEvent, NSFontWeightRegular, NSImage,
+    NSImageSymbolConfiguration, NSImageSymbolScale, NSMenu, NSMenuItem, NSToolbar,
+    NSToolbarDelegate, NSToolbarDisplayMode, NSToolbarItem, NSToolbarItemIdentifier, NSWindow,
+    NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSString};
 use sdl3::video::Window;
@@ -120,6 +121,12 @@ const TOOLS: [Tool; 7] = [
 
 /// The symbol the control item carries while the machine is being controlled.
 const CONTROLLING: &str = "cursorarrow.rays";
+
+/// How large the symbols on the controls are drawn, in points.
+///
+/// Under what a toolbar gives them, which on the compact title bar this window uses is still
+/// sized for a bar with room to spare. Thirteen is the size of the text beside it.
+const SYMBOL_POINTS: f64 = 13.0;
 
 /// What the delegate holds.
 struct Held {
@@ -502,8 +509,27 @@ fn item(tool: Tool, controls: &Controls, marker: MainThreadMarker) -> Retained<N
 }
 
 /// Returns the system's drawing of a symbol, or `None` if this system has no such symbol.
+///
+/// Drawn smaller than a toolbar draws one by default. These controls are recognised by shape
+/// rather than read, and the bar they sit in is overhead above the picture — so what matters is
+/// how little of the window they take, not how comfortable they look on their own.
 fn symbol_image(name: &str) -> Option<Retained<NSImage>> {
-    NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(name),
+        None,
+    )?;
+
+    // SAFETY: a read-only floating point constant AppKit exports, set before anything in this
+    // process runs and never written to afterwards.
+    let weight = unsafe { NSFontWeightRegular };
+
+    let smaller = NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
+        SYMBOL_POINTS,
+        weight,
+        NSImageSymbolScale::Small,
+    );
+
+    image.imageWithSymbolConfiguration(&smaller)
 }
 
 /// Returns the `NSWindow` behind an SDL window.
