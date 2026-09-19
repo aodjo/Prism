@@ -15,6 +15,15 @@ const STAGE: (f64, f64) = (1280.0, 840.0);
 /// The narrowest either of them goes before the design stops fitting.
 const STAGE_FLOOR: (f64, f64) = (1040.0, 720.0);
 
+/// What the file window opens at.
+///
+/// Wide enough for a file name, a size and what it is doing on one line without wrapping, and
+/// short enough to sit beside a stream rather than over it.
+const TRANSFERS: (f64, f64) = (560.0, 620.0);
+
+/// The narrowest and shortest it goes before a row stops fitting on one line.
+const TRANSFERS_FLOOR: (f64, f64) = (420.0, 320.0);
+
 /// How wide the settings panel is. It holds a list and a few rows, and does not resize.
 const PANEL_WIDTH: f64 = 420.0;
 
@@ -146,6 +155,35 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
         .background_color(BASE);
 
     overlaid(panel)
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Opens the window files are managed in, or raises it if it is already open.
+///
+/// Its own window rather than a panel inside the stream: what is moving has to stay readable
+/// while somebody works in the picture of the other machine, and a sheet over that picture is a
+/// sheet covering the thing they are watching. It outlives a session too — what arrived is worth
+/// finding after the stream that carried it has closed.
+///
+/// # Errors
+///
+/// Fails if the window cannot be built.
+#[tauri::command]
+pub fn open_transfers(app: AppHandle) -> Result<(), String> {
+    if let Some(open) = app.get_webview_window("transfers") {
+        return open.set_focus().map_err(|error| error.to_string());
+    }
+
+    let window =
+        WebviewWindowBuilder::new(&app, "transfers", WebviewUrl::App("transfers.html".into()))
+            .title("Prism")
+            .inner_size(TRANSFERS.0, TRANSFERS.1)
+            .min_inner_size(TRANSFERS_FLOOR.0, TRANSFERS_FLOOR.1)
+            .background_color(BASE);
+
+    overlaid(window)
         .build()
         .map(|_| ())
         .map_err(|error| error.to_string())

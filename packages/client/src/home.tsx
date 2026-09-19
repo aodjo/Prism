@@ -73,6 +73,10 @@ const NOTHING: StreamState = {
   stats: null,
   departed: null,
   log: [],
+  moving: [],
+  offered: [],
+  offeredMore: false,
+  arrived: [],
 };
 
 /** How many sessions the list shows before somebody asks for the rest. */
@@ -567,6 +571,22 @@ function Home(): JSX.Element {
               </button>
             ))}
           </div>
+          {/* Files, beside the machines rather than inside a session, because what arrived is
+              worth finding after the stream that carried it has closed. It also has to be
+              reachable before anything is moving: the window is what a file is sent from, and
+              one that only opened by itself could never be opened to start one. */}
+          <button
+            type="button"
+            onClick={prism.openTransfers}
+            className="inline-flex items-center gap-[7px] rounded-pill border border-line-4 bg-wash-3 py-[9px] pr-4 pl-[15px] text-note font-medium text-ink-2 transition-colors hover:bg-[rgba(255,255,255,0.1)]"
+          >
+            <span>{t('Files')}</span>
+            {stream.moving.length > 0 && (
+              <span className="rounded-pill bg-mint px-1.5 text-label font-semibold text-on-light tabular-nums">
+                {stream.moving.length}
+              </span>
+            )}
+          </button>
           <button
             type="button"
             hidden={alone}

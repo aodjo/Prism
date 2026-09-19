@@ -275,6 +275,18 @@ export function installBridge(): void {
       void call('open_settings');
     },
 
+    openTransfers: (): void => {
+      void call('open_transfers');
+    },
+
+    sendFile: (path: string): Promise<void> => call<void>('stream_send_file', { path }),
+
+    fetchFile: (name: string): Promise<void> => call<void>('stream_fetch_file', { name }),
+
+    askListing: (): Promise<void> => call<void>('stream_ask_listing'),
+
+    chooseFile: (): Promise<void> => call<void>('stream_choose_file'),
+
     fit: (height: number): void => {
       void call('fit', { height });
     },

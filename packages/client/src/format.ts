@@ -5,6 +5,39 @@
  * setup flow and another way on the home window is two different claims about the same thing.
  */
 
+/** The names for each thousand-fold step, in the order they are reached. */
+const SIZES = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
+
+/**
+ * Formats a file's size for display.
+ *
+ * Powers of a thousand rather than of 1024, because that is what the systems this runs on show
+ * and a file that reads as 1.1 MB in a Finder window should not read as 1.0 MB here.
+ *
+ * A decimal below ten and none above it: the difference between 1.2 and 1.3 GB is worth seeing,
+ * and the difference between 812.4 and 812.5 MB is noise in a row somebody is scanning.
+ *
+ * @param {number} size - How many bytes.
+ * @returns {string} What to show, unit included.
+ *
+ * @example
+ * bytes(980);      // '980 B'
+ * bytes(1_200_000) // '1.2 MB'
+ */
+export function bytes(size: number): string {
+  let left = Math.max(size, 0);
+  let step = 0;
+
+  while (left >= 1000 && step < SIZES.length - 1) {
+    left /= 1000;
+    step += 1;
+  }
+
+  const shown = step === 0 || left >= 10 ? Math.round(left) : Math.round(left * 10) / 10;
+
+  return `${shown} ${SIZES[step] as string}`;
+}
+
 /**
  * Formats a latency for display.
  *

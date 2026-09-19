@@ -990,12 +990,15 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                 if display {
                     prism_stream::display::run(
                         config,
-                        window_width,
-                        window_height,
-                        pacing_us,
-                        !no_input,
-                        synthetic_input,
+                        prism_stream::display::Shown {
+                            width: window_width,
+                            height: window_height,
+                            pacing_us,
+                            capture_input: !no_input,
+                            synthetic_input,
+                        },
                         &printing(),
+                        &prism_stream::ipc::Talkback::silent(),
                     )
                 } else {
                     Ok(client::run(

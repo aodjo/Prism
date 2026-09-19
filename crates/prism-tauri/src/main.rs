@@ -26,6 +26,7 @@ mod watched;
 mod windows;
 
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 
 use prism_core::identity;
 use settings::Settings;
@@ -306,6 +307,10 @@ fn main() {
             let reporting = app.handle().clone();
             let recording = app.handle().clone();
 
+            // Whether anything was moving the last time this was looked at, so that the window
+            // is raised on the first file of a run rather than on every snapshot after it.
+            let moving_before = std::sync::atomic::AtomicBool::new(false);
+
             app.manage(stream::Held::new(
                 Box::new(move |snapshot| {
                     let _ = reporting.emit("stream:state", snapshot);
@@ -315,6 +320,18 @@ fn main() {
                     // it comes forward to say it.
                     if snapshot.phase == stream::Phase::Stopped && snapshot.departed.is_some() {
                         tray::surface(&reporting);
+                    }
+
+                    // A file starting to move opens the window that shows it. Somebody who
+                    // dropped a file on the stream is owed somewhere to watch it go, and the
+                    // one place that existed was a menu drawn over the desktop they were
+                    // working in. Only on the first one: it is raised when there was nothing
+                    // moving a moment ago, so a second file in the same run does not take the
+                    // focus back from whatever they moved on to.
+                    if !snapshot.moving.is_empty() && !moving_before.swap(true, Ordering::Relaxed) {
+                        let _ = windows::open_transfers(reporting.clone());
+                    } else if snapshot.moving.is_empty() {
+                        moving_before.store(false, Ordering::Relaxed);
                     }
                 }),
                 Box::new(move |session| {
@@ -405,6 +422,10 @@ fn main() {
             stream::stream_connect,
             stream::stream_disconnect,
             stream::stream_state,
+            stream::stream_send_file,
+            stream::stream_fetch_file,
+            stream::stream_ask_listing,
+            stream::stream_choose_file,
             sessions::get_sessions,
             account::account_state,
             account::account_challenge,
@@ -415,6 +436,7 @@ fn main() {
             sign_out,
             windows::finish_setup,
             windows::open_settings,
+            windows::open_transfers,
             windows::fit,
             updates::build_info,
             updates::check_for_update,

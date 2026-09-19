@@ -491,6 +491,24 @@ fn announce_control(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
     });
 }
 
+/// How the stream is to be shown, as against what is to be shown.
+///
+/// Five numbers that all answer the same question — what this window does with what arrives —
+/// and passing them one at a time made the call a row of bare literals nobody could read.
+#[derive(Debug, Clone, Copy)]
+pub struct Shown {
+    /// How large to open the window.
+    pub width: u32,
+    /// How large to open the window.
+    pub height: u32,
+    /// The ceiling on how long a picture may be held to even out jitter; zero shows each at once.
+    pub pacing_us: u32,
+    /// Whether this end's keyboard and mouse are sent to the far machine.
+    pub capture_input: bool,
+    /// Whether to fabricate pointer motion, so the input path can be measured with no hand on it.
+    pub synthetic_input: bool,
+}
+
 /// Opens a window and shows the stream until it ends or the window is closed.
 ///
 /// Everything this would otherwise print goes to `say`, because the two callers want it in
@@ -506,13 +524,18 @@ fn announce_control(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
 /// Panics if the receive thread panicked.
 pub fn run(
     mut config: ClientConfig,
-    width: u32,
-    height: u32,
-    pacing_us: u32,
-    capture_input: bool,
-    synthetic_input: bool,
+    shown: Shown,
     say: &Reporter,
+    talk: &crate::ipc::Talkback,
 ) -> Result<(), Box<dyn Error>> {
+    let Shown {
+        width,
+        height,
+        pacing_us,
+        capture_input,
+        synthetic_input,
+    } = shown;
+
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
 
@@ -652,6 +675,10 @@ pub fn run(
     // because the dialog answers from inside the event pump and this loop reads it outside.
     let (chosen_tx, chosen_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
 
+    // What the shell was last told is moving, so it is told again only when that is no longer
+    // true. Every pass of this loop asks, and a session sitting still asks for nothing.
+    let mut told_moving: Vec<crate::ipc::Moving> = Vec::new();
+
     if capture_input {
         announce_control(bar.as_ref(), say, controlling);
     }
@@ -722,10 +749,40 @@ pub fn run(
             }
         }
 
+        // What the shell is asking for, if a shell is driving this run. The same three things
+        // the toolbar can ask for, so neither surface can do something the other cannot.
+        while let Some(command) = talk.asked.as_ref().and_then(|asked| asked.try_recv().ok()) {
+            let Some(files) = moving.as_ref() else {
+                say.note("files: this session has nowhere to keep files".to_owned());
+                continue;
+            };
+            let Ok(mut files) = files.lock() else {
+                continue;
+            };
+
+            match command {
+                crate::ipc::Command::Send { path } => {
+                    if let Err(err) = files.send(std::path::Path::new(&path)) {
+                        say.note(format!("files: {path} did not go ({err})"));
+                    }
+                }
+                crate::ipc::Command::Fetch { name } => files.fetch(&name),
+                crate::ipc::Command::Listing => files.ask_for_listing(),
+                crate::ipc::Command::Choose => {
+                    drop(files);
+                    choose_a_file(&window, &chosen_tx, say);
+                }
+            }
+        }
+
         while let Ok(event) = landed_rx.try_recv() {
             match event {
                 Landed::Received { name, path } => {
                     say.note(format!("files: {name} arrived in {}", path.display()));
+                    (talk.tell)(crate::ipc::Event::Arrived {
+                        name,
+                        path: path.display().to_string(),
+                    });
                 }
                 Landed::Listing(listing) => {
                     let files: Vec<(String, u64)> = listing
@@ -734,10 +791,48 @@ pub fn run(
                         .map(|file| (file.name, file.size))
                         .collect();
 
+                    (talk.tell)(crate::ipc::Event::Offering {
+                        entries: files
+                            .iter()
+                            .map(|(name, size)| crate::ipc::Offered {
+                                name: name.clone(),
+                                size: *size,
+                            })
+                            .collect(),
+                        more: listing.more,
+                    });
+
                     if let Some(bar) = bar.as_ref() {
                         bar.offer(&files, listing.more);
                     }
                 }
+            }
+        }
+
+        // Said when it changes rather than on a timer. A transfer is a row somebody is watching
+        // fill, so it has to be prompt; a session with nothing moving must cost nothing, which
+        // a timer sending the same empty list forever would not.
+        if let Some(files) = moving.as_ref() {
+            let now: Vec<crate::ipc::Moving> = files.lock().map_or_else(
+                |_| Vec::new(),
+                |files| {
+                    files
+                        .progress()
+                        .into_iter()
+                        .map(|one| crate::ipc::Moving {
+                            name: one.name,
+                            size: one.size,
+                            moved: one.moved,
+                            sending: one.sending,
+                            done: one.done,
+                        })
+                        .collect()
+                },
+            );
+
+            if now != told_moving {
+                told_moving.clone_from(&now);
+                (talk.tell)(crate::ipc::Event::Transfers { moving: now });
             }
         }
 

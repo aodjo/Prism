@@ -51,6 +51,59 @@ pub struct Start {
     pub height: u32,
 }
 
+/// What the shell asks of a stream that is already running.
+///
+/// The second half of what used to be a one-way pipe. Files were something only the stream
+/// window could start, because it was the only thing holding the session — which meant the one
+/// surface for them was a menu inside the picture of somebody else's desktop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Command {
+    /// Offer this file to the far machine.
+    Send {
+        /// Where the file is on this machine.
+        path: String,
+    },
+    /// Ask the far machine for one of the files it is offering.
+    Fetch {
+        /// The name, as its listing gave it.
+        name: String,
+    },
+    /// Ask the far machine what it is offering.
+    Listing,
+    /// Put the file chooser up, and offer whatever comes back.
+    ///
+    /// Asked for rather than done here, because the dialog has to belong to a window and the
+    /// only window in this session is the one the stream is drawn in.
+    Choose,
+}
+
+/// One file on its way, in either direction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Moving {
+    /// What the file is called.
+    pub name: String,
+    /// How many bytes it holds.
+    pub size: u64,
+    /// How many of them have moved.
+    pub moved: u64,
+    /// Whether this machine is the one sending.
+    pub sending: bool,
+    /// Whether it is finished.
+    pub done: bool,
+}
+
+/// One file the far machine is offering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Offered {
+    /// What it is called.
+    pub name: String,
+    /// How many bytes it holds.
+    pub size: u64,
+}
+
 /// What the stream process says while it runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -98,6 +151,29 @@ pub enum Event {
         /// How it went.
         how: Departure,
     },
+    /// What is moving between the two machines, whenever that changes.
+    ///
+    /// The whole picture each time rather than what changed, because it is a handful of rows a
+    /// few times a second and a window that has to assemble a list from deltas is a window that
+    /// shows the wrong list after one lost message.
+    Transfers {
+        /// Every file on its way, in both directions.
+        moving: Vec<Moving>,
+    },
+    /// A file arrived whole.
+    Arrived {
+        /// What it is called.
+        name: String,
+        /// Where it was put on this machine.
+        path: String,
+    },
+    /// What the far machine is offering, in answer to having been asked.
+    Offering {
+        /// The files it named.
+        entries: Vec<Offered>,
+        /// Whether it had more than it could fit in one answer.
+        more: bool,
+    },
     /// The run is over.
     ///
     /// Sent before the process exits, so the shell knows why rather than only that it did.
@@ -105,6 +181,14 @@ pub enum Event {
         /// What went wrong, or `None` if the stream simply ended.
         error: Option<String>,
     },
+    /// Something this build has no name for.
+    ///
+    /// A stream and a shell from different commits is a thing that happens — the shell falls
+    /// back to a binary beside it when the bundled one is missing — and without somewhere for
+    /// an unknown message to land, the reader treats it as a broken pipe and stops. Every
+    /// counter afterwards is then lost while the window carries on as though nothing happened.
+    #[serde(other)]
+    Unknown,
 }
 
 /// How the host went, when it was the host that ended a stream.
@@ -115,6 +199,44 @@ pub enum Departure {
     Left,
     /// Nothing arrived from it for the whole idle timeout.
     Silent,
+}
+
+/// The way back to whatever started a stream window.
+///
+/// Files used to be something only that window could start, because it was the only thing
+/// holding the session — so the one place to manage them was a menu drawn over the picture of
+/// somebody else's desktop. This is what lets the shell offer a window of its own instead: what
+/// it asks for arrives on `asked`, and what is moving goes back through `tell`.
+///
+/// Here rather than beside the window, because a build with no window still has to name the
+/// type in the signature that takes it.
+pub struct Talkback {
+    /// What the shell is asking for, when something is asking.
+    ///
+    /// `None` for a run nobody is driving, which is what the command line does.
+    pub asked: Option<std::sync::mpsc::Receiver<Command>>,
+    /// Where to send what the shell cannot learn from a report.
+    pub tell: Box<dyn Fn(Event) + Send>,
+}
+
+impl Talkback {
+    /// A talkback nobody is on the other end of.
+    #[must_use]
+    pub fn silent() -> Self {
+        Self {
+            asked: None,
+            tell: Box::new(|_| {}),
+        }
+    }
+}
+
+impl std::fmt::Debug for Talkback {
+    /// Writes whether anything is driving this run, which is all there is to say.
+    fn fmt(&self, to: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        to.debug_struct("Talkback")
+            .field("asked", &self.asked.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Writes one message and flushes it.
