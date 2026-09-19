@@ -295,11 +295,19 @@ impl Opener {
 
         if counter > self.newest {
             let advance = counter - self.newest;
-            self.seen = if advance >= REPLAY_WINDOW {
+
+            // The counter being left behind lands `advance` back, which the window still holds
+            // when that is exactly its width — so its bit is set rather than cleared along with
+            // everything older. Clearing it let a packet that had already been accepted be
+            // replayed the moment the window advanced by its own width.
+            self.seen = if advance > REPLAY_WINDOW {
                 0
+            } else if advance == REPLAY_WINDOW {
+                1 << (REPLAY_WINDOW - 1)
             } else {
                 (self.seen << advance) | (1 << (advance - 1))
             };
+
             self.newest = counter;
             return true;
         }
