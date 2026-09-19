@@ -43,6 +43,8 @@ export interface Ground {
   readonly flip: () => void;
   /** Opens the settings. */
   readonly tune: () => void;
+  /** Changes one of the terms this machine is shared on. */
+  readonly retune: (patch: Partial<Settings>) => void;
 }
 
 /** The three states a machine is ever in, as far as this window can tell. */
@@ -404,32 +406,47 @@ function Sessions({ block, ground }: { block: Block; ground: Ground }): JSX.Elem
  */
 function Terms({ block, ground }: { block: Block; ground: Ground }): JSX.Element {
   const megabits = Math.round((ground.settings?.bitrateBps ?? 40_000_000) / 1e6);
-  const share = Math.min(100, Math.max(4, (megabits / 80) * 100));
+  const share = Math.min(100, Math.max(0, ((megabits - BITRATE_LEAST) / (BITRATE_MOST - BITRATE_LEAST)) * 100));
 
   return (
-    <button
-      type="button"
-      onClick={ground.tune}
-      className="flex h-full w-full flex-col gap-3 p-5 text-left hover:bg-wash-1"
-    >
+    <div className="flex h-full flex-col gap-[18px] p-5">
       <Head title={block.label || t('Sharing terms')} />
 
       {block.fields.includes('fps') && (
         <Pair name={t('Frame rate')} value={`${ground.settings?.fps ?? 60} fps`} />
       )}
 
+      {/* Dragged here rather than only read here. Bitrate is the one of these that gets moved
+          while somebody is watching the picture it changes — too soft, push it up; the link
+          cannot hold it, pull it down — and a figure you have to open the settings to touch is
+          one you tune once and then live with. */}
       {block.fields.includes('bitrate') && (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-3">
           <Pair name={t('Bitrate')} value={`${megabits} Mbps`} />
           <span className="relative block h-[18px] w-full">
-            <span className="absolute top-1.5 block h-1.5 w-full rounded-pill bg-wash-4" />
+            <span className="pointer-events-none absolute top-1.5 block h-1.5 w-full rounded-pill bg-wash-4" />
             <span
-              className="absolute top-1.5 block h-1.5 rounded-pill bg-violet"
+              className="pointer-events-none absolute top-1.5 block h-1.5 rounded-pill bg-violet"
               style={{ width: `${share}%` }}
             />
             <span
-              className="absolute top-0 block size-[18px] -translate-x-1/2 rounded-pill border-2 border-white bg-violet"
+              className="pointer-events-none absolute top-0 block size-[18px] -translate-x-1/2 rounded-pill border-2 border-white bg-violet"
               style={{ left: `${share}%` }}
+            />
+            {/* The control itself, laid over the drawing of it and invisible. Styling a range
+                input to look like this means styling three pseudo-elements per engine, and the
+                fill cannot be one of them because its width is a value. */}
+            <input
+              type="range"
+              min={BITRATE_LEAST}
+              max={BITRATE_MOST}
+              step={1}
+              aria-label={t('Bitrate')}
+              value={megabits}
+              onChange={(event) => {
+                ground.retune({ bitrateBps: Number(event.target.value) * 1e6 });
+              }}
+              className="absolute inset-0 w-full cursor-pointer opacity-0"
             />
           </span>
         </div>
@@ -438,9 +455,28 @@ function Terms({ block, ground }: { block: Block; ground: Ground }): JSX.Element
       {block.fields.includes('bind') && (
         <Pair name={t('Listen on')} value={ground.settings?.bind ?? ''} tone="text-muted-2" />
       )}
-    </button>
+
+      <button
+        type="button"
+        onClick={ground.tune}
+        className="mt-auto self-start text-fine text-dim transition-colors hover:text-ink-3"
+      >
+        {t('All settings')}
+      </button>
+    </div>
   );
 }
+
+/** The least this machine may be asked to spend, in megabits a second. */
+const BITRATE_LEAST = 1;
+
+/**
+ * And the most.
+ *
+ * The same ceiling the settings offer, so the slider and the field beside it cannot disagree
+ * about what the range is.
+ */
+const BITRATE_MOST = 200;
 
 /**
  * How the session that is open is doing.

@@ -235,6 +235,20 @@ function Home(): JSX.Element {
     setBoard(startingBoard(machines, across));
   }, [settings, machines, across, board.length]);
 
+  /**
+   * Changes one of the terms this machine is shared on.
+   *
+   * Shown before it is written, so a slider being dragged moves under the hand rather than in
+   * steps behind it. What comes back replaces it, which is what corrects a value the shell
+   * refused or rounded.
+   */
+  const retune = useCallback((patch: Partial<Settings>): void => {
+    setSettings((was) => (was ? { ...was, ...patch } : was));
+    void prism.setSettings(patch).then(setSettings, (error: unknown) => {
+      setTrouble(reason(error));
+    });
+  }, []);
+
   /** Writes the arrangement down, and keeps the window's copy in step with it. */
   const commit = useCallback((next: readonly Block[]): void => {
     setBoard(next);
@@ -374,8 +388,22 @@ function Home(): JSX.Element {
       tune: () => {
         setTuning(true);
       },
+      retune,
     }),
-    [devices, machines, stream, mine, history, settings, specs, nameOf, platformOf, watch, flip],
+    [
+      devices,
+      machines,
+      stream,
+      mine,
+      history,
+      settings,
+      specs,
+      nameOf,
+      platformOf,
+      watch,
+      flip,
+      retune,
+    ],
   );
 
   /** How tall the board has to be to hold everything on it. */
@@ -389,17 +417,19 @@ function Home(): JSX.Element {
     <div className="relative h-full w-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <Backdrop sky={HOME_SKY} />
 
-      {/* The strip the window is carried by. A band of its own rather than a class on the
-          header, because the shell moves the window for the element under the pointer and never
-          for its children. */}
-      <div data-tauri-drag-region className="fixed inset-x-0 top-0 z-[3] h-[46px]" />
-
       {/* Room at the bottom for the bar that floats over it, so the last row of blocks can be
           scrolled clear of it rather than ending underneath. */}
-      <div className="relative z-[1] flex min-h-full w-full flex-col px-8 pt-[26px] pb-[108px]">
-        <header className="relative z-[5] flex h-8 flex-none items-center gap-4">
+      <div className="relative z-[1] flex min-h-full w-full flex-col px-8 pt-[62px] pb-[108px]">
+        {/* The bar the window is carried by, and the bar its controls sit on — one element,
+            because two meant the strip that drags lay over the controls that do not. The shell
+            moves the window for the element under the pointer and never for its children, so
+            everything in here is clickable and every gap between them drags. */}
+        <header
+          data-tauri-drag-region
+          className="fixed inset-x-0 top-0 z-[5] flex h-[62px] items-center gap-4 px-8"
+        >
           <Wordmark size="sm" />
-          <div data-tauri-drag-region className="h-full flex-1" />
+          <div className="h-full flex-1" />
 
           {editing ? (
             <>
@@ -440,10 +470,16 @@ function Home(): JSX.Element {
                 onClick={() => {
                   setMenu(!menu);
                 }}
-                className={`size-7 flex-none rounded-pill bg-violet transition-shadow ${
-                  menu ? 'ring-2 ring-white' : ''
-                }`}
-              />
+                className="-m-1.5 flex flex-none items-center justify-center p-1.5"
+              >
+                {/* The target is larger than the mark, because the mark is 28 pixels across and
+                    a 28-pixel target is one somebody misses. */}
+                <span
+                  className={`block size-7 rounded-pill bg-violet transition-shadow ${
+                    menu ? 'ring-2 ring-white' : ''
+                  }`}
+                />
+              </button>
             </>
           )}
 
@@ -460,7 +496,7 @@ function Home(): JSX.Element {
               />
               <div
                 role="menu"
-                className="absolute top-10 right-0 z-[5] w-[252px] overflow-hidden rounded-panel border border-line-4 bg-[rgba(20,20,26,0.98)] py-1.5 shadow-[0_18px_48px_rgba(0,0,0,0.6)]"
+                className="absolute top-[54px] right-8 z-[5] w-[252px] overflow-hidden rounded-panel border border-line-4 bg-[rgba(20,20,26,0.98)] py-1.5 shadow-[0_18px_48px_rgba(0,0,0,0.6)]"
               >
                 <div className="flex items-center gap-[11px] px-3.5 py-3">
                   <span className="size-8 flex-none rounded-pill bg-violet" />

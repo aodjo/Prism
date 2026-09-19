@@ -195,6 +195,7 @@ const KO: Record<string, string> = {
   'Whether it is shared, and what it sends': '공유 상태와 보내는 화면을 보여줍니다',
   'What was watched, when, and for how long': '언제 무엇을 얼마나 봤는지 적습니다',
   'Round trip, frame rate and what is arriving': '왕복 시간과 받는 양을 보여줍니다',
+  'All settings': '설정 전체',
 
   /* ── Arranging it ──────────────────────────────────────────────────────── */
   'Arrange this screen': '화면 편집',
