@@ -337,12 +337,15 @@ fn hud_lines(
         Some((across, down)) => {
             let stretch = f64::from(drawable.0) / f64::from(across.max(1));
 
+            // Kept inside the panel's width, which is forty-odd characters: the first attempt
+            // said "stretched 1.81x" in words and ran off the right edge, taking the number
+            // that matters with it.
             format!(
-                "picture  {across}x{down} into {}x{}{}",
+                "picture  {across}x{down} in {}x{}{}",
                 drawable.0,
                 drawable.1,
                 if stretch > 1.02 {
-                    format!(", stretched {stretch:.2}x")
+                    format!(" x{stretch:.2}")
                 } else {
                     String::new()
                 }

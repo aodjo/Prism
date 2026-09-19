@@ -301,31 +301,39 @@ impl Toolbar {
     /// pointer reaches the top of the screen, and that is the gesture somebody arrives with;
     /// what had to be asked for is only that the toolbar hide and return along with it, which
     /// is not the default and is why the toolbar used to be hidden outright instead.
+    ///
+    /// Compared and put back every turn rather than set once on the way in. AppKit would
+    /// normally ask a window's delegate what a full screen should look like, and this window's
+    /// delegate belongs to SDL — which sets presentation options of its own as it goes full
+    /// screen, after the style mask this reads has already changed. Setting them once on the
+    /// transition therefore set them before SDL overwrote them, and the toolbar stayed put.
     pub fn sync_fullscreen(&self) -> bool {
         let filling = self
             .window
             .styleMask()
             .contains(NSWindowStyleMask::FullScreen);
 
-        if filling == self.filling.replace(filling) {
-            return filling;
-        }
+        self.filling.set(filling);
 
         let Some(marker) = MainThreadMarker::new() else {
             return filling;
         };
 
-        // Set on the application rather than answered from a window delegate, which is where
-        // AppKit would normally ask: this window's delegate belongs to SDL, and taking it over
-        // would cost every event SDL reads through it.
-        NSApplication::sharedApplication(marker).setPresentationOptions(if filling {
+        let wanted = if filling {
             NSApplicationPresentationOptions::FullScreen
                 | NSApplicationPresentationOptions::AutoHideMenuBar
                 | NSApplicationPresentationOptions::AutoHideDock
                 | NSApplicationPresentationOptions::AutoHideToolbar
         } else {
             NSApplicationPresentationOptions::empty()
-        });
+        };
+
+        let app = NSApplication::sharedApplication(marker);
+
+        // Read before written, so the usual turn of the loop costs a getter and nothing else.
+        if app.presentationOptions() != wanted {
+            app.setPresentationOptions(wanted);
+        }
 
         filling
     }
