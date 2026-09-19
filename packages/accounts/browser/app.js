@@ -22,7 +22,7 @@ import {
   mark,
   particle,
   place,
-  PLACES,
+  placeOf,
   remember,
   session,
   since,
@@ -1001,7 +1001,7 @@ async function drawRegions(column) {
   map.append(card);
 
   for (const region of regions) {
-    const at = PLACES[region.name];
+    const at = placeOf(region.name);
 
     if (!at) {
       continue;

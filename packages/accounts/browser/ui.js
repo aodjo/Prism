@@ -506,7 +506,66 @@ const PLACES = {
   London: [51.51, -0.13],
   뉴욕: [40.71, -74.01],
   'New York': [40.71, -74.01],
+  보스턴: [42.36, -71.06],
+  Boston: [42.36, -71.06],
+  '솔트레이크시티': [40.76, -111.89],
+  'Salt Lake City': [40.76, -111.89],
+  실리콘밸리: [37.39, -122.08],
+  'Silicon Valley': [37.39, -122.08],
+  파리: [48.86, 2.35],
+  Paris: [48.86, 2.35],
+  시드니: [-33.87, 151.21],
+  Sydney: [-33.87, 151.21],
+  뭄바이: [19.08, 72.88],
+  Mumbai: [19.08, 72.88],
+  상파울루: [-23.55, -46.63],
+  'São Paulo': [-23.55, -46.63],
 };
 
-export { el, ago, since, size, between, state, deriveAuth, call, landSvg, place, PLACES };
+/** The same table with its keys folded, so a lookup does not depend on how somebody typed it. */
+const FOLDED = new Map(Object.entries(PLACES).map(([name, at]) => [name.toLowerCase(), at]));
+
+/**
+ * Where a region sits, worked out from whatever its operator called it.
+ *
+ * Operators name a region for a person reading a list — `Japan (Osaka)`, `United States (Salt
+ * Lake City)` — and the table is of cities, so the whole name matches nothing and every region
+ * went unmarked. What is in the last brackets is tried first, because that is where the city
+ * goes in every name this project has been given.
+ *
+ * @param {string} name - What the region is called.
+ * @returns {[number, number] | null} Degrees north and east, or `null` for a place not listed.
+ *
+ * @example
+ * placeOf('Japan (Osaka)');  // [34.69, 135.5]
+ * placeOf('Amsterdam');      // [52.37, 4.9]
+ * placeOf('The Moon');       // null
+ */
+function placeOf(name) {
+  const tries = [name, /\(([^)]*)\)\s*$/u.exec(name)?.[1], name.replace(/\s*\([^)]*\)\s*$/u, '')];
+
+  for (const one of tries) {
+    const at = one && FOLDED.get(one.trim().toLowerCase());
+
+    if (at) {
+      return at;
+    }
+  }
+
+  return null;
+}
+
+export {
+  el,
+  ago,
+  since,
+  size,
+  between,
+  state,
+  deriveAuth,
+  call,
+  landSvg,
+  place,
+  placeOf,
+};
 
