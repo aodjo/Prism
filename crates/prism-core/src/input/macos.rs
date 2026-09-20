@@ -129,31 +129,36 @@ impl MacInjector {
     /// because a game reading raw pointer input wants the movement, not where the cursor
     /// ended up.
     ///
-    /// And the position is not allowed to come to rest against an edge. A relative event is
-    /// somebody turning, and a screen has sides: held against one, every further event moved
-    /// the pointer nowhere, and a player turning right simply stopped turning halfway through
-    /// the motion. So when the position reaches the margin it is put back in the middle of the
-    /// screen — which is what a game does for itself when it captures a cursor, and is
-    /// invisible while it has one hidden. The delta is untouched, so the turn is continuous
-    /// across the jump.
-    fn move_pointer(&mut self, dx: f64, dy: f64) -> Result<(), InputError> {
+    /// What `caged` decides is what happens at the sides of the screen.
+    ///
+    /// An ordinary pointer stops there, because that is what a mouse on a desk does and a
+    /// cursor that wrapped or jumped would be one nobody could aim. A caged one must not: the
+    /// far side has hidden its cursor and is reporting how far the mouse moved, so a pointer
+    /// held against an edge turns every further report into no movement at all, and somebody
+    /// turning right stops turning halfway. That one is put back in the middle of the screen
+    /// instead — which is what a game does for itself when it captures a cursor, and is
+    /// invisible while it has one hidden. The delta on the event is untouched either way, so
+    /// the turn is continuous across the jump.
+    fn move_pointer(&mut self, dx: f64, dy: f64, caged: bool) -> Result<(), InputError> {
         let bounds = self.screen();
         let next_x = self.position.x + dx;
         let next_y = self.position.y + dy;
         let margin = EDGE_MARGIN
             .min(bounds.size.width / 4.0)
             .min(bounds.size.height / 4.0);
-
-        if next_x <= bounds.origin.x + margin
+        let near_edge = next_x <= bounds.origin.x + margin
             || next_x >= bounds.origin.x + bounds.size.width - margin
             || next_y <= bounds.origin.y + margin
-            || next_y >= bounds.origin.y + bounds.size.height - margin
-        {
+            || next_y >= bounds.origin.y + bounds.size.height - margin;
+
+        if caged && near_edge {
             self.position.x = bounds.origin.x + bounds.size.width / 2.0;
             self.position.y = bounds.origin.y + bounds.size.height / 2.0;
         } else {
-            self.position.x = next_x;
-            self.position.y = next_y;
+            self.position.x =
+                next_x.clamp(bounds.origin.x, bounds.origin.x + bounds.size.width - 1.0);
+            self.position.y =
+                next_y.clamp(bounds.origin.y, bounds.origin.y + bounds.size.height - 1.0);
         }
 
         let (kind, button) = match self.held_button() {
@@ -384,7 +389,9 @@ impl Injector for MacInjector {
 
     fn inject(&mut self, event: InputEvent) -> Result<(), InputError> {
         match event {
-            InputEvent::MouseMove { dx, dy } => self.move_pointer(f64::from(dx), f64::from(dy)),
+            InputEvent::MouseMove { dx, dy, caged } => {
+                self.move_pointer(f64::from(dx), f64::from(dy), caged)
+            }
             InputEvent::MouseButton { button, pressed } => self.press_button(button, pressed),
             InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
             InputEvent::Key { usage, pressed } => self.press_key(usage, pressed),
@@ -403,7 +410,9 @@ impl Injector for MacInjector {
                     return Ok(());
                 }
 
-                self.move_pointer(dx, dy)
+                // Never caged: this is a place the client pointed at, and the pointer belongs
+                // there and nowhere else — least of all the middle of the screen.
+                self.move_pointer(dx, dy, false)
             }
         }
     }

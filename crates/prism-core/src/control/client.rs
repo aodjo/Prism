@@ -1398,6 +1398,9 @@ pub fn synthetic_motion(sequence: u64) -> InputEvent {
     InputEvent::MouseMove {
         dx: if sequence % 2 == 0 { 2 } else { -2 },
         dy: 0,
+        // Not caged: this is a measurement of the input path, and it belongs on a pointer the
+        // host treats exactly as it treats a mouse on a desk.
+        caged: false,
     }
 }
 

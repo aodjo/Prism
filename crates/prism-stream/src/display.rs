@@ -237,7 +237,13 @@ fn to_input_event(event: &Event, shown: Fitted, aiming: bool) -> Option<InputEve
             let dx = xrel.round() as i16;
             let dy = yrel.round() as i16;
 
-            (dx != 0 || dy != 0).then_some(InputEvent::MouseMove { dx, dy })
+            // Caged, always: this branch is only reached while the pointer is, and that is
+            // exactly what the host has to be told so it does not park its own at an edge.
+            (dx != 0 || dy != 0).then_some(InputEvent::MouseMove {
+                dx,
+                dy,
+                caged: true,
+            })
         }
         Event::MouseMotion { x, y, .. } => {
             let (x, y) = to_fraction(*x, *y, shown);
@@ -287,7 +293,7 @@ fn to_input_event(event: &Event, shown: Fitted, aiming: bool) -> Option<InputEve
 /// Only motion. A button or a key changes nothing about where the pointer is, and a scroll
 /// moves the content rather than the cursor.
 fn predict(cursor: &mut CursorTracker, stamped_ts_us: u64, event: InputEvent) {
-    if let InputEvent::MouseMove { dx, dy } = event {
+    if let InputEvent::MouseMove { dx, dy, .. } = event {
         cursor.moved(stamped_ts_us, dx, dy);
     }
 }
@@ -1187,7 +1193,15 @@ mod tests {
         // wherever the cage happens to hold it, and that is not where the player is looking.
         let sent = super::to_input_event(&motion(639.5, 375.5, 12.0, -4.0), filled(), true);
 
-        assert_eq!(sent, Some(InputEvent::MouseMove { dx: 12, dy: -4 }));
+        assert_eq!(
+            sent,
+            Some(InputEvent::MouseMove {
+                dx: 12,
+                dy: -4,
+                // Said on the packet, so the host knows not to park its pointer at an edge.
+                caged: true,
+            })
+        );
     }
 
     #[test]

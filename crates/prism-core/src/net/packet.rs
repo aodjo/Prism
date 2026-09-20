@@ -2136,6 +2136,17 @@ pub enum InputEvent {
         dx: i16,
         /// Vertical movement; positive is down.
         dy: i16,
+        /// Whether the pointer that produced this is caged at the far end.
+        ///
+        /// A caged pointer has no edges to reach — the client hid it and is reporting how far
+        /// the mouse moved rather than where it points, which is what a game that has captured
+        /// the cursor reads. So the host must not let its own pointer come to rest against the
+        /// side of a screen: held there, every further report moves it nowhere and the turn
+        /// stops halfway.
+        ///
+        /// False is ordinary relative motion, where stopping at an edge is exactly right,
+        /// because that is what a mouse on a desk does.
+        caged: bool,
     },
     /// A pointer button changing state.
     MouseButton {
@@ -2209,7 +2220,7 @@ impl InputPacket {
     /// # use prism_core::net::packet::{INPUT_PACKET_LEN, InputEvent, InputPacket};
     /// let packet = InputPacket {
     ///     origin_ts_us: 1_000_000,
-    ///     event: InputEvent::MouseMove { dx: -5, dy: 10 },
+    ///     event: InputEvent::MouseMove { dx: -5, dy: 10, caged: false },
     /// };
     /// let mut buf = [0u8; INPUT_PACKET_LEN];
     /// assert_eq!(packet.encode_into(&mut buf).unwrap(), INPUT_PACKET_LEN);
@@ -2223,7 +2234,9 @@ impl InputPacket {
         }
 
         let (kind, x, y, flags) = match self.event {
-            InputEvent::MouseMove { dx, dy } => (InputKind::MouseMove, dx, dy, 0),
+            InputEvent::MouseMove { dx, dy, caged } => {
+                (InputKind::MouseMove, dx, dy, u8::from(caged))
+            }
             InputEvent::MouseScroll { dx, dy } => (InputKind::MouseScroll, dx, dy, 0),
             InputEvent::MouseButton { button, pressed } => {
                 (InputKind::MouseButton, button as i16, 0, u8::from(pressed))
@@ -2287,7 +2300,11 @@ impl InputPacket {
         let pressed = bytes[14] & 1 != 0;
 
         let event = match kind {
-            InputKind::MouseMove => InputEvent::MouseMove { dx: x, dy: y },
+            InputKind::MouseMove => InputEvent::MouseMove {
+                dx: x,
+                dy: y,
+                caged: pressed,
+            },
             InputKind::MouseScroll => InputEvent::MouseScroll { dx: x, dy: y },
             InputKind::MouseButton => InputEvent::MouseButton {
                 button: MouseButton::try_from(x)?,

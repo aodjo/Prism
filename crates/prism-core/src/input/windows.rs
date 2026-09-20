@@ -186,7 +186,11 @@ impl Injector for WindowsInjector {
 
     fn inject(&mut self, event: InputEvent) -> Result<(), InputError> {
         match event {
-            InputEvent::MouseMove { dx, dy } => self.move_pointer(dx, dy),
+            // `caged` changes nothing here. `MOUSEEVENTF_MOVE` without `ABSOLUTE` is relative
+            // motion as Windows itself understands it, handed to the same raw-input path a
+            // mouse on a desk uses — so there is no position kept on this side to park against
+            // an edge, and nothing for a game to run out of.
+            InputEvent::MouseMove { dx, dy, .. } => self.move_pointer(dx, dy),
             InputEvent::MouseButton { button, pressed } => self.press_button(button, pressed),
             InputEvent::MouseScroll { dx, dy } => self.scroll(dx, dy),
             InputEvent::Key { usage, pressed } => self.press_key(usage, pressed),
