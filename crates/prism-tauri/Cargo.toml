@@ -28,7 +28,14 @@ ureq = { version = "3", default-features = false, features = ["rustls", "json"] 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6.2"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSGeometry", "NSString"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSGeometry",
+    "NSString",
+    # What a double-click on a title bar is meant to do here, which is a preference and not a
+    # constant: the same gesture zooms on one machine and minimises on another.
+    "NSUserDefaults",
+] }
 objc2-core-graphics = "0.3.2"
 # The banner a machine being controlled shows at the top of its screen: a panel of its own,
 # which is AppKit's and not the webview's, because a window the webview draws cannot be

@@ -212,6 +212,58 @@ pub fn fit(height: f64, app: AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Does what a double-click on a title bar does here.
+///
+/// The page has to ask, because the title bar is the page. These windows hide the system's own
+/// and draw their header in HTML, and an element the webview is drawing swallows the gesture
+/// before the window server ever sees it — which is why the one habit everybody has for a title
+/// bar stopped working.
+///
+/// What it does is a preference rather than a constant: macOS reads `AppleActionOnDoubleClick`,
+/// and the same gesture zooms on one machine, minimises on another and does nothing on a third.
+/// Guessing at zoom would be right most of the time and wrong in exactly the way that makes
+/// somebody think the application is broken.
+///
+/// # Errors
+///
+/// Fails if the window cannot be resized or hidden.
+#[tauri::command]
+pub fn title_bar_double_click(window: WebviewWindow) -> Result<(), String> {
+    match double_click_action().as_str() {
+        "Minimize" => window.minimize().map_err(|error| error.to_string()),
+        "None" => Ok(()),
+        // Zoom, and anything a later macOS adds. Toggling is what zoom does: a window that has
+        // been zoomed goes back to the size it was.
+        _ => {
+            let zoomed = window.is_maximized().map_err(|error| error.to_string())?;
+
+            if zoomed {
+                window.unmaximize().map_err(|error| error.to_string())
+            } else {
+                window.maximize().map_err(|error| error.to_string())
+            }
+        }
+    }
+}
+
+/// What this machine says a title-bar double-click is for.
+///
+/// `Maximize` when nothing has been set, which is what macOS itself falls back to.
+#[cfg(target_os = "macos")]
+fn double_click_action() -> String {
+    use objc2_foundation::{NSString, NSUserDefaults};
+
+    NSUserDefaults::standardUserDefaults()
+        .stringForKey(&NSString::from_str("AppleActionOnDoubleClick"))
+        .map_or_else(|| "Maximize".to_owned(), |action| action.to_string())
+}
+
+/// Zoom, on a platform with no such preference to read.
+#[cfg(not(target_os = "macos"))]
+fn double_click_action() -> String {
+    "Maximize".to_owned()
+}
+
 /// Closes setup and opens the home window.
 ///
 /// Writes down that setup has been reached the end of, which is what the next launch reads. The

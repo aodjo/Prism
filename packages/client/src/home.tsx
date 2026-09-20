@@ -426,10 +426,19 @@ function Home(): JSX.Element {
             everything in here is clickable and every gap between them drags. */}
         <header
           data-tauri-drag-region
+          onDoubleClick={(event) => {
+            // Only the bar itself. A double-click that landed on the wordmark or a button is
+            // somebody hitting that thing twice, not somebody reaching for the title bar.
+            if (event.target === event.currentTarget) {
+              prism.titleBarDoubleClick();
+            }
+          }}
           className="fixed inset-x-0 top-0 z-[5] flex h-[62px] items-center gap-4 px-8"
         >
           <Wordmark size="sm" />
-          <div className="h-full flex-1" />
+          {/* The empty middle. Deaf to the pointer, so that dragging and double-clicking there
+              reach the bar itself rather than stopping at a spacer that does neither. */}
+          <div className="pointer-events-none h-full flex-1" />
 
           {editing ? (
             <>

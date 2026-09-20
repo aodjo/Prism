@@ -771,6 +771,17 @@ export interface PrismApi {
   fit(height: number): void;
 
   /**
+   * Does what a double-click on a title bar does on this machine.
+   *
+   * Asked for rather than handled by the system, because these windows draw their own header
+   * and the element drawing it swallows the gesture. What it comes to — zoom, minimise or
+   * nothing — is a preference the shell reads, not something a page decides.
+   *
+   * @returns {void}
+   */
+  titleBarDoubleClick(): void;
+
+  /**
    * Registers a listener for stream state the main process pushes.
    *
    * @param {(state: StreamState) => void} listener - Called whenever the state changes.

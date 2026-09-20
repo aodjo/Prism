@@ -438,6 +438,7 @@ fn main() {
             windows::open_settings,
             windows::open_transfers,
             windows::fit,
+            windows::title_bar_double_click,
             updates::build_info,
             updates::check_for_update,
             updates::install_update,
