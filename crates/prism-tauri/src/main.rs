@@ -294,6 +294,8 @@ fn main() {
                 std::process::id()
             );
 
+            windows::no_tabbing();
+
             app.manage(Held(Mutex::new(settings::load())));
             app.manage(account::Held::new());
             app.manage(sharing::Held::new());

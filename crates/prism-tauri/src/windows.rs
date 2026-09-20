@@ -99,6 +99,32 @@ fn overlaid<R: tauri::Runtime, M: tauri::Manager<R>>(
     builder
 }
 
+/// Stops macOS merging these windows into tabs.
+///
+/// It does that on its own to any application that has not said otherwise, whenever somebody has
+/// set the system to prefer tabs — and none of these windows is a document. A settings panel
+/// tabbed behind a home screen is two unrelated things sharing one frame, with the panel's own
+/// size thrown away.
+///
+/// It also breaks the title bar these windows draw. The bar of tabs belongs at the top of the
+/// window, which is exactly where the page puts its own header, so the tabs end up underneath
+/// it: unreadable, and impossible to take hold of.
+///
+/// # Panics
+///
+/// Never in practice. This runs on the main thread, where a window is built.
+pub fn no_tabbing() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSWindow;
+
+        if let Some(marker) = MainThreadMarker::new() {
+            NSWindow::setAllowsAutomaticWindowTabbing(false, marker);
+        }
+    }
+}
+
 /// Shows the home window and closes setup, which is what finishing setup means.
 ///
 /// # Errors
