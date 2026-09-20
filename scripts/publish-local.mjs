@@ -87,32 +87,43 @@ function platform() {
 }
 
 /**
- * The one file in a bundle directory that ends the way this platform's bundle does.
+ * The file in a bundle directory that this build produced.
  *
- * Refuses rather than guesses when there are several. Two of them is a directory holding the
- * last build as well as this one, and publishing whichever the filesystem happened to list
- * first is how a version goes out carrying the bytes of the one before it.
+ * A directory that has been built in before holds the last build as well as this one, and
+ * publishing whichever the filesystem listed first is how a version goes out carrying the bytes
+ * of the one before it. So where there are several, the version decides: the bundler writes it
+ * into the name, and exactly one of them is this build's.
+ *
+ * Where the name carries no version — the macOS archive is simply `Prism.app.tar.gz`, rewritten
+ * in place each time — there is only ever one, and that one is it.
  *
  * @param {string} folder - The directory to look in.
  * @param {string} ends - What the file's name ends with.
+ * @param {string} version - What this build calls itself.
  * @returns {string} The full path to it.
- * @throws {Error} If there is not exactly one.
+ * @throws {Error} If there is none, or several and none of them is this build's.
  */
-function theOne(folder, ends) {
+function theOne(folder, ends, version) {
   const found = readdirSync(folder).filter((each) => each.endsWith(ends));
 
   if (found.length === 0) {
     throw new Error(`nothing in ${folder} ends in ${ends}`);
   }
 
-  if (found.length > 1) {
+  if (found.length === 1) {
+    return join(folder, found[0]);
+  }
+
+  const mine = found.filter((each) => each.includes(version));
+
+  if (mine.length !== 1) {
     throw new Error(
-      `${folder} holds ${found.length} files ending in ${ends}: ${found.join(', ')}. ` +
-        'Delete the ones that are not this build and run again.',
+      `${folder} holds ${found.length} files ending in ${ends} and ${mine.length} of them are ` +
+        `${version}: ${found.join(', ')}. Delete the ones that are not this build and run again.`,
     );
   }
 
-  return join(folder, found[0]);
+  return join(folder, mine[0]);
 }
 
 /**
@@ -565,7 +576,7 @@ run('pnpm', ['package'], {
 });
 
 const version = `1.0.0-local.${numbered}`;
-const made = theOne(join(ROOT, 'target/release/bundle', dir), ends);
+const made = theOne(join(ROOT, 'target/release/bundle', dir), ends, version);
 const signature = readFileSync(`${made}.sig`, 'utf8').trim();
 const body = readFileSync(made);
 
