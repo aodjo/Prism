@@ -222,9 +222,13 @@ function hasMsvc() {
   let banner = '';
 
   try {
+    // `cl.exe` and not `cl`. Starting a program without a shell on Windows does not try the
+    // extensions in `PATHEXT`, so the bare name finds nothing on a machine that has it — which
+    // is the same trap the package manager is behind, one function below.
+    //
     // It prints its banner and then complains there are no input files, which is a failure as
     // far as the shell is concerned. The banner is on standard error either way.
-    execFileSync('cl', [], { encoding: 'utf8', stdio: 'pipe' });
+    execFileSync('cl.exe', [], { encoding: 'utf8', stdio: 'pipe' });
   } catch (failed) {
     banner = String(failed.stderr ?? '');
 
