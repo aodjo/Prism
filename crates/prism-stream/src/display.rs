@@ -528,10 +528,10 @@ fn take(
     }
 
     say.note(match hands {
-        toolbar::Hands::Watching => "display: watching only, control option cycles",
-        toolbar::Hands::Controlling => "display: controlling this machine, control option cycles",
+        toolbar::Hands::Watching => "display: this session is watching only",
+        toolbar::Hands::Controlling => "display: controlling this machine",
         toolbar::Hands::Aiming => {
-            "display: the pointer is caged and sent as movement, control option cycles"
+            "display: the pointer is caged and sent as movement, control option gives it back"
         }
     });
 
@@ -924,15 +924,11 @@ pub fn run(
                 break 'main;
             }
             if capture_input && is_control_toggle(&event) {
-                // The chord everybody reaches for to get their own machine back goes straight
-                // to watching rather than one stop along. From aiming, one stop would leave the
-                // keyboard still crossing — and the hand that pressed this wanted out.
+                // The chord gives the pointer back. That is the half of this that is hard to
+                // undo any other way: a caged cursor has left this machine, and reaching the
+                // button that would free it means finding a pointer that is not there.
                 hands = take(
-                    if hands.sends() {
-                        toolbar::Hands::Watching
-                    } else {
-                        toolbar::Hands::Controlling
-                    },
+                    toolbar::Hands::Controlling,
                     bar.as_ref(),
                     &mouse,
                     &window,
@@ -1195,20 +1191,27 @@ mod tests {
     }
 
     #[test]
-    fn the_one_control_goes_round_and_comes_back() {
+    fn the_control_chooses_between_pointing_and_being_caged() {
         use crate::display::toolbar::Hands;
 
-        assert_eq!(Hands::Watching.next(), Hands::Controlling);
         assert_eq!(Hands::Controlling.next(), Hands::Aiming);
-        assert_eq!(Hands::Aiming.next(), Hands::Watching);
+        assert_eq!(Hands::Aiming.next(), Hands::Controlling);
     }
 
     #[test]
-    fn each_stop_does_what_the_one_before_it_did() {
+    fn pressing_it_never_stops_the_session_sending() {
         use crate::display::toolbar::Hands;
 
-        // Which is what makes them one control rather than two switches: there is no state
-        // where the pointer is caged but nothing is being sent.
+        // Watching is what a session that was never allowed to control is, and not somewhere
+        // the button can put one: parking a session halfway is what closing it is for.
+        assert!(Hands::Controlling.next().sends());
+        assert!(Hands::Aiming.next().sends());
+    }
+
+    #[test]
+    fn caging_the_pointer_means_something_is_being_sent() {
+        use crate::display::toolbar::Hands;
+
         assert!(!Hands::Watching.sends() && !Hands::Watching.caged());
         assert!(Hands::Controlling.sends() && !Hands::Controlling.caged());
         assert!(Hands::Aiming.sends() && Hands::Aiming.caged());

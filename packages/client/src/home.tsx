@@ -687,10 +687,6 @@ function Home(): JSX.Element {
             </>
           ) : (
             <>
-              <span
-                aria-hidden
-                className={`size-2 flex-none rounded-pill ${shared ? 'bg-mint' : 'bg-dim'}`}
-              />
               <span className="truncate text-note font-medium text-ink">
                 {watched
                   ? t('{name} is watching this machine', { name: nameOf(mine?.peer ?? '') })

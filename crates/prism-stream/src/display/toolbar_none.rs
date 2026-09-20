@@ -48,13 +48,12 @@ pub enum Hands {
 }
 
 impl Hands {
-    /// The next stop along, wrapping back to watching.
+    /// The other stop. Watching is not one of them, as on macOS.
     #[must_use]
     pub fn next(self) -> Self {
         match self {
-            Hands::Watching => Hands::Controlling,
-            Hands::Controlling => Hands::Aiming,
-            Hands::Aiming => Hands::Watching,
+            Hands::Aiming => Hands::Controlling,
+            Hands::Watching | Hands::Controlling => Hands::Aiming,
         }
     }
 

@@ -140,12 +140,16 @@ pub enum Hands {
 }
 
 impl Hands {
-    /// The next stop along, wrapping back to watching.
+    /// The other stop.
+    ///
+    /// Watching is not one of them. A session that may control starts controlling and stays
+    /// that way: the button chooses between pointing at the picture and being caged in it, and
+    /// somebody who wants to stop sending anything closes the session rather than parking it.
+    /// Watching remains the state of a session that was never allowed to control at all.
     pub fn next(self) -> Self {
         match self {
-            Hands::Watching => Hands::Controlling,
-            Hands::Controlling => Hands::Aiming,
-            Hands::Aiming => Hands::Watching,
+            Hands::Aiming => Hands::Controlling,
+            Hands::Watching | Hands::Controlling => Hands::Aiming,
         }
     }
 
