@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
-    Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
+    Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureAccess,
+    GraphicsCaptureAccessKind, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -185,6 +186,8 @@ impl ScreenCapture {
         // knowing about rather than failing over.
         let _ = session.SetIsCursorCaptureEnabled(config.show_cursor);
 
+        without_the_border(&session);
+
         session.StartCapture().map_err(start_error)?;
 
         Ok(Self {
@@ -255,6 +258,26 @@ impl core::fmt::Debug for ScreenCapture {
             .field("height", &self.height)
             .field("hardware", &self.hardware)
             .finish_non_exhaustive()
+    }
+}
+
+/// Takes away the yellow border Windows draws around a screen that is being captured.
+///
+/// The border is how Windows tells whoever is sitting at the machine that it is being watched.
+/// Prism says that itself, with a banner that names who is watching and ends the session from
+/// where it is read, so the border is the same thing said a second time, less usefully, around
+/// the whole of somebody's desktop.
+///
+/// Windows 11 only, and nothing has to tell the two apart: the property arrived with it, so on
+/// Windows 10 the session does not have the interface, the call fails, and the border stays —
+/// which is the one thing that version can do. Permission is asked for first because a session
+/// that has not asked is refused the property even where it exists.
+fn without_the_border(session: &GraphicsCaptureSession) {
+    let allowed = GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
+        .and_then(|asked| asked.join());
+
+    if allowed.is_ok() {
+        let _ = session.SetIsBorderRequired(false);
     }
 }
 
