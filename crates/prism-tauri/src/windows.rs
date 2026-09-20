@@ -211,10 +211,17 @@ pub fn open_setup(app: &AppHandle) -> tauri::Result<()> {
 
 /// Opens the settings panel, or raises it if it is already open.
 ///
+/// Off the main thread, as every command here that builds a window has to be. A plain command
+/// runs on the main thread, and on Windows a web view cannot finish being made while that
+/// thread is held: the frame appears, the inside never does, and what is left is a black
+/// rectangle that cannot even be closed — it has no page to draw and no loop left to hear the
+/// close. Tauri's own documentation says as much about building a window in a synchronous
+/// command. macOS makes its web views differently and never showed it.
+///
 /// # Errors
 ///
 /// Fails if the window cannot be built.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {
     if let Some(open) = app.get_webview_window("settings") {
         return open.set_focus().map_err(|error| error.to_string());
@@ -242,10 +249,12 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
 /// sheet covering the thing they are watching. It outlives a session too — what arrived is worth
 /// finding after the stream that carried it has closed.
 ///
+/// Off the main thread, for the reason [`open_settings`] gives.
+///
 /// # Errors
 ///
 /// Fails if the window cannot be built.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_transfers(app: AppHandle) -> Result<(), String> {
     if let Some(open) = app.get_webview_window("transfers") {
         return open.set_focus().map_err(|error| error.to_string());
@@ -346,11 +355,16 @@ fn double_click_action() -> String {
 /// application starts again — so without this the restart in the middle of setup looks like an
 /// ordinary launch and lands on the home window instead of back where somebody was.
 ///
+/// Off the main thread, for the reason [`open_settings`] gives — and this is the one where it
+/// was found. Every Windows machine that finished setup was handed a black window it could not
+/// close, because the window it had just asked for was being built by the thread that had to
+/// be free for the building to finish.
+///
 /// # Errors
 ///
 /// Fails if the settings lock was poisoned, if they cannot be written, or if the home window
 /// cannot be built.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn finish_setup(app: AppHandle, held: tauri::State<'_, crate::Held>) -> Result<(), String> {
     {
         let mut settings = held

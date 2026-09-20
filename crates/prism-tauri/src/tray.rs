@@ -81,6 +81,14 @@ pub fn surface(app: &AppHandle) {
         }
     }
 
+    // Built from a thread of its own. This runs inside an event handler, which is the main
+    // thread, and on Windows a web view cannot finish being made while that thread is held —
+    // the window arrives black and cannot be closed. The same trap the window commands are
+    // kept out of, reached by a different door.
     let (label, page) = crate::opening();
-    let _ = windows::stage(app, label, page);
+    let app = app.clone();
+
+    std::thread::spawn(move || {
+        let _ = windows::stage(&app, label, page);
+    });
 }
