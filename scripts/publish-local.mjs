@@ -243,6 +243,26 @@ function hasMsvc() {
 }
 
 /**
+ * Whether clang is reachable, which on Windows for ARM is not optional.
+ *
+ * `ring` — the TLS this shell speaks to the account server through — compiles its own C, and on
+ * that one platform it refuses the Microsoft compiler and asks for clang instead. Its own build
+ * script says so, under a `FIXME`. So a machine with a perfectly good ARM64 `cl` still cannot
+ * build this, and the way it says so is four hundred lines away from the reason.
+ *
+ * @returns {boolean} Whether `clang` resolves to anything.
+ */
+function hasClang() {
+  try {
+    execFileSync('where.exe', ['clang'], { stdio: 'ignore' });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Runs a command, letting it write to this terminal, and stops everything if it fails.
  *
  * Through a shell on Windows, and only there. What a package manager installs on that platform
@@ -523,6 +543,22 @@ if (process.platform === 'win32' && !hasMsvc()) {
       '   "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools" in Visual Studio Installer. It is\n' +
       '   not one of the components chosen for you, and without it `cc` goes looking for clang\n' +
       '   instead — which is the error this check exists to replace.',
+  );
+  process.exit(2);
+}
+
+// And clang as well as MSVC, on this one platform. Checked separately because it fails for a
+// reason nothing about the message would suggest: the Microsoft compiler being present and
+// correct changes nothing, since the crate that needs this one never looks at it.
+if (process.platform === 'win32' && process.arch === 'arm64' && !hasClang()) {
+  console.error(
+    'clang is not reachable from this shell, and on Windows for ARM this build needs it as\n' +
+      'well as MSVC. Not for anything here: `ring`, which is the TLS underneath the calls to\n' +
+      'the account server, compiles C of its own and on this platform refuses the Microsoft\n' +
+      'compiler outright. Its build script says as much, under a FIXME.\n\n' +
+      'Add "C++ Clang compiler for Windows" in Visual Studio Installer, or install LLVM:\n\n' +
+      '  winget install LLVM.LLVM\n\n' +
+      'Then open a new developer shell — `where.exe clang` should name a path.',
   );
   process.exit(2);
 }
