@@ -1,8 +1,13 @@
-//! The menu bar item, and the reason closing the window does not end Prism.
+//! The icon that outlives the window, and the reason closing one does not end Prism.
 //!
 //! A machine can be reached only while Prism is running on it, so closing the window has to
-//! mean the window closed and nothing more. What stays behind is this: an icon in the menu bar
-//! that brings the window back, and the one control that does end the application.
+//! mean the window closed and nothing more. What stays behind is this: an icon — in the menu
+//! bar on macOS, the notification area on Windows — that brings the window back, and the one
+//! control that does end the application.
+//!
+//! Which makes it load-bearing rather than decorative. Every other way out of the application
+//! was deliberately taken away, so an icon that fails to appear leaves somebody with a program
+//! they can neither return to nor quit.
 
 use tauri::{
     AppHandle, Manager,
@@ -32,10 +37,21 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         });
 
-    // Drawn from the icon's alpha rather than its colours, which is what the menu bar does with
-    // everything else in it and what keeps one legible on a light bar and a dark one.
     if let Some(icon) = app.default_window_icon().cloned() {
-        item = item.icon(icon).icon_as_template(true);
+        item = item.icon(icon);
+
+        // Drawn from the icon's alpha rather than its colours, which is what the menu bar does
+        // with everything else in it and what keeps one legible on a light bar and a dark one.
+        //
+        // macOS alone. Asking for it elsewhere hands the system an icon with its colours thrown
+        // away and nothing that knows to put them back — a mark that is faint where it is not
+        // invisible. And an invisible one here is not a cosmetic fault: this icon is the only
+        // way back to a window that has been closed, and the only way to end the application,
+        // so a person who cannot see it has a program they can neither reach nor quit.
+        #[cfg(target_os = "macos")]
+        {
+            item = item.icon_as_template(true);
+        }
     }
 
     item.build(app)?;
