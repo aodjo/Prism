@@ -204,6 +204,25 @@ function asked(argv) {
 }
 
 /**
+ * Whether this shell can reach the Microsoft compiler.
+ *
+ * Asked of the shell rather than by looking for an installation, because being installed is not
+ * the thing that matters — a compiler Visual Studio has put on disk but not on this `PATH` is
+ * one the build cannot call.
+ *
+ * @returns {boolean} Whether `cl` resolves to anything.
+ */
+function hasMsvc() {
+  try {
+    execFileSync('where.exe', ['cl'], { stdio: 'ignore' });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Runs a command, letting it write to this terminal, and stops everything if it fails.
  *
  * Through a shell on Windows, and only there. What a package manager installs on that platform
@@ -463,6 +482,23 @@ if (process.platform === 'darwin' && !identity) {
       'different code identity from every other build, which means a keychain prompt on first\n' +
       'run and a screen recording grant to give again. Install the certificate, or set\n' +
       'APPLE_SIGNING_IDENTITY to name another one.',
+  );
+  process.exit(2);
+}
+
+// Checked before anything is built, because what it costs to find out otherwise is a full
+// dependency compile that ends in two hundred lines of `cc` reporting that it went looking for
+// clang. It went looking for clang because it could not find MSVC, and it could not find MSVC
+// because this shell is not the one Visual Studio sets up.
+if (process.platform === 'win32' && !hasMsvc()) {
+  console.error(
+    'This shell has no MSVC compiler on its PATH, so the parts of this that are C would not\n' +
+      'build. Visual Studio puts it there for a shell of its own:\n\n' +
+      '  Import-Module "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll"\n' +
+      '  Enter-VsDevShell -VsInstallPath "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools" -DevCmdArguments "-arch=arm64 -host_arch=arm64"\n\n' +
+      'If that leaves `where.exe cl` still saying nothing, the compiler for this machine is not\n' +
+      "installed: add \"MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools\" in Visual Studio\n" +
+      'Installer. It is not one of the ones chosen for you.',
   );
   process.exit(2);
 }
