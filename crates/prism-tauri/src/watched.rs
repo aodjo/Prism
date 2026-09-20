@@ -164,8 +164,10 @@ mod bar {
         ended: Option<Instant>,
         /// Who was last named, kept so the words do not change under a banner that is fading.
         name: String,
-        /// Whether the banner is up, which is also whether it takes clicks.
+        /// Whether the banner is up.
         shown: bool,
+        /// When it was last told to go down, so the window can be hidden once it has faded.
+        dimmed: Option<Instant>,
     }
 
     impl Bar {
@@ -177,6 +179,7 @@ mod bar {
                 ended: None,
                 name: String::new(),
                 shown: false,
+                dimmed: None,
             }
         }
 
@@ -250,20 +253,38 @@ mod bar {
             self.say(&window, up);
         }
 
-        /// Tells the page what to show, and the window whether to take clicks.
+        /// Tells the page what to show, and puts the window on screen or takes it off.
         ///
         /// Said on every look rather than on a change, so a page that finished loading after
-        /// the look that mattered is right by the next one. The window stops taking clicks as
-        /// it starts to fade, so a banner on its way out never catches one meant for whatever
-        /// is behind it.
+        /// the look that mattered is right by the next one.
+        ///
+        /// Shown and hidden rather than left up and made click-through. Click-through on
+        /// Windows is `WS_EX_LAYERED`, and a layered window that has never been handed layered
+        /// attributes is one the system does not paint at all — which is what a banner that
+        /// loaded its page and was never seen turned out to be. A hidden window takes no
+        /// clicks either, which was the whole reason for the other thing.
+        ///
+        /// Hidden only once the page has finished fading, so what goes is a banner that has
+        /// already gone rather than one cut off mid-fade.
         fn say(&mut self, window: &WebviewWindow, up: bool) {
             let said = serde_json::json!({ "name": self.name, "shown": up });
 
             let _ = window.eval(format!("window.__banner && window.__banner({said})"));
 
             if up != self.shown {
-                let _ = window.set_ignore_cursor_events(!up);
                 self.shown = up;
+                self.dimmed = (!up).then(Instant::now);
+
+                if up {
+                    let _ = window.show();
+                }
+            }
+
+            if let Some(dimmed) = self.dimmed
+                && dimmed.elapsed() >= FADING
+            {
+                self.dimmed = None;
+                let _ = window.hide();
             }
         }
     }
@@ -283,16 +304,15 @@ mod bar {
             .always_on_top(true)
             .visible_on_all_workspaces(true)
             .skip_taskbar(true)
+            // Off screen until it is told to show, which is what keeps a window nobody has
+            // asked for yet from being a dead patch at the top of somebody's screen.
+            .visible(false)
             .focused(false)
             .focusable(false)
             .content_protected(true)
             .build()?;
 
         place(&window);
-
-        // Until it is told to show. The page starts see-through, and a see-through window that
-        // took clicks would be a dead patch at the top of somebody's screen.
-        let _ = window.set_ignore_cursor_events(true);
 
         Ok(window)
     }
