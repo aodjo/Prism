@@ -406,10 +406,19 @@ async function allowed(what) {
  * @returns {void}
  */
 function open(link) {
-  const opener = { darwin: 'open', win32: 'start', linux: 'xdg-open' }[process.platform];
+  // `start` is not a program on Windows — it is a thing `cmd` understands — so it has to be
+  // handed to one. Run as an executable it throws, and the one step of this that needs a
+  // browser is the approval, which is exactly where a link that never opens is felt.
+  //
+  // The empty argument after it is the window title `start` takes first. Without it the link
+  // is read as the title and nothing opens.
+  const [program, ...ahead] =
+    process.platform === 'win32'
+      ? ['cmd', '/c', 'start', '']
+      : [process.platform === 'darwin' ? 'open' : 'xdg-open'];
 
   try {
-    execFileSync(opener, [link], { stdio: 'ignore' });
+    execFileSync(program, [...ahead, link], { stdio: 'ignore' });
   } catch {
     // Printed above, which is the part that matters.
   }
