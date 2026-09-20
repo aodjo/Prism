@@ -231,7 +231,7 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
 
     overlaid(panel)
         .build()
-        .map(|_| ())
+        .map(|window| inspect(&window))
         .map_err(|error| error.to_string())
 }
 
@@ -260,7 +260,7 @@ pub fn open_transfers(app: AppHandle) -> Result<(), String> {
 
     overlaid(window)
         .build()
-        .map(|_| ())
+        .map(|window| inspect(&window))
         .map_err(|error| error.to_string())
 }
 
