@@ -58,9 +58,15 @@ const DEFAULT_KEY = join(homedir(), 'Documents/prism-keys/prism-update.key');
  * The names Rust uses for a target, which is what Tauri asks the endpoint with — not the ones
  * Node uses for the same two things.
  *
- * @returns {{target: string, arch: string, bundle: string, installer: string}} The platform,
- *   what its bundle file is called under `target/release/bundle`, and the directory holding
- *   the installer where that is a different file.
+ * The bundle is named by where it lands and what it ends in rather than in full, because the
+ * bundler puts the version and the architecture into the file name: `Prism_1.0.0-local.4_x64`
+ * on one machine and `…_arm64` on the next. Naming one of them meant this worked on the machine
+ * it was written on and looked for a file that does not exist on every other — which is what
+ * stopped a Windows on ARM from publishing at all.
+ *
+ * @returns {{target: string, arch: string, dir: string, ends: string, installer: string}} The
+ *   platform, where its bundle lands under `target/release/bundle` and what that file ends in,
+ *   and the directory holding the installer where that is a different file.
  */
 function platform() {
   const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
@@ -70,14 +76,43 @@ function platform() {
     // the disk image, and they are not the same bytes. Elsewhere the installer is the file the
     // updater fetches, so there is nothing else to send.
     case 'darwin':
-      return { target: 'darwin', arch, bundle: 'macos/Prism.app.tar.gz', installer: 'dmg' };
+      return { target: 'darwin', arch, dir: 'macos', ends: '.app.tar.gz', installer: 'dmg' };
     case 'win32':
-      return { target: 'windows', arch, bundle: 'nsis/Prism_x64-setup.exe', installer: '' };
+      return { target: 'windows', arch, dir: 'nsis', ends: '-setup.exe', installer: '' };
     case 'linux':
-      return { target: 'linux', arch, bundle: 'appimage/prism.AppImage', installer: '' };
+      return { target: 'linux', arch, dir: 'appimage', ends: '.AppImage', installer: '' };
     default:
       throw new Error(`nothing is published for ${process.platform}`);
   }
+}
+
+/**
+ * The one file in a bundle directory that ends the way this platform's bundle does.
+ *
+ * Refuses rather than guesses when there are several. Two of them is a directory holding the
+ * last build as well as this one, and publishing whichever the filesystem happened to list
+ * first is how a version goes out carrying the bytes of the one before it.
+ *
+ * @param {string} folder - The directory to look in.
+ * @param {string} ends - What the file's name ends with.
+ * @returns {string} The full path to it.
+ * @throws {Error} If there is not exactly one.
+ */
+function theOne(folder, ends) {
+  const found = readdirSync(folder).filter((each) => each.endsWith(ends));
+
+  if (found.length === 0) {
+    throw new Error(`nothing in ${folder} ends in ${ends}`);
+  }
+
+  if (found.length > 1) {
+    throw new Error(
+      `${folder} holds ${found.length} files ending in ${ends}: ${found.join(', ')}. ` +
+        'Delete the ones that are not this build and run again.',
+    );
+  }
+
+  return join(folder, found[0]);
 }
 
 /**
@@ -380,7 +415,7 @@ function open(link) {
   }
 }
 
-const { target, arch, bundle, installer } = platform();
+const { target, arch, dir, ends, installer } = platform();
 const { build, notes } = asked(process.argv.slice(2));
 const key = process.env.PRISM_UPDATE_KEY ?? DEFAULT_KEY;
 
@@ -427,7 +462,7 @@ run('pnpm', ['package'], {
 });
 
 const version = `1.0.0-local.${numbered}`;
-const made = join(ROOT, 'target/release/bundle', bundle);
+const made = theOne(join(ROOT, 'target/release/bundle', dir), ends);
 const signature = readFileSync(`${made}.sig`, 'utf8').trim();
 const body = readFileSync(made);
 
