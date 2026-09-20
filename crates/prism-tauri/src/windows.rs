@@ -59,6 +59,9 @@ pub fn stage(app: &AppHandle, label: &str, page: &str) -> tauri::Result<WebviewW
         .background_color(BASE);
 
     let window = overlaid(window).build()?;
+
+    inspect(&window);
+
     let hiding = window.clone();
 
     // Closing the window closes the window. This machine is shareable for exactly as long as
@@ -97,6 +100,26 @@ fn overlaid<R: tauri::Runtime, M: tauri::Manager<R>>(
         .hidden_title(true);
 
     builder
+}
+
+/// Opens the inspector on a window, where this build is one meant to be looked into.
+///
+/// A window that fails to draw is a black rectangle and nothing else. Whatever went wrong is a
+/// sentence the web view already has and nobody can reach — there is no console in a packaged
+/// application, and the shell's own log says nothing about a page: the process it belongs to is
+/// running perfectly well.
+///
+/// Only off the released line, and only when asked for by name. A person running the version
+/// that ships should not find developer tools in their remote desktop, and an inspector that
+/// opened by itself on every launch would be a window in front of the one somebody wanted.
+///
+/// Set `PRISM_INSPECT` to anything and start a build from `development` or `local`.
+pub fn inspect(window: &WebviewWindow) {
+    if std::env::var_os("PRISM_INSPECT").is_none() || crate::updates::released() {
+        return;
+    }
+
+    window.open_devtools();
 }
 
 /// Stops macOS merging these windows into tabs.

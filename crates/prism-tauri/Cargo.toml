@@ -17,7 +17,11 @@ prism-core.workspace = true
 prism-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["unstable", "tray-icon"] }
+# `devtools` so that a build somebody is testing can be opened up and looked at. Tauri gives a
+# debug build the inspector for nothing; a packaged one gets it only when asked for here, and a
+# packaged build is what these windows are always reported against. Turning it on does not open
+# anything — see `windows::inspect`, which is what decides when it is offered.
+tauri = { version = "2", features = ["unstable", "tray-icon", "devtools"] }
 tauri-plugin-updater = "2.11.0"
 # The smallest thing that does blocking HTTPS. The account is control plane — a request here is
 # a function call on its own thread, and an async runtime would be a scheduler this shell has no

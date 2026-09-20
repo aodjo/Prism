@@ -31,6 +31,16 @@ const CHANNEL: &str = match option_env!("PRISM_CHANNEL") {
     None => "development",
 };
 
+/// Whether this build came off the line people are given.
+///
+/// What it guards is anything that should exist while something is being worked on and nowhere
+/// else — the inspector, so far. Asked as a question about the build rather than read as a
+/// string at each call, so there is one place that decides what "released" means.
+#[must_use]
+pub fn released() -> bool {
+    CHANNEL == "production"
+}
+
 /// Which copy of this version this is, counted by whatever produced it.
 ///
 /// Zero for a build nobody counted. Shown beside the version because the version alone does not
