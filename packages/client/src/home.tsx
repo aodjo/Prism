@@ -442,12 +442,10 @@ function Home(): JSX.Element {
   const language = LANGUAGES.find((one) => one.id === (settings?.language ?? '')) ?? LANGUAGES[0];
 
   return (
-    <div className="relative h-full w-full overflow-x-hidden overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div className="relative h-full w-full overflow-hidden">
       <Backdrop sky={HOME_SKY} />
 
-      {/* Room at the bottom for the bar that floats over it, so the last row of blocks can be
-          scrolled clear of it rather than ending underneath. */}
-      <div className="relative z-[1] flex min-h-full w-full flex-col px-8 pt-[80px] pb-[108px]">
+      <div className="relative z-[1] h-full w-full">
         {/* The bar the window is carried by, and the bar its controls sit on — one element,
             because two meant the strip that drags lay over the controls that do not. The shell
             moves the window for the element under the pointer and never for its children, so
@@ -617,62 +615,74 @@ function Home(): JSX.Element {
           )}
         </header>
 
-        <Trouble
-          message={
-            trouble ??
-            (stream.phase === 'failed' && stream.log.length > 0
-              ? (stream.log.at(-1) ?? null)
-              : null)
-          }
-          className="mt-3 flex-none"
-        />
+        {/* Only the board scrolls. It used to be the whole window, with the bar above held over
+            it and see-through — so a board taller than the window rose up behind the wordmark
+            and the controls and was read through them. What scrolls now fades out before it
+            reaches them, rather than being cut off along a line nobody can see. Nothing held
+            against the window lives in here, because the fade would take it too.
 
-        {/* The board. Its height follows what is on it rather than the window, so a block
-            dragged past the bottom takes the page with it instead of being clipped. */}
-        <div
-          ref={field}
-          className="relative mt-11 min-h-0 flex-1"
-          style={{ minHeight: down * STEP }}
-          onPointerDown={(event) => {
-            if (editing && event.target === event.currentTarget) {
-              setPicked(null);
-            }
-          }}
-        >
-          <Pegboard shown={editing} />
+            Room at the bottom for the bar that floats over it, so the last row of blocks can be
+            scrolled clear of it rather than ending underneath. */}
+        <div className="h-full w-full overflow-x-hidden overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent_76px,black_100px)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="flex min-h-full w-full flex-col px-8 pt-[80px] pb-[108px]">
+            <Trouble
+              message={
+                trouble ??
+                (stream.phase === 'failed' && stream.log.length > 0
+                  ? (stream.log.at(-1) ?? null)
+                  : null)
+              }
+              className="mt-3 flex-none"
+            />
 
-          {board.map((one) => (
-            <Frame
-              key={one.id}
-              block={one}
-              editing={editing}
-              picked={picked === one.id}
-              across={across}
-              onPick={() => {
-                setPicked(one.id);
-              }}
-              onEdit={() => {
-                setPicked(one.id);
-                setOpened(one.id);
-              }}
-              onChange={(next) => {
-                commit(board.map((other) => (other.id === next.id ? next : other)));
+            {/* The board. Its height follows what is on it rather than the window, so a block
+                dragged past the bottom takes the page with it instead of being clipped. */}
+            <div
+              ref={field}
+              className="relative mt-11 min-h-0 flex-1"
+              style={{ minHeight: down * STEP }}
+              onPointerDown={(event) => {
+                if (editing && event.target === event.currentTarget) {
+                  setPicked(null);
+                }
               }}
             >
-              <Body block={one} ground={ground} />
-            </Frame>
-          ))}
+              <Pegboard shown={editing} />
 
-          {board.length === 0 && (
-            <div className="flex h-full flex-col items-start justify-center gap-3">
-              <h2 className="m-0 text-heading font-semibold text-ink-2">
-                {t('Nothing on this screen yet')}
-              </h2>
-              <p className="m-0 max-w-[46ch] text-note text-muted-2">
-                {t('Arrange this screen, then add the blocks you want on it.')}
-              </p>
+              {board.map((one) => (
+                <Frame
+                  key={one.id}
+                  block={one}
+                  editing={editing}
+                  picked={picked === one.id}
+                  across={across}
+                  onPick={() => {
+                    setPicked(one.id);
+                  }}
+                  onEdit={() => {
+                    setPicked(one.id);
+                    setOpened(one.id);
+                  }}
+                  onChange={(next) => {
+                    commit(board.map((other) => (other.id === next.id ? next : other)));
+                  }}
+                >
+                  <Body block={one} ground={ground} />
+                </Frame>
+              ))}
+
+              {board.length === 0 && (
+                <div className="flex h-full flex-col items-start justify-center gap-3">
+                  <h2 className="m-0 text-heading font-semibold text-ink-2">
+                    {t('Nothing on this screen yet')}
+                  </h2>
+                  <p className="m-0 max-w-[46ch] text-note text-muted-2">
+                    {t('Arrange this screen, then add the blocks you want on it.')}
+                  </p>
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
 
         {/* The bar along the bottom. In view it is this machine and what it is doing; while the
