@@ -33,7 +33,14 @@ use crate::settings::{self, Settings};
 use crate::Held as Chosen;
 
 /// The slowest and the fastest a session may be started at, in frames per second.
-const FPS: (u32, u32) = (1, 480);
+///
+/// The ceiling is above the fastest screen anybody attaches and below the numbers that only
+/// make a session worse. A machine told to send four hundred frames a second does not send
+/// them — the compositor has none to give — but the encoder is set up for a rate it will never
+/// see, so every frame is budgeted a fraction of the bitrate and the pacing at the other end
+/// waits for arrivals that are not coming. What that is read as is stutter, and it is worst on
+/// exactly the setting somebody chose hoping for the opposite.
+const FPS: (u32, u32) = (1, 240);
 
 /// The least and the most a session may spend, in bits per second.
 const BITRATE_BPS: (u32, u32) = (500_000, 200_000_000);

@@ -176,6 +176,28 @@ fn shown_in(picture: Option<(u32, u32)>, area: (u32, u32)) -> Fitted {
     picture.map_or_else(|| Fitted::whole(area), |picture| fit(picture, area))
 }
 
+/// Returns how many frames a second the screens here can actually show, or `None` if none says.
+///
+/// The fastest of them, because the window can be dragged onto any of them, and rounded up so
+/// that a screen reporting 59.97 asks for sixty rather than fifty-nine.
+///
+/// What this is for: a host sending more frames than this window can present is a host spending
+/// capture, encoder and bandwidth on pictures thrown away before anybody sees one. Worse than
+/// wasted — the work competes with the frames that do get shown, which is what somebody reads
+/// as stutter on a session set to a high rate.
+pub fn fastest_screen(video: &sdl3::VideoSubsystem) -> Option<u16> {
+    let best = video
+        .displays()
+        .ok()?
+        .iter()
+        .filter_map(|display| display.get_mode().ok())
+        .map(|mode| mode.refresh_rate)
+        .filter(|rate| *rate > 0.0)
+        .fold(0.0_f32, f32::max);
+
+    (best > 0.0).then(|| best.ceil().clamp(1.0, f32::from(u16::MAX)) as u16)
+}
+
 /// Returns the size of the largest screen attached, in pixels, or `None` if none will say.
 ///
 /// Largest by area, and in pixels rather than points: a Retina screen of 1728 points across has
@@ -628,6 +650,18 @@ pub fn run(
 
     config.offer.max_width = u16::try_from(most_across.max(drawable_width)).unwrap_or(u16::MAX);
     config.offer.max_height = u16::try_from(most_down.max(drawable_height)).unwrap_or(u16::MAX);
+
+    // And the same argument for time as for pixels. This window cannot present faster than the
+    // screen it is on refreshes, so frames beyond that are captured, encoded, sent and decoded
+    // only to be dropped here — and the work of making them is work the frames that are shown
+    // have to share a machine with. Offering everything was a host set to a high rate spending
+    // itself on pictures nobody could ever see, which is felt at this end as stutter.
+    //
+    // The fastest screen attached rather than the one the window is on, for the same reason the
+    // size is: the window can be dragged to another one mid-session and nothing asks again.
+    if let Some(fastest) = fastest_screen(&video) {
+        config.offer.max_fps = fastest;
+    }
 
     // Declared after the window so it is dropped before it: the surface holds objects the
     // window owns, and releasing them afterwards would be releasing them into nothing.

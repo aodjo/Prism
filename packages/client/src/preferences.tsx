@@ -674,11 +674,13 @@ export function SharingTerms(): JSX.Element {
           onBlur={flush}
         />
       </Row>
+      {/* The ceiling is the shell's own, in `sharing.rs`. A field that accepted more would be
+          one where a number is typed, accepted, and then quietly becomes a different number. */}
       <Row label={t('Frame rate')}>
         <input
           type="number"
           min={1}
-          max={480}
+          max={240}
           step={1}
           className={NUMBER}
           value={settings?.fps ?? 60}
