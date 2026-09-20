@@ -206,10 +206,14 @@ function asked(argv) {
 /**
  * Runs a command, letting it write to this terminal, and stops everything if it fails.
  *
- * On Windows the thing a package manager installs is not a program but a `.cmd` beside one, and
- * running a file by name without a shell does not find it: `pnpm` is `pnpm.cmd`, and asking for
- * `pnpm` gets `ENOENT` from a machine that has it installed. The suffix is added here rather
- * than at the one call site, so the next command added does not rediscover this.
+ * Through a shell on Windows, and only there. What a package manager installs on that platform
+ * is not a program but a `.cmd` beside one — `pnpm` is `pnpm.cmd` — and Node will not start one
+ * of those without a shell: it refuses with `EINVAL`, which it began doing to close a hole where
+ * an argument to a batch file became a command. A shell is also what resolves the name to the
+ * file in the first place, so both halves of the problem are the same fix.
+ *
+ * Arguments are quoted on the way in because a shell splits on spaces and nothing here would
+ * otherwise. None of the ones passed today contain any; the next one might.
  *
  * @param {string} command - What to run.
  * @param {string[]} args - Its arguments.
@@ -217,11 +221,12 @@ function asked(argv) {
  * @returns {void}
  */
 function run(command, args, env = {}) {
-  const program = process.platform === 'win32' ? `${command}.cmd` : command;
+  const windows = process.platform === 'win32';
 
-  execFileSync(program, args, {
+  execFileSync(command, windows ? args.map((one) => `"${one}"`) : args, {
     cwd: ROOT,
     stdio: 'inherit',
+    shell: windows,
     env: { ...process.env, ...env },
   });
 }
