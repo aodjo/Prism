@@ -419,7 +419,7 @@ function Home(): JSX.Element {
 
       {/* Room at the bottom for the bar that floats over it, so the last row of blocks can be
           scrolled clear of it rather than ending underneath. */}
-      <div className="relative z-[1] flex min-h-full w-full flex-col px-8 pt-[62px] pb-[108px]">
+      <div className="relative z-[1] flex min-h-full w-full flex-col px-8 pt-[80px] pb-[108px]">
         {/* The bar the window is carried by, and the bar its controls sit on — one element,
             because two meant the strip that drags lay over the controls that do not. The shell
             moves the window for the element under the pointer and never for its children, so
@@ -433,7 +433,10 @@ function Home(): JSX.Element {
               prism.titleBarDoubleClick();
             }
           }}
-          className="fixed inset-x-0 top-0 z-[5] flex h-[62px] items-center gap-4 px-8"
+          // Padded down past the traffic lights rather than centred in the bar. The window
+          // keeps the system's buttons and hides the rest of its title bar, so the top of this
+          // bar is already occupied — content centred in it sits directly under them.
+          className="fixed inset-x-0 top-0 z-[5] flex h-[80px] items-center gap-4 px-8 pt-[30px]"
         >
           <Wordmark size="sm" />
           {/* The empty middle. Deaf to the pointer, so that dragging and double-clicking there
@@ -505,7 +508,7 @@ function Home(): JSX.Element {
               />
               <div
                 role="menu"
-                className="absolute top-[54px] right-8 z-[5] w-[252px] overflow-hidden rounded-panel border border-line-4 bg-[rgba(20,20,26,0.98)] py-1.5 shadow-[0_18px_48px_rgba(0,0,0,0.6)]"
+                className="absolute top-[72px] right-8 z-[5] w-[252px] overflow-hidden rounded-panel border border-line-4 bg-[rgba(20,20,26,0.98)] py-1.5 shadow-[0_18px_48px_rgba(0,0,0,0.6)]"
               >
                 <div className="flex items-center gap-[11px] px-3.5 py-3">
                   <span className="size-8 flex-none rounded-pill bg-violet" />
