@@ -36,6 +36,13 @@ const TAP: CGEventTapLocation = CGEventTapLocation::HIDEventTap;
 /// into the window server on the path a hand moves along.
 const BOUNDS_LIFETIME: Duration = Duration::from_millis(500);
 
+/// How close to an edge relative motion may put the pointer before it is sent back to the middle.
+///
+/// Wide enough that one fast flick of a hand cannot cross it between two events — a report of a
+/// couple of hundred points is an ordinary turn in a game — and narrow enough that the recentring
+/// stays out of the way of anything using the pointer normally.
+const EDGE_MARGIN: f64 = 240.0;
+
 /// What every event this injects carries in its source's user data field.
 ///
 /// Looking like hardware is the point, and it leaves nothing to tell the machine's own mouse
@@ -121,13 +128,33 @@ impl MacInjector {
     /// The delta is written onto the event as well as being folded into the position,
     /// because a game reading raw pointer input wants the movement, not where the cursor
     /// ended up.
+    ///
+    /// And the position is not allowed to come to rest against an edge. A relative event is
+    /// somebody turning, and a screen has sides: held against one, every further event moved
+    /// the pointer nowhere, and a player turning right simply stopped turning halfway through
+    /// the motion. So when the position reaches the margin it is put back in the middle of the
+    /// screen — which is what a game does for itself when it captures a cursor, and is
+    /// invisible while it has one hidden. The delta is untouched, so the turn is continuous
+    /// across the jump.
     fn move_pointer(&mut self, dx: f64, dy: f64) -> Result<(), InputError> {
         let bounds = self.screen();
+        let next_x = self.position.x + dx;
+        let next_y = self.position.y + dy;
+        let margin = EDGE_MARGIN
+            .min(bounds.size.width / 4.0)
+            .min(bounds.size.height / 4.0);
 
-        self.position.x = (self.position.x + dx)
-            .clamp(bounds.origin.x, bounds.origin.x + bounds.size.width - 1.0);
-        self.position.y = (self.position.y + dy)
-            .clamp(bounds.origin.y, bounds.origin.y + bounds.size.height - 1.0);
+        if next_x <= bounds.origin.x + margin
+            || next_x >= bounds.origin.x + bounds.size.width - margin
+            || next_y <= bounds.origin.y + margin
+            || next_y >= bounds.origin.y + bounds.size.height - margin
+        {
+            self.position.x = bounds.origin.x + bounds.size.width / 2.0;
+            self.position.y = bounds.origin.y + bounds.size.height / 2.0;
+        } else {
+            self.position.x = next_x;
+            self.position.y = next_y;
+        }
 
         let (kind, button) = match self.held_button() {
             Some(MouseButton::Left) => (CGEventType::LeftMouseDragged, CGMouseButton::Left),
