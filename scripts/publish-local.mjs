@@ -206,13 +206,20 @@ function asked(argv) {
 /**
  * Runs a command, letting it write to this terminal, and stops everything if it fails.
  *
+ * On Windows the thing a package manager installs is not a program but a `.cmd` beside one, and
+ * running a file by name without a shell does not find it: `pnpm` is `pnpm.cmd`, and asking for
+ * `pnpm` gets `ENOENT` from a machine that has it installed. The suffix is added here rather
+ * than at the one call site, so the next command added does not rediscover this.
+ *
  * @param {string} command - What to run.
  * @param {string[]} args - Its arguments.
  * @param {object} [env] - Extra environment for it.
  * @returns {void}
  */
 function run(command, args, env = {}) {
-  execFileSync(command, args, {
+  const program = process.platform === 'win32' ? `${command}.cmd` : command;
+
+  execFileSync(program, args, {
     cwd: ROOT,
     stdio: 'inherit',
     env: { ...process.env, ...env },
