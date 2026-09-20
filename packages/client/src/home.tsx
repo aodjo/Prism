@@ -338,23 +338,30 @@ function Home(): JSX.Element {
   }, [asking, shareOrAsk]);
 
   useEffect(() => {
-    const close = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') {
+    const pressed = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setTuning(false);
+        setMenu(false);
+        setAdding(false);
+        setOpened(null);
+
         return;
       }
 
-      setTuning(false);
-      setMenu(false);
-      setAdding(false);
-      setOpened(null);
+      // Only ever starts sharing. Ending a session somebody else is in the middle of is not
+      // something to do by reflex, so the keystroke does nothing once this machine is shared.
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !shared) {
+        event.preventDefault();
+        flip();
+      }
     };
 
-    window.addEventListener('keydown', close);
+    window.addEventListener('keydown', pressed);
 
     return () => {
-      window.removeEventListener('keydown', close);
+      window.removeEventListener('keydown', pressed);
     };
-  }, []);
+  }, [shared, flip]);
 
   /**
    * What this machine would send, as one line.
