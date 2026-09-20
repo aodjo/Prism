@@ -497,7 +497,11 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
             shared.set_phase(Phase::Waiting);
             return;
         }
+        // Said on standard error like the end of a session is, because until it was, a machine
+        // that a client reached and then lost before the session opened left nothing behind:
+        // sharing went off and came back on, and the log held no line between the two.
         Err(err) => {
+            eprintln!("host: {} no session opened because {err}", seconds_now());
             shared.fail(err);
             return;
         }
