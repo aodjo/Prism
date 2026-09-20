@@ -339,11 +339,17 @@ pub fn watch_local_mouse() {
             .spawn(|| {
                 // SAFETY: the procedure is a function that lives as long as the program does,
                 // and no module with thread zero is how a hook on every thread is asked for.
-                let Ok(hook) =
-                    (unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(local_mouse), None, 0) })
-                else {
-                    return;
-                };
+                let hook =
+                    match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(local_mouse), None, 0) } {
+                        Ok(hook) => hook,
+                        // Said, because the only other sign is a banner that never answers a hand
+                        // on the mouse, which looks exactly like a banner that is broken.
+                        Err(error) => {
+                            eprintln!("input: this machine's own mouse cannot be watched: {error}");
+
+                            return;
+                        }
+                    };
 
                 let mut message = MSG::default();
 
@@ -357,6 +363,9 @@ pub fn watch_local_mouse() {
             });
     });
 }
+
+/// Whether this machine's own mouse has been seen yet, which is said once.
+static SEEN: std::sync::Once = std::sync::Once::new();
 
 /// Called by Windows for every mouse event on the machine, before anything else sees it.
 ///
@@ -372,6 +381,22 @@ unsafe extern "system" fn local_mouse(code: i32, wparam: WPARAM, lparam: LPARAM)
 
         if flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) == 0 {
             crate::input::note_touch();
+
+            // Once, the first time, so that a log can say whether this machine's mouse is one
+            // Windows calls its own. A virtual machine's may not be: what moves the pointer
+            // there is put in by the machine underneath, and if Windows marks that as injected
+            // then nothing here will ever be able to tell it from the far side's hand.
+            //
+            // Written rather than printed. Printing panics if the write fails, and a panic in
+            // a function Windows called does not unwind: it ends the process.
+            SEEN.call_once(|| {
+                use std::io::Write as _;
+
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "input: this machine's own mouse has been seen"
+                );
+            });
         }
     }
 
