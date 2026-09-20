@@ -204,22 +204,42 @@ function asked(argv) {
 }
 
 /**
- * Whether this shell can reach the Microsoft compiler.
+ * Whether this shell can reach a Microsoft compiler that builds for this machine.
  *
- * Asked of the shell rather than by looking for an installation, because being installed is not
- * the thing that matters — a compiler Visual Studio has put on disk but not on this `PATH` is
- * one the build cannot call.
+ * Both halves matter, and the second is the one that catches people out. A shell set up for the
+ * x64 tools has `cl` on its `PATH` and answers yes to the obvious question — but the compiler it
+ * found builds for a different machine, and what fails then is not this check: it is `cc`, four
+ * hundred dependencies later, reporting that it went looking for clang. It went looking because
+ * it does not read `PATH` at all. It asks the registry for the tools belonging to the target
+ * being built, and a Visual Studio without the ARM64 component has none to give.
  *
- * @returns {boolean} Whether `cl` resolves to anything.
+ * The architecture is read from what the compiler says about itself, which it prints when asked
+ * to compile nothing.
+ *
+ * @returns {boolean} Whether one is there, and builds for this machine.
  */
 function hasMsvc() {
-  try {
-    execFileSync('where.exe', ['cl'], { stdio: 'ignore' });
+  let banner = '';
 
-    return true;
-  } catch {
-    return false;
+  try {
+    // It prints its banner and then complains there are no input files, which is a failure as
+    // far as the shell is concerned. The banner is on standard error either way.
+    execFileSync('cl', [], { encoding: 'utf8', stdio: 'pipe' });
+  } catch (failed) {
+    banner = String(failed.stderr ?? '');
+
+    if (failed.code === 'ENOENT') {
+      return false;
+    }
   }
+
+  // Only where the two could differ. On x64 the tools that are installed by default are the
+  // right ones, and a banner that names no architecture is an older compiler that only had one.
+  if (process.arch !== 'arm64') {
+    return true;
+  }
+
+  return /ARM64/u.test(banner);
 }
 
 /**
@@ -492,13 +512,17 @@ if (process.platform === 'darwin' && !identity) {
 // because this shell is not the one Visual Studio sets up.
 if (process.platform === 'win32' && !hasMsvc()) {
   console.error(
-    'This shell has no MSVC compiler on its PATH, so the parts of this that are C would not\n' +
-      'build. Visual Studio puts it there for a shell of its own:\n\n' +
-      '  Import-Module "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll"\n' +
-      '  Enter-VsDevShell -VsInstallPath "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools" -DevCmdArguments "-arch=arm64 -host_arch=arm64"\n\n' +
-      'If that leaves `where.exe cl` still saying nothing, the compiler for this machine is not\n' +
-      "installed: add \"MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools\" in Visual Studio\n" +
-      'Installer. It is not one of the ones chosen for you.',
+    `No Microsoft compiler for ${process.arch} is reachable from this shell, and parts of this\n` +
+      'are C. Two things it can be, in the order worth checking:\n\n' +
+      '1. The compiler is installed but this shell was not set up for it. Visual Studio makes\n' +
+      '   a shell that is:\n\n' +
+      '     Import-Module "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll"\n' +
+      '     Enter-VsDevShell -VsInstallPath "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools" -DevCmdArguments "-arch=arm64 -host_arch=arm64"\n\n' +
+      '2. It is not installed. Run `cl` on its own: the banner names the machine it builds for,\n' +
+      `   and on this one it has to say ARM64. If it says x64, or says nothing at all, add\n` +
+      '   "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools" in Visual Studio Installer. It is\n' +
+      '   not one of the components chosen for you, and without it `cc` goes looking for clang\n' +
+      '   instead — which is the error this check exists to replace.',
   );
   process.exit(2);
 }
