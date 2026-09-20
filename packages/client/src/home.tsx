@@ -180,24 +180,45 @@ function Home(): JSX.Element {
     })();
   }, []);
 
+  // Subscribing is allowed to fail without taking the window with it. An error thrown out of an
+  // effect is one React answers by unmounting everything, and what that leaves is a black
+  // rectangle — no window furniture, no message, nothing to press. A window that opened and
+  // then stopped hearing about one thing is worth far more than that, and the line below is
+  // what says which thing.
   useEffect(() => {
-    prism.onSharing(setMine);
-    prism.onSessions(setHistory);
-    prism.onStream((state) => {
-      setStream(state);
-
-      if (state.departed !== null && !RUNNING.has(state.phase)) {
-        setGone(state.departed);
+    const listen = (what: string, subscribe: () => void): void => {
+      try {
+        subscribe();
+      } catch (error: unknown) {
+        setTrouble(`${what}: ${reason(error)}`);
       }
-    });
+    };
 
-    prism.onAccount((state) => {
-      setDevices(state.devices);
-      setAccount({ email: state.email });
-      setMachines(watchable(state.devices, state.publicKey));
+    listen('sharing', () => {
+      prism.onSharing(setMine);
     });
+    listen('sessions', () => {
+      prism.onSessions(setHistory);
+    });
+    listen('stream', () => {
+      prism.onStream((state) => {
+        setStream(state);
 
-    prism.onUpdate(setUpdate);
+        if (state.departed !== null && !RUNNING.has(state.phase)) {
+          setGone(state.departed);
+        }
+      });
+    });
+    listen('account', () => {
+      prism.onAccount((state) => {
+        setDevices(state.devices);
+        setAccount({ email: state.email });
+        setMachines(watchable(state.devices, state.publicKey));
+      });
+    });
+    listen('updates', () => {
+      prism.onUpdate(setUpdate);
+    });
   }, []);
 
   // How wide the board is decides how many holes there are, so it is measured rather than
