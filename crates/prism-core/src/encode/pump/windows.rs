@@ -11,6 +11,9 @@
 //! plan means by encoding asynchronously; the wrapper here simply does not use them yet.
 //! Turning that on is worth what it was worth on the other platform — 66 frames a second to
 //! 197 at 1440p — and it needs the hardware in front of it to be worth writing.
+//!
+//! A machine with no NVENC encodes through Media Foundation instead, from the same conversion
+//! target. See [`crate::encode::mediafoundation`] for what that costs and where.
 
 #![cfg(target_os = "windows")]
 
@@ -18,10 +21,11 @@ use windows::core::Interface;
 
 use crate::capture::wgc::ScreenCapture;
 use crate::capture::{CaptureConfig, CaptureError};
-use crate::encode::EncoderConfig;
+use crate::encode::mediafoundation::MediaFoundationEncoder;
 use crate::encode::nv12::{Bgra2Nv12, Nv12Texture};
 use crate::encode::nvenc::NvencEncoder;
 use crate::encode::pump::{PumpConfig, Pumped, REPEAT_INTERVAL, after_send};
+use crate::encode::{EncodeError, EncodedFrame, EncoderConfig};
 use crate::net::sender::SliceSender;
 
 /// How many slices NVENC cuts each frame into.
@@ -31,12 +35,69 @@ use crate::net::sender::SliceSender;
 /// rather than at the end.
 const SLICES_PER_FRAME: u32 = 4;
 
+/// Whichever encoder this machine turned out to have.
+enum Encoder {
+    /// NVIDIA's, driven directly.
+    Nvenc(NvencEncoder),
+    /// Whatever Media Foundation lists, on a machine with no NVENC.
+    MediaFoundation(MediaFoundationEncoder),
+}
+
+impl Encoder {
+    /// Opens NVENC, and Media Foundation if there is none.
+    ///
+    /// Both reasons are kept when both fail. Which of the two a machine was expected to have
+    /// is not something this can know, and the one left out would be the one that mattered.
+    fn open(
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        target: &Nv12Texture,
+        config: EncoderConfig,
+    ) -> Result<Self, String> {
+        // SAFETY: the device and the texture are owned by the pump that owns this encoder, and
+        // so outlive it.
+        let nvenc =
+            unsafe { NvencEncoder::new(device.as_raw(), target.texture().as_raw(), config) };
+
+        let no_nvenc = match nvenc {
+            Ok(encoder) => return Ok(Self::Nvenc(encoder)),
+            Err(err) => err,
+        };
+
+        MediaFoundationEncoder::new(device, target.texture(), config)
+            .map(Self::MediaFoundation)
+            .map_err(|no_transform| {
+                format!("{no_nvenc}; and through Media Foundation, {no_transform}")
+            })
+    }
+
+    /// Changes the target bitrate of the running encoder.
+    fn set_bitrate_bps(&mut self, bitrate_bps: u32) -> Result<(), EncodeError> {
+        match self {
+            Self::Nvenc(encoder) => encoder.set_bitrate_bps(bitrate_bps),
+            Self::MediaFoundation(encoder) => encoder.set_bitrate_bps(bitrate_bps),
+        }
+    }
+
+    /// Encodes what is in the conversion target, returning nothing on a turn where a frame
+    /// went in and none has come out yet.
+    fn encode(
+        &mut self,
+        pts_us: u64,
+        force_idr: bool,
+    ) -> Result<Option<&EncodedFrame>, EncodeError> {
+        match self {
+            Self::Nvenc(encoder) => encoder.encode(pts_us, force_idr).map(Some),
+            Self::MediaFoundation(encoder) => encoder.encode(pts_us, force_idr),
+        }
+    }
+}
+
 /// The screen, encoded, ready to send.
 ///
 /// Owns the capture, the conversion target and the encoder. Dropping it stops all three.
 pub struct ScreenPump {
     capture: ScreenCapture,
-    encoder: NvencEncoder,
+    encoder: Encoder,
     converter: Bgra2Nv12,
     target: Nv12Texture,
     width: u32,
@@ -71,23 +132,19 @@ impl ScreenPump {
         let target = Nv12Texture::new(device, width, height).map_err(failed)?;
         let converter = Bgra2Nv12::new(device).map_err(failed)?;
 
-        // SAFETY: the device and the texture are owned by this struct and so outlive the
-        // encoder, which is dropped with it.
-        let encoder = unsafe {
-            NvencEncoder::new(
-                device.as_raw(),
-                target.texture().as_raw(),
-                EncoderConfig {
-                    codec: config.codec,
-                    width,
-                    height,
-                    fps: config.fps,
-                    bitrate_bps: config.bitrate_bps,
-                    max_slice_bytes: SLICES_PER_FRAME,
-                },
-            )
-        }
-        .map_err(failed)?;
+        let encoder = Encoder::open(
+            device,
+            &target,
+            EncoderConfig {
+                codec: config.codec,
+                width,
+                height,
+                fps: config.fps,
+                bitrate_bps: config.bitrate_bps,
+                max_slice_bytes: SLICES_PER_FRAME,
+            },
+        )
+        .map_err(|reason| CaptureError::Start { reason })?;
 
         Ok(Self {
             capture,
@@ -116,10 +173,11 @@ impl ScreenPump {
     /// Whether the encoder cuts frames into slices that can be sent before the frame is done.
     ///
     /// Always, on NVENC. It is the platform where slicing works, which is the platform where
-    /// it matters most.
+    /// it matters most. Through Media Foundation a frame comes out however the transform chose
+    /// to cut it, which nothing here asks it to do.
     #[must_use]
     pub fn slicing_supported(&self) -> bool {
-        true
+        matches!(self.encoder, Encoder::Nvenc(_))
     }
 
     /// Captures one frame, encodes it, and sends its slices.
@@ -177,12 +235,19 @@ impl ScreenPump {
                 .map_err(|err| err.to_string())?;
         }
 
-        let frame = self
+        let encoded = self
             .encoder
             .encode(capture_ts_us, force_idr)
             .map_err(|err| err.to_string())?;
 
+        // Counted whether or not anything came out, because what it records is that the
+        // encoder has been given its first picture — and with it the keyframe the first one
+        // has to be, which an encoder that is still filling goes on owing by itself.
         self.submitted += 1;
+
+        let Some(frame) = encoded else {
+            return Ok(Pumped::Filling);
+        };
 
         let frame_id = self.emitted;
         self.emitted += 1;
