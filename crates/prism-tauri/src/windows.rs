@@ -155,12 +155,41 @@ pub fn no_tabbing() {
 /// Fails if the home window cannot be built.
 pub fn open_home(app: &AppHandle) -> tauri::Result<()> {
     stage(app, "home", "home.html")?;
-
-    if let Some(setup) = app.get_webview_window("setup") {
-        setup.destroy()?;
-    }
+    retire(app, "setup");
 
     Ok(())
+}
+
+/// Puts a window away, once the one replacing it is standing on its own.
+///
+/// Hidden now and destroyed later, and the later matters. A web view is not finished being made
+/// when the call that makes it returns — on Windows the browser side of it is still coming up —
+/// and tearing another one down in that moment takes the new one with it. What was left was a
+/// window with no web view inside it at all: black, and deaf to everything, because there was
+/// nothing in there to be deaf with.
+///
+/// Hiding is immediate, so what somebody sees is the swap they asked for. The destruction waits
+/// for [`settled`] to say the new window has finished loading its page.
+fn retire(app: &AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.hide();
+    }
+}
+
+/// Destroys whatever was hidden by a swap, now that the window replacing it has loaded.
+///
+/// Called from the page-load event, which is the only signal that says the new web view exists
+/// rather than merely having been asked for.
+pub fn settled(app: &AppHandle, loaded: &str) {
+    let retired = match loaded {
+        "home" => "setup",
+        "setup" => "home",
+        _ => return,
+    };
+
+    if let Some(window) = app.get_webview_window(retired) {
+        let _ = window.destroy();
+    }
 }
 
 /// Shows setup and closes the home window.
@@ -175,10 +204,7 @@ pub fn open_home(app: &AppHandle) -> tauri::Result<()> {
 /// Fails if the setup window cannot be built.
 pub fn open_setup(app: &AppHandle) -> tauri::Result<()> {
     stage(app, "setup", "setup.html")?;
-
-    if let Some(home) = app.get_webview_window("home") {
-        home.destroy()?;
-    }
+    retire(app, "home");
 
     Ok(())
 }

@@ -284,6 +284,16 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // When one of the two full-size windows replaces the other, the one being replaced is
+        // hidden at once and destroyed here — once the page in the new one has finished
+        // loading, which is the point at which its web view certainly exists.
+        .on_page_load(|webview, payload| {
+            use tauri::Manager as _;
+
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                windows::settled(webview.app_handle(), webview.label());
+            }
+        })
         .setup(|app| {
             eprintln!(
                 "prism: {} started at {}, process {}",
