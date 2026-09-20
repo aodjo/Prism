@@ -40,6 +40,8 @@ packages/client/renderer/bridge.js
 packages/client/renderer/bridge.js.map
 packages/client/renderer/transfers.js
 packages/client/renderer/transfers.js.map
+packages/client/renderer/banner.js
+packages/client/renderer/banner.js.map
 packages/client/renderer/prism.css
 
 # Scratch snapshots and logs from browser automation, never part of the tree.

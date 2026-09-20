@@ -106,6 +106,7 @@ const KO: Record<string, string> = {
   Opening: '여는 중',
   'Sharing failed': '공유하지 못했습니다',
   '{name} is watching this machine': '{name}에서 이 컴퓨터를 보는 중',
+  '{name} is controlling this machine': '{name}에서 이 컴퓨터를 제어하는 중입니다',
   Disconnect: '연결 끊기',
   'Turn on sharing on the machine you want to watch, and it turns up here.':
     '보고 싶은 컴퓨터에서 공유를 켜면 여기에 나타납니다.',

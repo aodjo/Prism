@@ -14,7 +14,7 @@
 //! a higher-integrity window. That makes failure loud, unlike `CGEventPost`, so it is
 //! checked on every call rather than once.
 
-use windows::Win32::Foundation::{GetLastError, POINT};
+use windows::Win32::Foundation::{GetLastError, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSE_EVENT_FLAGS,
@@ -24,7 +24,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+    CallNextHookEx, GetCursorPos, GetMessageW, GetSystemMetrics, HC_ACTION, LLMHF_INJECTED,
+    LLMHF_LOWER_IL_INJECTED, MSG, MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, SetWindowsHookExW,
+    UnhookWindowsHookEx, WH_MOUSE_LL,
 };
 
 use crate::input::{HeldKeys, Injector, InputError, PointerSample};
@@ -311,6 +313,70 @@ fn clamp_to_u16(value: i32, extent: u16) -> u16 {
 /// have to handle every frame.
 fn clamp_dimension(extent: i32) -> u16 {
     extent.clamp(1, i32::from(u16::MAX)) as u16
+}
+
+/// Starts watching this machine's own mouse, for the rest of the run.
+///
+/// What [`crate::input::note_touch`] is waiting to be told on this platform. A low-level hook
+/// is shown every mouse event on the machine and told of each whether it was injected — which
+/// everything the far side does is, arriving as it does through `SendInput` — so what is left
+/// is the hand of whoever is sitting here.
+///
+/// On a thread of its own, with a message loop of its own. A low-level hook is called on the
+/// thread that installed it, in line with the input itself: a thread that is ever busy is a
+/// pointer that stutters for the whole machine, and Windows quietly removes a hook that answers
+/// too slowly. This one does nothing else.
+///
+/// Once for the process, however often it is called. A machine where the hook cannot be
+/// installed is one where the far side always has the pointer, which is how every Windows host
+/// behaved before this existed.
+pub fn watch_local_mouse() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("prism-local-mouse".into())
+            .spawn(|| {
+                // SAFETY: the procedure is a function that lives as long as the program does,
+                // and no module with thread zero is how a hook on every thread is asked for.
+                let Ok(hook) =
+                    (unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(local_mouse), None, 0) })
+                else {
+                    return;
+                };
+
+                let mut message = MSG::default();
+
+                // SAFETY: the message is a live local. Nothing is ever posted to this thread;
+                // the call is what lets Windows run the hook on it, and it returns only to say
+                // the thread should end.
+                while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {}
+
+                // SAFETY: the hook installed above, removed once.
+                let _ = unsafe { UnhookWindowsHookEx(hook) };
+            });
+    });
+}
+
+/// Called by Windows for every mouse event on the machine, before anything else sees it.
+///
+/// # Safety
+///
+/// Only Windows calls this, as the low-level mouse hook it was installed as: `lparam` then
+/// points at an `MSLLHOOKSTRUCT` for the length of the call.
+unsafe extern "system" fn local_mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        // SAFETY: with this code, a low-level mouse hook is handed a pointer to the event's
+        // description, valid until the call returns.
+        let flags = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).flags };
+
+        if flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) == 0 {
+            crate::input::note_touch();
+        }
+    }
+
+    // SAFETY: handing on exactly what was received, which is what every hook owes the next.
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
 /// Translates a USB HID usage code into a set 1 scan code and whether it is extended.
