@@ -982,7 +982,10 @@ function Home(): JSX.Element {
             }
           }}
         >
-          <div className="max-h-full w-full max-w-[520px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.96)] shadow-[0_24px_60px_rgba(0,0,0,0.45)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {/* The scrollbar is left showing here, unlike everywhere else in this window. The
+              settings are taller than the sheet on a short screen, and a panel that scrolls
+              with nothing to say so is one somebody reads the top of and takes for all of it. */}
+          <div className="max-h-full w-full max-w-[520px] overflow-y-auto overscroll-contain rounded-card border border-line-4 bg-[rgba(20,20,26,0.96)] shadow-[0_24px_60px_rgba(0,0,0,0.45)]">
             <div className="flex items-center justify-between px-5 pt-4 pb-1">
               <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
                 {t('Settings')}
