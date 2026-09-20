@@ -204,46 +204,30 @@ function asked(argv) {
 }
 
 /**
- * Whether this shell can reach a Microsoft compiler that builds for this machine.
+ * Whether this shell can reach the Microsoft compiler.
  *
- * Both halves matter, and the second is the one that catches people out. A shell set up for the
- * x64 tools has `cl` on its `PATH` and answers yes to the obvious question — but the compiler it
- * found builds for a different machine, and what fails then is not this check: it is `cc`, four
- * hundred dependencies later, reporting that it went looking for clang. It went looking because
- * it does not read `PATH` at all. It asks the registry for the tools belonging to the target
- * being built, and a Visual Studio without the ARM64 component has none to give.
+ * Asked of the shell rather than by looking for an installation, because being installed is not
+ * what matters — a compiler Visual Studio has put on disk but not on this `PATH` is one the
+ * build cannot call, and `PATH` is what the shell Visual Studio sets up is for.
  *
- * The architecture is read from what the compiler says about itself, which it prints when asked
- * to compile nothing.
+ * Presence and nothing more. An earlier version of this read the compiler's banner to check it
+ * built for this machine, on a guess that the architecture was the problem. It was not, and the
+ * check cost three attempts of its own to get right — `where.exe` rather than a bare name,
+ * because Windows will not start a program by a name missing its extension; the banner from
+ * standard error rather than standard output; and then the discovery that `cl` with nothing to
+ * compile succeeds, so the failing path was never taken. A check nobody can keep correct is
+ * worse than the error it replaces.
  *
- * @returns {boolean} Whether one is there, and builds for this machine.
+ * @returns {boolean} Whether `cl` resolves to anything.
  */
 function hasMsvc() {
-  let banner = '';
-
   try {
-    // `cl.exe` and not `cl`. Starting a program without a shell on Windows does not try the
-    // extensions in `PATHEXT`, so the bare name finds nothing on a machine that has it — which
-    // is the same trap the package manager is behind, one function below.
-    //
-    // It prints its banner and then complains there are no input files, which is a failure as
-    // far as the shell is concerned. The banner is on standard error either way.
-    execFileSync('cl.exe', [], { encoding: 'utf8', stdio: 'pipe' });
-  } catch (failed) {
-    banner = String(failed.stderr ?? '');
+    execFileSync('where.exe', ['cl'], { stdio: 'ignore' });
 
-    if (failed.code === 'ENOENT') {
-      return false;
-    }
-  }
-
-  // Only where the two could differ. On x64 the tools that are installed by default are the
-  // right ones, and a banner that names no architecture is an older compiler that only had one.
-  if (process.arch !== 'arm64') {
     return true;
+  } catch {
+    return false;
   }
-
-  return /ARM64/u.test(banner);
 }
 
 /**
@@ -536,17 +520,15 @@ if (process.platform === 'darwin' && !identity) {
 // because this shell is not the one Visual Studio sets up.
 if (process.platform === 'win32' && !hasMsvc()) {
   console.error(
-    `No Microsoft compiler for ${process.arch} is reachable from this shell, and parts of this\n` +
-      'are C. Two things it can be, in the order worth checking:\n\n' +
-      '1. The compiler is installed but this shell was not set up for it. Visual Studio makes\n' +
-      '   a shell that is:\n\n' +
-      '     Import-Module "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll"\n' +
-      '     Enter-VsDevShell -VsInstallPath "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools" -DevCmdArguments "-arch=arm64 -host_arch=arm64"\n\n' +
-      '2. It is not installed. Run `cl` on its own: the banner names the machine it builds for,\n' +
-      `   and on this one it has to say ARM64. If it says x64, or says nothing at all, add\n` +
-      '   "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools" in Visual Studio Installer. It is\n' +
-      '   not one of the components chosen for you, and without it `cc` goes looking for clang\n' +
-      '   instead — which is the error this check exists to replace.',
+    'No Microsoft compiler is reachable from this shell, and parts of this are C. Visual\n' +
+      'Studio makes a shell that can reach one:\n\n' +
+      '  Import-Module "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll"\n' +
+      '  Enter-VsDevShell -VsInstallPath "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools" -DevCmdArguments "-arch=arm64 -host_arch=arm64"\n\n' +
+      'That shell starts somewhere else and builds its environment fresh, so come back to this\n' +
+      'directory and set PRISM_UPDATE_KEY again inside it.\n\n' +
+      'If `where.exe cl` still says nothing there, the compiler for this machine is not\n' +
+      'installed: add "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools" in Visual Studio\n' +
+      'Installer. It is not one of the components chosen for you.',
   );
   process.exit(2);
 }
