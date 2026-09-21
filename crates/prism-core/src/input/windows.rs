@@ -364,8 +364,23 @@ pub fn watch_local_mouse() {
     });
 }
 
-/// Whether this machine's own mouse has been seen yet, which is said once.
-static SEEN: std::sync::Once = std::sync::Once::new();
+/// Said once, when a mouse event first reaches the hook at all.
+static ANY: std::sync::Once = std::sync::Once::new();
+
+/// Said once, when one first arrives that Windows does not call injected.
+static OWN: std::sync::Once = std::sync::Once::new();
+
+/// Says something on standard error, once.
+///
+/// Written rather than printed. Printing panics if the write fails, and a panic in a function
+/// Windows called does not unwind — it ends the process.
+fn once(said: &std::sync::Once, line: std::fmt::Arguments<'_>) {
+    said.call_once(|| {
+        use std::io::Write as _;
+
+        let _ = std::io::stderr().write_fmt(format_args!("{line}\n"));
+    });
+}
 
 /// Called by Windows for every mouse event on the machine, before anything else sees it.
 ///
@@ -379,24 +394,24 @@ unsafe extern "system" fn local_mouse(code: i32, wparam: WPARAM, lparam: LPARAM)
         // description, valid until the call returns.
         let flags = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).flags };
 
+        // Two lines rather than one, because between them they say which of the two things
+        // went wrong when nothing here works. Nothing at all means the hook is installed and
+        // no mouse event ever reached it; the first line alone means every event on this
+        // machine is one Windows calls injected, which is what a virtual machine's pointer can
+        // be — put in by the machine underneath, and then indistinguishable from the far side's
+        // hand by anything this could ask.
+        once(
+            &ANY,
+            format_args!("input: a mouse event reached the hook, flags {flags:#x}"),
+        );
+
         if flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) == 0 {
             crate::input::note_touch();
 
-            // Once, the first time, so that a log can say whether this machine's mouse is one
-            // Windows calls its own. A virtual machine's may not be: what moves the pointer
-            // there is put in by the machine underneath, and if Windows marks that as injected
-            // then nothing here will ever be able to tell it from the far side's hand.
-            //
-            // Written rather than printed. Printing panics if the write fails, and a panic in
-            // a function Windows called does not unwind: it ends the process.
-            SEEN.call_once(|| {
-                use std::io::Write as _;
-
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "input: this machine's own mouse has been seen"
-                );
-            });
+            once(
+                &OWN,
+                format_args!("input: this machine's own mouse has been seen"),
+            );
         }
     }
 
