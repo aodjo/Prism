@@ -504,6 +504,8 @@ const PLACES = {
   Frankfurt: [50.11, 8.68],
   런던: [51.51, -0.13],
   London: [51.51, -0.13],
+  버밍엄: [52.49, -1.89],
+  Birmingham: [52.49, -1.89],
   뉴욕: [40.71, -74.01],
   'New York': [40.71, -74.01],
   보스턴: [42.36, -71.06],
@@ -533,19 +535,23 @@ const FOLDED = new Map(Object.entries(PLACES).map(([name, at]) => [name.toLowerC
  * went unmarked. What is in the last brackets is tried first, because that is where the city
  * goes in every name this project has been given.
  *
+ * A number after the city is a second machine there — `Netherlands (Amsterdam 2)` — and region
+ * names have to differ because reports are kept by name, so it is dropped before the lookup
+ * rather than leaving the second machine off the map.
+ *
  * @param {string} name - What the region is called.
  * @returns {[number, number] | null} Degrees north and east, or `null` for a place not listed.
  *
  * @example
- * placeOf('Japan (Osaka)');  // [34.69, 135.5]
- * placeOf('Amsterdam');      // [52.37, 4.9]
- * placeOf('The Moon');       // null
+ * placeOf('Japan (Osaka)');              // [34.69, 135.5]
+ * placeOf('Netherlands (Amsterdam 2)');  // [52.37, 4.9]
+ * placeOf('The Moon');                   // null
  */
 function placeOf(name) {
   const tries = [name, /\(([^)]*)\)\s*$/u.exec(name)?.[1], name.replace(/\s*\([^)]*\)\s*$/u, '')];
 
   for (const one of tries) {
-    const at = one && FOLDED.get(one.trim().toLowerCase());
+    const at = one && FOLDED.get(one.trim().replace(/\s+\d+$/u, '').toLowerCase());
 
     if (at) {
       return at;
