@@ -102,7 +102,13 @@ vaapi = ["dep:libva"]
 # library through its headers, and a Mac running `pnpm lint:cross` has neither a Linux C
 # toolchain nor the headers. The shell and the stream window turn it on where they are built for
 # Linux. The code behind it is compiled under `cfg(linux_desktop)`; see `build.rs`.
-linux-desktop = ["dep:openh264", "dep:openh264-sys2"]
+linux-desktop = [
+    "dep:openh264",
+    "dep:openh264-sys2",
+    "dep:ashpd",
+    "dep:pipewire",
+    "dep:pollster",
+]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The maintained fork of ChromiumOS's `cros-libva`. The original is pinned to an older libva
@@ -115,3 +121,15 @@ libva = { version = "0.1.4", optional = true }
 # two constants that change the bitrate of a running encoder, which the wrapper does not expose.
 openh264 = { version = "0.9.8", optional = true }
 openh264-sys2 = { version = "0.9.8", optional = true }
+# The desktop portal, which is how a Wayland desktop hands over its screen and its input. Its own
+# executor rather than tokio: a runtime is what the hot path is forbidden, and nothing here needs
+# one — each portal call is waited for on the thread that made it.
+ashpd = { version = "0.13.13", default-features = false, features = [
+    "async-io",
+    "remote_desktop",
+    "screencast",
+], optional = true }
+# The screen's frames, once the portal has granted them. Binds libpipewire through its headers.
+pipewire = { version = "0.10.1", optional = true }
+# Runs one portal call to completion on the calling thread. The smallest thing that does.
+pollster = { version = "0.4", optional = true }

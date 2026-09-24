@@ -5,6 +5,12 @@
 //! native pixel format, in GPU memory, without a trip through system memory, and without
 //! the compositor waiting on the consumer.
 
+/// The screen's frames on Linux, from the stream the portal opened.
+#[cfg(linux_desktop)]
+pub mod pipewire;
+/// The desktop's permission on Linux: its screen, and its input.
+#[cfg(linux_desktop)]
+pub mod portal;
 #[cfg(target_os = "macos")]
 pub mod screencapturekit;
 #[cfg(target_os = "windows")]

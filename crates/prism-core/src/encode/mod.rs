@@ -32,7 +32,7 @@ pub mod nvenc;
 #[cfg(linux_desktop)]
 pub mod openh264;
 /// The screen's path from the compositor to the wire, shared by every host that has one.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 pub mod pump;
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
