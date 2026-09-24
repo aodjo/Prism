@@ -96,9 +96,22 @@ windows-core = "0.62"
 # Mac that has neither. Turned on where the encoder is actually built: CI's Linux job, and a
 # Linux machine with a GPU. See `docs/linux-build.md`.
 vaapi = ["dep:libva"]
+# Everything a Linux desktop needs to watch and be watched: the software H.264 encoder and
+# decoder, the screen through PipeWire, and the portal that grants both the screen and the
+# input. Off by default for the reason `vaapi` is — each of these builds C, or binds a system
+# library through its headers, and a Mac running `pnpm lint:cross` has neither a Linux C
+# toolchain nor the headers. The shell and the stream window turn it on where they are built for
+# Linux. The code behind it is compiled under `cfg(linux_desktop)`; see `build.rs`.
+linux-desktop = ["dep:openh264", "dep:openh264-sys2"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The maintained fork of ChromiumOS's `cros-libva`. The original is pinned to an older libva
 # and does not compile against the 1.23 headers Debian and Ubuntu now ship — a compile error
 # rather than a subtle one, but a wall all the same.
 libva = { version = "0.1.4", optional = true }
+# Cisco's H.264 codec, built from its source into this binary. What every Linux machine can
+# encode and decode with, whatever GPU it has or does not have — a board on a desk, a virtual
+# machine, a laptop whose driver has no VAAPI encoder. The `-sys` crate is named as well for the
+# two constants that change the bitrate of a running encoder, which the wrapper does not expose.
+openh264 = { version = "0.9.8", optional = true }
+openh264-sys2 = { version = "0.9.8", optional = true }

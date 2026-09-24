@@ -28,6 +28,9 @@ pub mod vaapi;
 pub mod mediafoundation;
 #[cfg(target_os = "windows")]
 pub mod nvenc;
+/// Encoding on the processor, for a Linux host.
+#[cfg(linux_desktop)]
+pub mod openh264;
 /// The screen's path from the compositor to the wire, shared by every host that has one.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod pump;
