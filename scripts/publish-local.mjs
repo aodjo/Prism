@@ -38,6 +38,9 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+/** Where cargo writes, which is `target` unless `CARGO_TARGET_DIR` moved it somewhere else. */
+const TARGET = process.env.CARGO_TARGET_DIR || join(ROOT, 'target');
+
 /** Where the account server lives. */
 const SERVER = process.env.PRISM_ACCOUNT_SERVER ?? 'https://accounts.presm.kr';
 
@@ -254,6 +257,63 @@ function hasMsvc() {
 function hasClang() {
   try {
     execFileSync('where.exe', ['clang'], { stdio: 'ignore' });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The libraries a Linux build finds through pkg-config, as pkg-config names them.
+ *
+ * WebKitGTK and the tray library are the shell's; PipeWire is the screen; the rest are what SDL
+ * is built against for the stream window. SDL's build does not fail without a display server's
+ * headers — it builds a window that cannot open on that desktop — so they are checked here, where
+ * a missing one can still be said plainly.
+ */
+const LINUX_LIBRARIES = [
+  'webkit2gtk-4.1',
+  'ayatana-appindicator3-0.1',
+  'libpipewire-0.3',
+  'x11',
+  'wayland-client',
+  'xkbcommon',
+  'egl',
+];
+
+/**
+ * Which of the Linux build's libraries pkg-config cannot find, and whether it can run at all.
+ *
+ * @returns {string[]} The missing ones, or `['pkg-config']` when there is no pkg-config to ask.
+ */
+function missingLinuxLibraries() {
+  try {
+    execFileSync('pkg-config', ['--version'], { stdio: 'ignore' });
+  } catch {
+    return ['pkg-config'];
+  }
+
+  return LINUX_LIBRARIES.filter((library) => {
+    try {
+      execFileSync('pkg-config', ['--exists', library], { stdio: 'ignore' });
+
+      return false;
+    } catch {
+      return true;
+    }
+  });
+}
+
+/**
+ * Whether a program can be started by name.
+ *
+ * @param {string} program - Its name.
+ * @returns {boolean} Whether `which` finds it.
+ */
+function onPath(program) {
+  try {
+    execFileSync('which', [program], { stdio: 'ignore' });
 
     return true;
   } catch {
@@ -560,6 +620,32 @@ if (process.platform === 'win32' && process.arch === 'arm64' && !hasClang()) {
   process.exit(2);
 }
 
+// Everything a Linux build links or compiles against, asked for in one go. Checked before cargo
+// starts rather than left to it, because it fails a library at a time, twenty minutes apart, and
+// SDL's build does not fail at all without a display server's headers: it quietly makes a window
+// that cannot open on that desktop.
+if (process.platform === 'linux') {
+  const missing = missingLinuxLibraries();
+  const tools = ['clang', 'cmake', ...(process.arch === 'x64' ? ['nasm'] : [])].filter(
+    (tool) => !onPath(tool),
+  );
+
+  if (missing.length > 0 || tools.length > 0) {
+    console.error(
+      `This machine is missing what the Linux build needs: ${[...missing, ...tools].join(', ')}.\n\n` +
+        'On Ubuntu or Debian, one command installs all of it:\n\n' +
+        '  sudo apt install build-essential clang cmake nasm pkg-config \\\n' +
+        '    libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev \\\n' +
+        '    libayatana-appindicator3-dev libpipewire-0.3-dev libspa-0.2-dev \\\n' +
+        '    libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \\\n' +
+        '    libxss-dev libxtst-dev libwayland-dev libxkbcommon-dev libdecor-0-dev \\\n' +
+        '    libegl-dev libgl-dev libdrm-dev libgbm-dev libasound2-dev libpulse-dev libudev-dev\n\n' +
+        'docs/linux-build.md says what each is for.',
+    );
+    process.exit(2);
+  }
+}
+
 const token = (await kept()) || (await allowed(`prism · ${target} · ${arch}`));
 
 const numbered = build || (await nextNumber(token));
@@ -576,7 +662,7 @@ run('pnpm', ['package'], {
 });
 
 const version = `1.0.0-local.${numbered}`;
-const made = theOne(join(ROOT, 'target/release/bundle', dir), ends, version);
+const made = theOne(join(TARGET, 'release/bundle', dir), ends, version);
 const signature = readFileSync(`${made}.sig`, 'utf8').trim();
 const body = readFileSync(made);
 
@@ -608,7 +694,7 @@ if (!put.ok) {
 // an installer with nothing behind it would be a download that installs an update nobody can
 // receive.
 if (installer) {
-  const folder = join(ROOT, 'target/release/bundle', installer);
+  const folder = join(TARGET, 'release/bundle', installer);
   const image = readdirSync(folder).find((each) => each.endsWith('.dmg'));
 
   if (image) {

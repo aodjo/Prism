@@ -56,9 +56,11 @@ const shipped = `prism-stream-${triple}${process.platform === 'win32' ? '.exe' :
  * The features the stream process needs to be worth shipping.
  *
  * Without `window` it decodes and counts frames and draws nothing, which is the shape wanted for
- * a measurement run and useless as the half of an application somebody watches through.
+ * a measurement run and useless as the half of an application somebody watches through. On Linux
+ * the window has nothing to draw without `linux-desktop` too, which brings the software decoder —
+ * a separate feature only because it builds C that a Mac checking the Linux target cannot.
  */
-const FEATURES = 'window';
+const FEATURES = process.platform === 'linux' ? 'window,linux-desktop' : 'window';
 
 execFileSync(
   'cargo',
@@ -68,6 +70,10 @@ execFileSync(
 
 rmSync(into, { recursive: true, force: true });
 mkdirSync(into, { recursive: true });
-cpSync(join(root, 'target', 'release', built), join(into, shipped));
+// Where cargo put it, which is `target` unless somebody told cargo otherwise — a build machine
+// that keeps its artefacts off the checkout does, and the copy then looked in an empty folder.
+const target = process.env.CARGO_TARGET_DIR || join(root, 'target');
+
+cpSync(join(target, 'release', built), join(into, shipped));
 
 process.stdout.write(`sidecar: ${join(into, shipped)}\n`);
