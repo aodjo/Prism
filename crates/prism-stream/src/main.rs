@@ -120,7 +120,7 @@ fn serve() -> Outcome {
 }
 
 /// Opens the window and shows the host until the stream ends.
-#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
+#[cfg(windowed)]
 fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(), String> {
     use std::time::Duration;
 
@@ -196,7 +196,7 @@ fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(),
 ///
 /// Said plainly rather than crashing: this binary exists on every platform the workspace builds,
 /// and a platform whose client is not written yet should say so.
-#[cfg(not(all(feature = "window", any(target_os = "macos", target_os = "windows"))))]
+#[cfg(not(windowed))]
 fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(), String> {
     let _ = (start, say, talk);
 
@@ -212,7 +212,7 @@ fn watch(start: &ipc::Start, say: &Reporter, talk: &ipc::Talkback) -> Result<(),
 ///
 /// Only where there is a window to title. A build without one never calls this, and leaving it
 /// unconditional is dead code on every platform whose client is not written yet.
-#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
+#[cfg(windowed)]
 fn titled(label: &str) -> String {
     if label.is_empty() {
         return "Prism".to_owned();
@@ -257,11 +257,7 @@ fn capped(size: u16) -> u32 {
     if size < 65_534 { u32::from(size) } else { 0 }
 }
 
-#[cfg(all(
-    test,
-    feature = "window",
-    any(target_os = "macos", target_os = "windows")
-))]
+#[cfg(all(test, windowed))]
 mod tests {
     use super::*;
 

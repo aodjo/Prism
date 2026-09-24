@@ -35,7 +35,16 @@ default = ["window"]
 # installed, and that costs the machine *building* it a C toolchain and CMake.
 window = ["dep:sdl3", "dep:sdl3-sys"]
 
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+# What the window needs on Linux besides SDL: the software decoder, since that is what every
+# Linux machine can decode with. A separate feature rather than part of `window` because it
+# builds C for the target, and `window` alone still has to build on the machines that check this
+# crate without a Linux C toolchain. The shell turns it on when it builds this for Linux.
+linux-desktop = ["prism-core/linux-desktop"]
+
+# Linux as well: SDL loads X11 or Wayland when the window opens rather than linking either, so the
+# static build runs on whichever of the two a desktop has — and building it needs both sets of
+# headers, which `docs/linux-build.md` lists.
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 sdl3 = { version = "0.18", features = ["build-from-source-static"], optional = true }
 sdl3-sys = { version = "0.6", optional = true }
 

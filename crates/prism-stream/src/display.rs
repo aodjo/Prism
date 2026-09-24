@@ -41,6 +41,9 @@ mod surface;
 #[cfg(target_os = "windows")]
 #[path = "display/d3d11.rs"]
 mod surface;
+#[cfg(target_os = "linux")]
+#[path = "display/sdl.rs"]
+mod surface;
 #[cfg(target_os = "macos")]
 #[path = "display/toolbar.rs"]
 mod toolbar;
