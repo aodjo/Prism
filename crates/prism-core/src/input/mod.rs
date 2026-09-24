@@ -11,6 +11,10 @@
 //! [`Injector`] trait is what they have in common, and [`PlatformInjector`] resolves to
 //! whichever one this build targets, so nothing above this module is written twice.
 
+/// Injecting on Linux, through the desktop portal the screen was granted by.
+#[cfg(linux_desktop)]
+pub mod linux;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 
@@ -245,17 +249,21 @@ pub type PlatformInjector = macos::MacInjector;
 pub type PlatformInjector = windows::WindowsInjector;
 
 /// The injector for the platform this build targets.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(linux_desktop)]
+pub type PlatformInjector = linux::LinuxInjector;
+
+/// The injector for the platform this build targets.
+#[cfg(not(any(target_os = "macos", target_os = "windows", linux_desktop)))]
 pub type PlatformInjector = Unsupported;
 
 /// Stands in for an injector on a platform that has none yet.
 ///
 /// It fails at construction rather than accepting events and discarding them, so a host
 /// started on such a platform says so once at startup instead of looking like it works.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", linux_desktop)))]
 pub struct Unsupported;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", linux_desktop)))]
 impl Injector for Unsupported {
     fn new() -> Result<Self, InputError> {
         Err(InputError::Unsupported)
