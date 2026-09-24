@@ -42,12 +42,22 @@ jobs:
       #
       # This is also the only place they are checked. `pnpm lint:cross` cannot build either on a
       # Mac with no Linux sysroot, so the shell's Linux path has no local check at all.
+      #
+      # The rest is the Linux desktop: PipeWire's headers for the screen, nasm for OpenH264's
+      # assembly on x86-64, and — because SDL is built from source into the stream window — the
+      # headers of every display server and sound system SDL loads at run time. A header missing
+      # here does not fail SDL's build; it quietly builds a window that cannot open on that
+      # desktop, which is why the list is long rather than minimal.
       - name: Install the libraries the Linux build needs
         run: |
           sudo apt-get update
           sudo apt-get install -y libva-dev clang pkg-config \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev \
-            libayatana-appindicator3-dev
+            libayatana-appindicator3-dev \
+            nasm libpipewire-0.3-dev libspa-0.2-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \
+            libxss-dev libxtst-dev libwayland-dev libxkbcommon-dev libdecor-0-dev \
+            libegl-dev libgl-dev libdrm-dev libgbm-dev libasound2-dev libpulse-dev libudev-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -81,6 +91,12 @@ jobs:
       # two Linux runners in the matrix.
       - name: Lint the VAAPI encoder
         run: cargo clippy --package prism-core --features vaapi --all-targets
+
+      # The shell turns the Linux desktop on for itself, so the step above has already linted the
+      # core with it. The stream window is the one crate that leaves it off by default — building
+      # it needs a C toolchain for the target — and this is where it is linted with it on.
+      - name: Lint the Linux stream window
+        run: cargo clippy --package prism-stream --features linux-desktop --all-targets
 
   build:
     name: ${{ matrix.name }}
@@ -141,7 +157,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libva-dev clang pkg-config \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev \
-            libayatana-appindicator3-dev
+            libayatana-appindicator3-dev \
+            nasm libpipewire-0.3-dev libspa-0.2-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \
+            libxss-dev libxtst-dev libwayland-dev libxkbcommon-dev libdecor-0-dev \
+            libegl-dev libgl-dev libdrm-dev libgbm-dev libasound2-dev libpulse-dev libudev-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -164,6 +184,12 @@ jobs:
       - name: Test the VAAPI encoder
         if: startsWith(matrix.name, 'linux')
         run: cargo test --package prism-core --features vaapi
+
+      # The software codec's round trip, the key table and the stream window's own tests. What
+      # needs a desktop — the portal, a PipeWire screen — is marked ignored and not run here.
+      - name: Test the Linux desktop
+        if: startsWith(matrix.name, 'linux')
+        run: cargo test --package prism-core --package prism-stream --features prism-stream/linux-desktop
 
       # Warnings are denied here too, so the code behind this platform's `cfg` is still held to
       # the same bar — compiling the tests is what checks it. Clippy itself runs once, in the
