@@ -430,6 +430,18 @@ pub fn start_sharing(
     remember(&chosen, true)?;
     keep_watch(app, turn);
 
+    // A Linux desktop asks the person at it before it hands over its screen and input, once,
+    // and remembers the answer. Asked now, while somebody has just switched sharing on and is
+    // sitting in front of the question — not the first time somebody connects, when whoever is
+    // at this machine may have walked away and the one watching waits on a dialog nobody sees.
+    // In the background, because the dialog waits on a person and this answers a click.
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(|| {
+        if let Err(error) = prism_core::capture::portal::grant() {
+            eprintln!("sharing: the desktop did not grant its screen: {error}");
+        }
+    });
+
     Ok(snapshot)
 }
 

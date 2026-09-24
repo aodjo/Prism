@@ -254,6 +254,40 @@ pub fn input() -> Option<Arc<Input>> {
 /// Returns [`CaptureError::PermissionDenied`] if they refused or nobody answered, and
 /// [`CaptureError::Start`] if there is no portal to ask or it failed.
 pub fn open() -> Result<Granted, CaptureError> {
+    let _asking = ASKING.lock();
+
+    ask_and_wait()
+}
+
+/// Asks once, and closes again, so that later sessions open without asking.
+///
+/// For the shell to call when this machine is shared, which is the moment somebody is sitting at
+/// it to answer. Does nothing if a token is already kept.
+///
+/// # Errors
+///
+/// Whatever [`open`] would.
+pub fn grant() -> Result<(), CaptureError> {
+    let _asking = ASKING.lock();
+
+    if kept_token().is_some() {
+        return Ok(());
+    }
+
+    drop(ask_and_wait()?);
+
+    Ok(())
+}
+
+/// Held by whoever is asking the portal, so that two askers do not raise two dialogs.
+///
+/// Sharing being switched on asks in the background; somebody connecting a moment later asks
+/// again to open the session. Without this the second would find no token yet and ask the person
+/// at the machine a second time — and whichever answer came last would be the token kept.
+static ASKING: Mutex<()> = Mutex::new(());
+
+/// Opens a session, waiting for an answer if the portal asks for one.
+fn ask_and_wait() -> Result<Granted, CaptureError> {
     let (answer, answered) = mpsc::channel();
 
     // On a thread of its own so that a dialog nobody answers is a thread left waiting rather
@@ -281,24 +315,6 @@ pub fn open() -> Result<Granted, CaptureError> {
     Ok(granted)
 }
 
-/// Asks once, and closes again, so that later sessions open without asking.
-///
-/// For the shell to call when this machine is shared, which is the moment somebody is sitting at
-/// it to answer. Does nothing if a token is already kept.
-///
-/// # Errors
-///
-/// Whatever [`open`] would.
-pub fn grant() -> Result<(), CaptureError> {
-    if kept_token().is_some() {
-        return Ok(());
-    }
-
-    drop(open()?);
-
-    Ok(())
-}
-
 /// Opens the session: remote desktop with the screen attached where the desktop has both, the
 /// screen alone where it does not.
 async fn ask() -> Result<Granted, CaptureError> {
@@ -308,9 +324,10 @@ async fn ask() -> Result<Granted, CaptureError> {
     // Embedded where the desktop can, so the pointer is in the picture. This end has no other
     // way to say where it is: a Wayland client cannot read the pointer's position, so the
     // position the other platforms send beside the picture has nothing to be read from here.
+    // Not metadata: that puts the position in the stream beside each frame, and nothing here
+    // reads it yet, so asking for it would be asking for a picture with no pointer at all.
     let cursor = match screencast.available_cursor_modes().await {
         Ok(modes) if modes.contains(CursorMode::Embedded) => CursorMode::Embedded,
-        Ok(modes) if modes.contains(CursorMode::Metadata) => CursorMode::Metadata,
         _ => CursorMode::Hidden,
     };
 

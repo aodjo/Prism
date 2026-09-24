@@ -29,6 +29,13 @@ tauri-plugin-updater = "2.11.0"
 # no gzip because every body in this API is a few hundred bytes of JSON.
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 
+# What lets a Linux machine watch and be watched at all: the software codec, the screen through
+# PipeWire and the input through the desktop portal. Only here, where the shell is built for Linux,
+# because each builds C or binds a system library that a Mac checking the Linux target has neither
+# a toolchain nor headers for.
+[target.'cfg(target_os = "linux")'.dependencies]
+prism-core = { workspace = true, features = ["linux-desktop"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6.2"
