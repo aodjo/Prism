@@ -118,6 +118,11 @@ SDL을 소스에서 빌드하는데, MSVC용 C 툴체인이 없는 맥에서는 
 CI의 `windows-latest` 잡이 `cargo clippy --workspace --all-targets`로 네이티브 검사하며,
 그 코드를 건드렸다면 푸시 전에 실제 윈도우 머신에서 빌드해 보는 편이 빠르다.
 
+리눅스 타깃에서도 같은 이유로 `prism-stream`과 `prism-cli`를 제외한다. 게다가 리눅스 데스크톱 코드
+(`cfg(linux_desktop)` — OpenH264·PipeWire·포털·SDL 창)는 `linux-desktop` 기능 뒤에 있어서 맥의
+`lint:cross`로는 애초에 컴파일되지 않는다. 이 코드는 CI 리눅스 잡과, 맥에서 네이티브로 도는
+`linux/arm64` Docker 컨테이너로 검사한다. 방법은 `docs/linux-build.md`에 있다.
+
 최초 1회 `rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-msvc` 필요.
 
 ## 핫패스 금지 사항
