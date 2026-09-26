@@ -90,6 +90,9 @@ struct Device {
     /// it. Every machine is offered then, as every machine was before any server said.
     #[serde(default)]
     shared: Option<bool>,
+    /// Which operating system it runs, or empty from a server or build that never said.
+    #[serde(default)]
+    platform: String,
 }
 
 /// The salt to hash a password with.
@@ -192,6 +195,8 @@ struct DeviceBody {
     public_key: String,
     /// What to call it.
     label: String,
+    /// Which operating system it runs, so the others can mark it with the right one.
+    platform: String,
 }
 
 /// The machines on an account.
@@ -225,6 +230,8 @@ pub struct DeviceView {
     pub is_this_machine: bool,
     /// Whether it is shared right now, which is what makes it somewhere to connect to.
     pub shared: bool,
+    /// Which operating system it runs: `macos`, `windows`, `linux`, or empty when it never said.
+    pub platform: String,
 }
 
 /// What is known about the account right now.
@@ -482,6 +489,7 @@ impl Client {
         let body = DeviceBody {
             public_key: public_key.to_owned(),
             label: label.to_owned(),
+            platform: std::env::consts::OS.to_owned(),
         };
 
         let reply = self.send(Verb::Post, "/v1/devices", Some(&body))?;
@@ -1219,6 +1227,7 @@ fn views(devices: &[Device], mine: &str) -> Vec<DeviceView> {
             label: device.label.clone(),
             is_this_machine: device.public_key == mine,
             shared: device.shared.unwrap_or(true),
+            platform: device.platform.clone(),
         })
         .collect()
 }
@@ -1444,11 +1453,149 @@ mod store {
 
 /// The operating system's own secret store.
 ///
+/// Credential Manager, which is to Windows what the keychain is to macOS: an item sealed to the
+/// person signed in to this machine, which another account on it cannot read. Kept to this
+/// machine rather than allowed to roam, because a session belongs to the machine it was opened
+/// on — one that followed somebody to another would sign them in where they never did.
+///
+/// Until this was written nothing was kept here at all, and every launch on Windows began at
+/// setup again as though nobody had ever signed in.
+#[cfg(target_os = "windows")]
+mod store {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    /// What the item is filed under, which is also the name Credential Manager lists it by.
+    const TARGET: &str = "Prism/session";
+
+    /// `CRED_TYPE_GENERIC`: an item that means nothing to Windows beyond being kept.
+    const GENERIC: u32 = 1;
+
+    /// `CRED_PERSIST_LOCAL_MACHINE`: kept across restarts, for this person, on this machine only.
+    const THIS_MACHINE: u32 = 2;
+
+    /// `CREDENTIALW`, as Credential Manager lays it out.
+    #[repr(C)]
+    struct Credential {
+        flags: u32,
+        kind: u32,
+        target_name: *mut u16,
+        comment: *mut u16,
+        last_written: [u32; 2],
+        blob_size: u32,
+        blob: *mut u8,
+        persist: u32,
+        attribute_count: u32,
+        attributes: *mut c_void,
+        target_alias: *mut u16,
+        user_name: *mut u16,
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        /// Keeps a credential, replacing one already filed under the same name and kind.
+        fn CredWriteW(credential: *const Credential, flags: u32) -> i32;
+
+        /// Finds a credential, writing out one the caller gives back with [`CredFree`].
+        fn CredReadW(
+            target_name: *const u16,
+            kind: u32,
+            flags: u32,
+            credential: *mut *mut Credential,
+        ) -> i32;
+
+        /// Deletes a credential.
+        fn CredDeleteW(target_name: *const u16, kind: u32, flags: u32) -> i32;
+
+        /// Releases what a read wrote out.
+        fn CredFree(buffer: *mut c_void);
+    }
+
+    /// A name as Windows takes one: UTF-16, ended by a zero.
+    fn wide(name: &str) -> Vec<u16> {
+        name.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Reads the kept secret, or nothing when there is none.
+    pub fn read() -> Option<Vec<u8>> {
+        let target = wide(TARGET);
+        let mut found: *mut Credential = ptr::null_mut();
+
+        // SAFETY: `target` is zero-terminated and borrowed for the length of the call, and
+        // `found` is a live local this writes once.
+        let read = unsafe { CredReadW(target.as_ptr(), GENERIC, 0, &raw mut found) };
+
+        if read == 0 || found.is_null() {
+            return None;
+        }
+
+        // SAFETY: the call reported success, so `found` points at a credential it allocated,
+        // whose blob — when it has one — is `blob_size` bytes long. Both stay valid until they
+        // are handed back below.
+        let secret = unsafe {
+            let credential = &*found;
+
+            if credential.blob.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(credential.blob, credential.blob_size as usize).to_vec()
+            }
+        };
+
+        // SAFETY: `found` is what the read allocated and nothing else has freed it.
+        unsafe { CredFree(found.cast::<c_void>()) };
+
+        Some(secret)
+    }
+
+    /// Keeps a secret, replacing whatever was under the same name.
+    ///
+    /// Written straight over rather than deleted first: unlike the keychain, Credential Manager
+    /// takes a second write under one name as a replacement.
+    pub fn write(secret: &[u8]) {
+        let Ok(blob_size) = u32::try_from(secret.len()) else {
+            return;
+        };
+
+        let target = wide(TARGET);
+
+        let credential = Credential {
+            flags: 0,
+            kind: GENERIC,
+            target_name: target.as_ptr().cast_mut(),
+            comment: ptr::null_mut(),
+            last_written: [0; 2],
+            blob_size,
+            blob: secret.as_ptr().cast_mut(),
+            persist: THIS_MACHINE,
+            attribute_count: 0,
+            attributes: ptr::null_mut(),
+            target_alias: ptr::null_mut(),
+            user_name: ptr::null_mut(),
+        };
+
+        // SAFETY: the credential, the name and the secret it points at are all live for the
+        // length of the call, which copies what it keeps. The two pointers are mutable only
+        // because the structure declares them so; nothing is written through either.
+        unsafe { CredWriteW(&raw const credential, 0) };
+    }
+
+    /// Removes the kept secret, if there is one.
+    pub fn forget() {
+        let target = wide(TARGET);
+
+        // SAFETY: `target` is zero-terminated and borrowed for the length of the call.
+        unsafe { CredDeleteW(target.as_ptr(), GENERIC, 0) };
+    }
+}
+
+/// The operating system's own secret store.
+///
 /// There is none reached from here on this platform yet, so nothing is kept and every launch
 /// asks for a password again. That is deliberate rather than unfinished in one respect: the
 /// alternative is a plain file, which would make the machine with no keyring the one machine
 /// where a credential sits in readable text, and that is exactly backwards.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod store {
     /// Reads nothing, because nothing was kept.
     pub fn read() -> Option<Vec<u8>> {
@@ -1710,6 +1857,7 @@ mod tests {
             public_key: public_key.to_owned(),
             label: label.to_owned(),
             shared: None,
+            platform: String::new(),
         }
     }
 

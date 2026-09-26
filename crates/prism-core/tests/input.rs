@@ -43,28 +43,115 @@ mod macos {
     /// How many times to try before calling it a failure.
     const ATTEMPTS: u32 = 5;
 
+    #[test]
+    fn a_turn_never_runs_out_of_screen() {
+        // What an aiming session does for a whole minute: motion in one direction, further
+        // than any screen is wide. Held against an edge the pointer would stop, and the player
+        // would stop turning; sent back to the middle it goes on taking every event.
+        let mut injector = match MacInjector::new() {
+            Ok(injector) => injector,
+            Err(InputError::PermissionDenied) => {
+                eprintln!("skipping: this process has no Accessibility permission");
+                return;
+            }
+            Err(err) => panic!("could not create an injector: {err}"),
+        };
+
+        let mut moved = 0.0_f64;
+        let mut last = injector.position().0;
+
+        for _ in 0..400 {
+            injector
+                .inject(InputEvent::MouseMove {
+                    dx: 40,
+                    dy: 0,
+                    caged: true,
+                })
+                .expect("a plain move is always injectable");
+
+            let now = injector.position().0;
+            // Every event moves the pointer, either forty points along or back to the middle.
+            // What must never happen is an event that moves it nowhere.
+            assert!(
+                (now - last).abs() > 0.5,
+                "the pointer stopped at {now} and stayed there"
+            );
+            moved += 40.0;
+            last = now;
+        }
+
+        assert!(moved > 0.0);
+    }
+
+    #[test]
+    fn an_uncaged_pointer_still_stops_at_the_edge() {
+        // Which is what a mouse on a desk does, and what anything that is not a game wants: a
+        // pointer that jumped to the middle of the screen on reaching a corner would be one
+        // nobody could put anywhere.
+        let mut injector = match MacInjector::new() {
+            Ok(injector) => injector,
+            Err(InputError::PermissionDenied) => {
+                eprintln!("skipping: this process has no Accessibility permission");
+                return;
+            }
+            Err(err) => panic!("could not create an injector: {err}"),
+        };
+
+        for _ in 0..3 {
+            injector
+                .inject(InputEvent::MouseMove {
+                    dx: i16::MIN,
+                    dy: i16::MIN,
+                    caged: false,
+                })
+                .expect("a plain move is always injectable");
+        }
+
+        let corner = injector.position();
+
+        injector
+            .inject(InputEvent::MouseMove {
+                dx: -400,
+                dy: -400,
+                caged: false,
+            })
+            .expect("a plain move is always injectable");
+
+        assert_eq!(
+            injector.position(),
+            corner,
+            "pushing past the corner moved the pointer somewhere"
+        );
+    }
+
     /// Parks the pointer, moves it by a known amount, and checks it went there.
     ///
     /// Returns what went wrong rather than panicking, so the caller can try again: anything
     /// else touching the pointer at the wrong moment fails this once and not twice.
     fn attempt(injector: &mut MacInjector) -> Result<(), String> {
-        // Movement is clamped to the display, so a run that started wherever the pointer
-        // happened to be would fail whenever it happened to be near an edge.
+        // Caged, so a move big enough to reach the margin puts the pointer in the middle of the
+        // screen — which is where a run has room to move in either direction. Started wherever
+        // the pointer happened to be, this would run into an edge partway through and fail.
         injector
             .inject(InputEvent::MouseMove {
                 dx: i16::MIN,
                 dy: i16::MIN,
+                caged: true,
             })
             .expect("a plain move is always injectable");
 
         if !wait_until_landed(injector) {
-            return Err("the pointer never reached the corner it was parked at".into());
+            return Err("the pointer never reached the middle it was parked at".into());
         }
 
         let (start_x, start_y) = injector.position();
 
         injector
-            .inject(InputEvent::MouseMove { dx: 60, dy: 40 })
+            .inject(InputEvent::MouseMove {
+                dx: 60,
+                dy: 40,
+                caged: false,
+            })
             .expect("a plain move is always injectable");
 
         if !wait_until_landed(injector) {
@@ -80,7 +167,11 @@ mod macos {
         }
 
         injector
-            .inject(InputEvent::MouseMove { dx: -60, dy: -40 })
+            .inject(InputEvent::MouseMove {
+                dx: -60,
+                dy: -40,
+                caged: false,
+            })
             .expect("putting the pointer back is the same operation");
 
         Ok(())
@@ -257,6 +348,7 @@ mod windows {
         match injector.inject(InputEvent::MouseMove {
             dx: i16::MIN,
             dy: i16::MIN,
+            caged: false,
         }) {
             Ok(()) => {}
             Err(err @ InputError::Refused { .. }) => {
@@ -270,7 +362,11 @@ mod windows {
             panic!("Windows would not say where the pointer is");
         };
 
-        match injector.inject(InputEvent::MouseMove { dx: 60, dy: 40 }) {
+        match injector.inject(InputEvent::MouseMove {
+            dx: 60,
+            dy: 40,
+            caged: false,
+        }) {
             Ok(()) => {}
             Err(InputError::Inject { .. }) => {
                 eprintln!(

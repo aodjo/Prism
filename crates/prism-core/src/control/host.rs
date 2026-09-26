@@ -497,7 +497,11 @@ fn offer(config: &HostConfig, keys: &HostKeys, shared: &Arc<Shared>, stop: &Arc<
             shared.set_phase(Phase::Waiting);
             return;
         }
+        // Said on standard error like the end of a session is, because until it was, a machine
+        // that a client reached and then lost before the session opened left nothing behind:
+        // sharing went off and came back on, and the log held no line between the two.
         Err(err) => {
+            eprintln!("host: {} no session opened because {err}", seconds_now());
             shared.fail(err);
             return;
         }
@@ -1007,7 +1011,7 @@ pub fn spawn_audio(
 ///
 /// A session opened without negotiating — which the measurement paths do — falls back to
 /// H.264, the one codec every machine here can do.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 fn agreed_codec(sender: &SliceSender) -> crate::net::negotiate::Codec {
     sender
         .agreed()
@@ -1018,7 +1022,7 @@ fn agreed_codec(sender: &SliceSender) -> crate::net::negotiate::Codec {
 ///
 /// Only compiled where there is a capture loop to call it. A helper left behind a platform
 /// that has no host is dead code on every other one, which the cross-target lint refuses.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 fn note(shared: &Shared, sender: &SliceSender, frames: u64, started: Instant) {
     shared.frames.store(frames, Ordering::Relaxed);
     shared.packets.store(sender.packets(), Ordering::Relaxed);
@@ -1032,7 +1036,7 @@ fn note(shared: &Shared, sender: &SliceSender, frames: u64, started: Instant) {
 }
 
 /// Returns whether the session should keep going.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 fn keep_going(config: &HostConfig, stop: &AtomicBool, frames: u64) -> bool {
     if stop.load(Ordering::Relaxed) {
         return false;
@@ -1048,7 +1052,7 @@ fn keep_going(config: &HostConfig, stop: &AtomicBool, frames: u64) -> bool {
 /// Not the same thing as a still screen, which produces nothing and is sent anyway. This is a
 /// capture that never started: the stream is running, the compositor is answering, and no
 /// frame has ever come out of it.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 const CAPTURE_PATIENCE: Duration = Duration::from_secs(10);
 
 /// Captures, encodes and sends until the session ends.
@@ -1058,7 +1062,7 @@ const CAPTURE_PATIENCE: Duration = Duration::from_secs(10);
 /// grown across the repository and each had fallen behind a different fix, with nothing to say
 /// so; what differs between platforms is how a frame is captured and encoded, and that is the
 /// only thing left with two implementations.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 fn stream(
     config: &HostConfig,
     mut sender: SliceSender,
@@ -1136,7 +1140,7 @@ fn stream(
 ///
 /// Linux hosts arrive with PipeWire and VAAPI. Until then this fails immediately rather than
 /// starting a session that would never produce a frame.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", linux_desktop)))]
 fn stream(
     _config: &HostConfig,
     _sender: SliceSender,

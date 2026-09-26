@@ -59,6 +59,9 @@ pub fn stage(app: &AppHandle, label: &str, page: &str) -> tauri::Result<WebviewW
         .background_color(BASE);
 
     let window = overlaid(window).build()?;
+
+    inspect(&window);
+
     let hiding = window.clone();
 
     // Closing the window closes the window. This machine is shareable for exactly as long as
@@ -99,6 +102,52 @@ fn overlaid<R: tauri::Runtime, M: tauri::Manager<R>>(
     builder
 }
 
+/// Opens the inspector on a window, where this build is one meant to be looked into.
+///
+/// A window that fails to draw is a black rectangle and nothing else. Whatever went wrong is a
+/// sentence the web view already has and nobody can reach — there is no console in a packaged
+/// application, and the shell's own log says nothing about a page: the process it belongs to is
+/// running perfectly well.
+///
+/// Only off the released line, and only when asked for by name. A person running the version
+/// that ships should not find developer tools in their remote desktop, and an inspector that
+/// opened by itself on every launch would be a window in front of the one somebody wanted.
+///
+/// Set `PRISM_INSPECT` to anything and start a build from `development` or `local`.
+pub fn inspect(window: &WebviewWindow) {
+    if std::env::var_os("PRISM_INSPECT").is_none() || crate::updates::released() {
+        return;
+    }
+
+    window.open_devtools();
+}
+
+/// Stops macOS merging these windows into tabs.
+///
+/// It does that on its own to any application that has not said otherwise, whenever somebody has
+/// set the system to prefer tabs — and none of these windows is a document. A settings panel
+/// tabbed behind a home screen is two unrelated things sharing one frame, with the panel's own
+/// size thrown away.
+///
+/// It also breaks the title bar these windows draw. The bar of tabs belongs at the top of the
+/// window, which is exactly where the page puts its own header, so the tabs end up underneath
+/// it: unreadable, and impossible to take hold of.
+///
+/// # Panics
+///
+/// Never in practice. This runs on the main thread, where a window is built.
+pub fn no_tabbing() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSWindow;
+
+        if let Some(marker) = MainThreadMarker::new() {
+            NSWindow::setAllowsAutomaticWindowTabbing(false, marker);
+        }
+    }
+}
+
 /// Shows the home window and closes setup, which is what finishing setup means.
 ///
 /// # Errors
@@ -106,12 +155,41 @@ fn overlaid<R: tauri::Runtime, M: tauri::Manager<R>>(
 /// Fails if the home window cannot be built.
 pub fn open_home(app: &AppHandle) -> tauri::Result<()> {
     stage(app, "home", "home.html")?;
-
-    if let Some(setup) = app.get_webview_window("setup") {
-        setup.destroy()?;
-    }
+    retire(app, "setup");
 
     Ok(())
+}
+
+/// Puts a window away, once the one replacing it is standing on its own.
+///
+/// Hidden now and destroyed later, and the later matters. A web view is not finished being made
+/// when the call that makes it returns — on Windows the browser side of it is still coming up —
+/// and tearing another one down in that moment takes the new one with it. What was left was a
+/// window with no web view inside it at all: black, and deaf to everything, because there was
+/// nothing in there to be deaf with.
+///
+/// Hiding is immediate, so what somebody sees is the swap they asked for. The destruction waits
+/// for [`settled`] to say the new window has finished loading its page.
+fn retire(app: &AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.hide();
+    }
+}
+
+/// Destroys whatever was hidden by a swap, now that the window replacing it has loaded.
+///
+/// Called from the page-load event, which is the only signal that says the new web view exists
+/// rather than merely having been asked for.
+pub fn settled(app: &AppHandle, loaded: &str) {
+    let retired = match loaded {
+        "home" => "setup",
+        "setup" => "home",
+        _ => return,
+    };
+
+    if let Some(window) = app.get_webview_window(retired) {
+        let _ = window.destroy();
+    }
 }
 
 /// Shows setup and closes the home window.
@@ -126,20 +204,24 @@ pub fn open_home(app: &AppHandle) -> tauri::Result<()> {
 /// Fails if the setup window cannot be built.
 pub fn open_setup(app: &AppHandle) -> tauri::Result<()> {
     stage(app, "setup", "setup.html")?;
-
-    if let Some(home) = app.get_webview_window("home") {
-        home.destroy()?;
-    }
+    retire(app, "home");
 
     Ok(())
 }
 
 /// Opens the settings panel, or raises it if it is already open.
 ///
+/// Off the main thread, as every command here that builds a window has to be. A plain command
+/// runs on the main thread, and on Windows a web view cannot finish being made while that
+/// thread is held: the frame appears, the inside never does, and what is left is a black
+/// rectangle that cannot even be closed — it has no page to draw and no loop left to hear the
+/// close. Tauri's own documentation says as much about building a window in a synchronous
+/// command. macOS makes its web views differently and never showed it.
+///
 /// # Errors
 ///
 /// Fails if the window cannot be built.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {
     if let Some(open) = app.get_webview_window("settings") {
         return open.set_focus().map_err(|error| error.to_string());
@@ -156,7 +238,7 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
 
     overlaid(panel)
         .build()
-        .map(|_| ())
+        .map(|window| inspect(&window))
         .map_err(|error| error.to_string())
 }
 
@@ -167,10 +249,12 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
 /// sheet covering the thing they are watching. It outlives a session too — what arrived is worth
 /// finding after the stream that carried it has closed.
 ///
+/// Off the main thread, for the reason [`open_settings`] gives.
+///
 /// # Errors
 ///
 /// Fails if the window cannot be built.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_transfers(app: AppHandle) -> Result<(), String> {
     if let Some(open) = app.get_webview_window("transfers") {
         return open.set_focus().map_err(|error| error.to_string());
@@ -185,7 +269,7 @@ pub fn open_transfers(app: AppHandle) -> Result<(), String> {
 
     overlaid(window)
         .build()
-        .map(|_| ())
+        .map(|window| inspect(&window))
         .map_err(|error| error.to_string())
 }
 
@@ -212,6 +296,58 @@ pub fn fit(height: f64, app: AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Does what a double-click on a title bar does here.
+///
+/// The page has to ask, because the title bar is the page. These windows hide the system's own
+/// and draw their header in HTML, and an element the webview is drawing swallows the gesture
+/// before the window server ever sees it — which is why the one habit everybody has for a title
+/// bar stopped working.
+///
+/// What it does is a preference rather than a constant: macOS reads `AppleActionOnDoubleClick`,
+/// and the same gesture zooms on one machine, minimises on another and does nothing on a third.
+/// Guessing at zoom would be right most of the time and wrong in exactly the way that makes
+/// somebody think the application is broken.
+///
+/// # Errors
+///
+/// Fails if the window cannot be resized or hidden.
+#[tauri::command]
+pub fn title_bar_double_click(window: WebviewWindow) -> Result<(), String> {
+    match double_click_action().as_str() {
+        "Minimize" => window.minimize().map_err(|error| error.to_string()),
+        "None" => Ok(()),
+        // Zoom, and anything a later macOS adds. Toggling is what zoom does: a window that has
+        // been zoomed goes back to the size it was.
+        _ => {
+            let zoomed = window.is_maximized().map_err(|error| error.to_string())?;
+
+            if zoomed {
+                window.unmaximize().map_err(|error| error.to_string())
+            } else {
+                window.maximize().map_err(|error| error.to_string())
+            }
+        }
+    }
+}
+
+/// What this machine says a title-bar double-click is for.
+///
+/// `Maximize` when nothing has been set, which is what macOS itself falls back to.
+#[cfg(target_os = "macos")]
+fn double_click_action() -> String {
+    use objc2_foundation::{NSString, NSUserDefaults};
+
+    NSUserDefaults::standardUserDefaults()
+        .stringForKey(&NSString::from_str("AppleActionOnDoubleClick"))
+        .map_or_else(|| "Maximize".to_owned(), |action| action.to_string())
+}
+
+/// Zoom, on a platform with no such preference to read.
+#[cfg(not(target_os = "macos"))]
+fn double_click_action() -> String {
+    "Maximize".to_owned()
+}
+
 /// Closes setup and opens the home window.
 ///
 /// Writes down that setup has been reached the end of, which is what the next launch reads. The
@@ -219,11 +355,16 @@ pub fn fit(height: f64, app: AppHandle) -> Result<(), String> {
 /// application starts again — so without this the restart in the middle of setup looks like an
 /// ordinary launch and lands on the home window instead of back where somebody was.
 ///
+/// Off the main thread, for the reason [`open_settings`] gives — and this is the one where it
+/// was found. Every Windows machine that finished setup was handed a black window it could not
+/// close, because the window it had just asked for was being built by the thread that had to
+/// be free for the building to finish.
+///
 /// # Errors
 ///
 /// Fails if the settings lock was poisoned, if they cannot be written, or if the home window
 /// cannot be built.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn finish_setup(app: AppHandle, held: tauri::State<'_, crate::Held>) -> Result<(), String> {
     {
         let mut settings = held

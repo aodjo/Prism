@@ -162,7 +162,8 @@ describe('input packets', () => {
       const pressed = (flags & 1) !== 0;
 
       let event;
-      if (kind === InputKind.MouseMove) event = { kind: InputKind.MouseMove as const, dx: x, dy: y };
+      if (kind === InputKind.MouseMove)
+        event = { kind: InputKind.MouseMove as const, dx: x, dy: y, caged: pressed };
       else if (kind === InputKind.MouseScroll)
         event = { kind: InputKind.MouseScroll as const, dx: x, dy: y };
       else if (kind === InputKind.MouseButton)
@@ -180,7 +181,10 @@ describe('input packets', () => {
   }
 
   it('refuses a button index it does not know', () => {
-    const bytes = hexToBytes(vectors.inputPackets[1]!.hex);
+    // Found by name rather than by position: a vector added above this one would otherwise
+    // turn this into a test of whatever happened to land at that index.
+    const button = vectors.inputPackets.find((one) => one.name === 'mouse-button-left-down');
+    const bytes = hexToBytes(button!.hex);
     bytes[10] = 9;
     expect(() => decodeInputPacket(bytes)).toThrow(PrismProtocolError);
   });

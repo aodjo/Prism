@@ -354,6 +354,7 @@ impl Held {
     pub fn start(
         &self,
         host: &str,
+        label: &str,
         address: &str,
         settings: &Settings,
     ) -> Result<Snapshot, String> {
@@ -387,7 +388,7 @@ impl Held {
         // pipe is then kept rather than dropped: what follows it are the things a person asks
         // for while the stream runs, and files were only ever offered inside the stream window
         // because this end had nothing left to ask through.
-        let asked = ipc::write(&mut stdin, &wanted(host, address, settings));
+        let asked = ipc::write(&mut stdin, &wanted(host, label, address, settings));
 
         if let Err(error) = asked {
             let _ = child.kill();
@@ -697,9 +698,10 @@ fn conclude(shared: &Arc<Shared>, run: u64) {
 ///
 /// Every field here is a decision the stream would otherwise have to guess at: which machine to
 /// trust, how to reach it, and whether this end is watching or working.
-fn wanted(host: &str, address: &str, settings: &Settings) -> ipc::Start {
+fn wanted(host: &str, label: &str, address: &str, settings: &Settings) -> ipc::Start {
     ipc::Start {
         host: host.to_owned(),
+        label: label.to_owned(),
         // An address given by hand is one somebody has arranged to be reachable. Without one
         // the rendezvous server is asked, which is what a host behind a router requires.
         address: (!address.is_empty()).then(|| address.to_owned()),
@@ -792,6 +794,7 @@ pub fn stream_connect(
     address: String,
     stream: State<'_, Held>,
     settings: State<'_, Chosen>,
+    account: State<'_, crate::account::Held>,
 ) -> Result<Snapshot, String> {
     let chosen = settings
         .0
@@ -806,7 +809,11 @@ pub fn stream_connect(
         given => given,
     };
 
-    stream.start(&host, direct, &chosen)
+    // What the account calls it, which is what the stream window is titled after. Empty for a
+    // host the account does not list, and then the window keeps the application's own name.
+    let label = crate::account::label_of(&account, &host).unwrap_or_default();
+
+    stream.start(&host, &label, direct, &chosen)
 }
 
 /// Ends the stream, if one is running.
@@ -887,11 +894,12 @@ mod tests {
     fn an_address_is_used_instead_of_the_rendezvous_and_not_beside_it() {
         // Both would be a stream that asks a server where a machine is after being told.
         let settings = Settings::default();
-        let asked = wanted("ab12", "10.0.0.4:47200", &settings);
+        let asked = wanted("ab12", "작업실 맥", "10.0.0.4:47200", &settings);
 
         assert_eq!(asked.address.as_deref(), Some("10.0.0.4:47200"));
         assert_eq!(asked.rendezvous, None);
         assert_eq!(asked.host, "ab12");
+        assert_eq!(asked.label, "작업실 맥");
         assert!(asked.control);
     }
 
@@ -903,7 +911,7 @@ mod tests {
             rendezvous: "rv.presm.kr:47300".to_owned(),
             ..Settings::default()
         };
-        let asked = wanted("ab12", "", &settings);
+        let asked = wanted("ab12", "", "", &settings);
 
         assert_eq!(asked.address, None);
         assert_eq!(asked.rendezvous.as_deref(), Some("rv.presm.kr:47300"));
@@ -920,7 +928,7 @@ mod tests {
             ..Settings::default()
         };
 
-        assert_eq!(wanted("ab12", "", &settings).rendezvous, None);
+        assert_eq!(wanted("ab12", "", "", &settings).rendezvous, None);
     }
 
     #[test]

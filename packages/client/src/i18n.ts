@@ -106,6 +106,7 @@ const KO: Record<string, string> = {
   Opening: '여는 중',
   'Sharing failed': '공유하지 못했습니다',
   '{name} is watching this machine': '{name}에서 이 컴퓨터를 보는 중',
+  '{name} is controlling this machine': '{name}에서 이 컴퓨터를 제어하는 중입니다',
   Disconnect: '연결 끊기',
   'Turn on sharing on the machine you want to watch, and it turns up here.':
     '보고 싶은 컴퓨터에서 공유를 켜면 여기에 나타납니다.',
@@ -168,6 +169,67 @@ const KO: Record<string, string> = {
   'Frame rate': '프레임 속도',
   Bitrate: '비트레이트',
   'Listen on': '대기 주소',
+
+  /* ── The board ─────────────────────────────────────────────────────────── */
+  'Watching now': '보는 중',
+  Off: '꺼짐',
+  'Last seen {when}': '마지막 접속 {when}',
+  'Watch {name}': '{name} 보기',
+  '{count} machines': '{count}대',
+  'ms round trip': 'ms 왕복',
+  Arriving: '받는 중',
+  Frames: '프레임',
+  Connection: '연결 상태',
+  Bandwidth: '대역폭',
+  'Round trip': '왕복',
+  State: '상태',
+  Screen: '화면',
+  Started: '시작',
+  Length: '길이',
+
+  /* What each kind of block is, where somebody picks one. */
+  'One machine': '기기 한 대',
+  'A tile of its own, with its picture behind it': '큰 타일 하나로 보여줍니다',
+  'Every machine': '기기 목록',
+  'All of them, a line each': '가진 기기를 한 줄씩 늘어놓습니다',
+  'This computer': '이 컴퓨터',
+  'Whether it is shared, and what it sends': '공유 상태와 보내는 화면을 보여줍니다',
+  'What was watched, when, and for how long': '언제 무엇을 얼마나 봤는지 적습니다',
+  'Round trip, frame rate and what is arriving': '왕복 시간과 받는 양을 보여줍니다',
+  'All settings': '설정 전체',
+
+  /* ── Arranging it ──────────────────────────────────────────────────────── */
+  'Arrange this screen': '화면 편집',
+  'Arrange this screen, then add the blocks you want on it.':
+    '화면 편집을 누르고 원하는 블록을 올리세요.',
+  'Nothing on this screen yet': '아직 이 화면에 아무것도 없습니다',
+  'Drag a block to move it, and its corner to resize it.':
+    '블록을 끌어 옮기고, 모서리를 끌어 크기를 바꿉니다',
+  'Default layout': '기본 배치로',
+  Undo: '되돌리기',
+  Edit: '편집',
+  'Edit block': '블록 수정',
+  'What it shows': '보여줄 정보',
+  Size: '크기',
+  'Remove this block': '이 블록 지우기',
+  'Add a block': '블록 추가',
+  'It goes wherever there is room for it.': '자리가 있는 곳에 놓입니다.',
+  'Which machine': '어느 기기',
+  Add: '추가',
+  Cancel: '취소',
+
+  /* ── A block's colour ──────────────────────────────────────────────────── */
+  Accent: '강조색',
+  Flat: '단색',
+  Gradient: '그라데이션',
+  'Add point': '점 추가',
+  'Remove point': '점 지우기',
+  'Point {n}': '{n}번째 점',
+  Colour: '색',
+
+  /* ── While a session opens ─────────────────────────────────────────────── */
+  'If this sits here, check that sharing is on over there.':
+    '오래 걸리면 그 컴퓨터에서 공유가 켜져 있는지 확인하세요',
 };
 
 /** The dictionaries, by the language they are. */

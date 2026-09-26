@@ -91,6 +91,62 @@ pub struct Settings {
     /// machine was no longer on.
     #[serde(default)]
     pub setup_finished: bool,
+    /// The blocks on the home board, in the arrangement somebody left them.
+    ///
+    /// Empty until somebody moves something, and empty is what a fresh machine wants: the window
+    /// lays out a default board from whatever machines the account has, which is a better first
+    /// screen than one saved before those machines existed. Once anything here is set it is
+    /// taken as the whole arrangement, so a block missing from this list is a block that was
+    /// deliberately removed rather than one that has yet to be placed.
+    #[serde(default)]
+    pub board: Vec<Block>,
+}
+
+/// One block on the home board.
+///
+/// Positions and sizes are in holes rather than pixels. The board is a lattice and a block can
+/// only ever sit on it, so storing pixels would be storing a number that has to be divided back
+/// on every read and would go wrong the first time the lattice changed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Block {
+    /// What tells this block from the others on the board.
+    pub id: String,
+    /// What it draws: `machine`, `machines`, `mine`, `sessions`, `terms` or `link`.
+    pub kind: String,
+    /// Which machine it is about, as hex, for the kinds that are about one.
+    pub host: String,
+    /// How many holes from the left edge of the board.
+    pub x: u32,
+    /// How many holes from the top.
+    pub y: u32,
+    /// How many holes across.
+    pub w: u32,
+    /// How many holes down.
+    pub h: u32,
+    /// What it is called, or empty to use the name the machine already has.
+    pub label: String,
+    /// Which figures it shows, by the names the window knows them by.
+    pub fields: Vec<String>,
+    /// Its colour: one entry for a flat colour, several for a gradient across them.
+    pub accent: Vec<String>,
+}
+
+impl Default for Block {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: String::new(),
+            host: String::new(),
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            label: String::new(),
+            fields: Vec::new(),
+            accent: Vec::new(),
+        }
+    }
 }
 
 impl Default for Settings {
@@ -127,6 +183,7 @@ impl Default for Settings {
             update_channel: String::new(),
             language: String::new(),
             setup_finished: false,
+            board: Vec::new(),
         }
     }
 }
@@ -242,5 +299,33 @@ mod tests {
         assert!(written.contains("\"accountServer\""));
         assert!(written.contains("\"bitrateBps\""));
         assert!(!written.contains("\"account_server\""));
+    }
+
+    #[test]
+    fn a_board_survives_the_trip_the_window_sends_it_on() {
+        // Quoted with two hashes: a colour is written `"#35d6ff"`, and `"#` would close a
+        // raw string opened with one.
+        let stored = r##"{"board":[{"id":"b1","kind":"machine","host":"ab","x":1,"y":1,"w":17,
+            "h":9,"label":"","fields":["fps","rtt"],"accent":["#35d6ff","#7c5cff"]}]}"##;
+        let settings: Settings = serde_json::from_str(stored).expect("parses");
+        let block = settings.board.first().expect("one block");
+
+        assert_eq!(block.kind, "machine");
+        assert_eq!((block.x, block.y, block.w, block.h), (1, 1, 17, 9));
+        assert_eq!(block.accent.len(), 2);
+
+        // Sent back under the names the window reads, not the ones Rust writes them in.
+        let written = serde_json::to_string(&settings).expect("writes");
+
+        assert!(written.contains("\"board\""));
+        assert!(written.contains("\"accent\""));
+    }
+
+    #[test]
+    fn a_board_written_before_blocks_existed_reads_as_an_empty_one() {
+        // Which is what makes the window lay out a default rather than open on nothing.
+        let settings: Settings = serde_json::from_str(r#"{"nickname":"mac"}"#).expect("parses");
+
+        assert!(settings.board.is_empty());
     }
 }

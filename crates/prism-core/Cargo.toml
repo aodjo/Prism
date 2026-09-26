@@ -61,6 +61,8 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Foundation",
     "Graphics_Capture",
+    # What asking to capture without the yellow border answers with.
+    "Security_Authorization_AppCapabilityAccess",
     "Graphics_DirectX_Direct3D11",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D_Fxc",
@@ -77,6 +79,8 @@ windows = { version = "0.62", features = [
     "Win32_Media_KernelStreaming",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    # `VARIANT`, which is how a Media Foundation encoder is given its settings.
+    "Win32_System_Ole",
     "Win32_System_Power",
     "Win32_System_Threading",
     "Win32_System_Variant",
@@ -92,9 +96,40 @@ windows-core = "0.62"
 # Mac that has neither. Turned on where the encoder is actually built: CI's Linux job, and a
 # Linux machine with a GPU. See `docs/linux-build.md`.
 vaapi = ["dep:libva"]
+# Everything a Linux desktop needs to watch and be watched: the software H.264 encoder and
+# decoder, the screen through PipeWire, and the portal that grants both the screen and the
+# input. Off by default for the reason `vaapi` is — each of these builds C, or binds a system
+# library through its headers, and a Mac running `pnpm lint:cross` has neither a Linux C
+# toolchain nor the headers. The shell and the stream window turn it on where they are built for
+# Linux. The code behind it is compiled under `cfg(linux_desktop)`; see `build.rs`.
+linux-desktop = [
+    "dep:openh264",
+    "dep:openh264-sys2",
+    "dep:ashpd",
+    "dep:pipewire",
+    "dep:pollster",
+]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The maintained fork of ChromiumOS's `cros-libva`. The original is pinned to an older libva
 # and does not compile against the 1.23 headers Debian and Ubuntu now ship — a compile error
 # rather than a subtle one, but a wall all the same.
 libva = { version = "0.1.4", optional = true }
+# Cisco's H.264 codec, built from its source into this binary. What every Linux machine can
+# encode and decode with, whatever GPU it has or does not have — a board on a desk, a virtual
+# machine, a laptop whose driver has no VAAPI encoder. The `-sys` crate is named as well for the
+# two constants that change the bitrate of a running encoder, which the wrapper does not expose.
+openh264 = { version = "0.9.8", optional = true }
+openh264-sys2 = { version = "0.9.8", optional = true }
+# The desktop portal, which is how a Wayland desktop hands over its screen and its input. Its own
+# executor rather than tokio: a runtime is what the hot path is forbidden, and nothing here needs
+# one — each portal call is waited for on the thread that made it.
+ashpd = { version = "0.13.13", default-features = false, features = [
+    "async-io",
+    "remote_desktop",
+    "screencast",
+], optional = true }
+# The screen's frames, once the portal has granted them. Binds libpipewire through its headers.
+pipewire = { version = "0.10.1", optional = true }
+# Runs one portal call to completion on the calling thread. The smallest thing that does.
+pollster = { version = "0.4", optional = true }

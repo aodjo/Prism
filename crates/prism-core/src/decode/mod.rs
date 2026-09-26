@@ -7,6 +7,9 @@
 
 #[cfg(target_os = "windows")]
 pub mod mediafoundation;
+/// Decoding on the processor, for a Linux client.
+#[cfg(linux_desktop)]
+pub mod openh264;
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
 

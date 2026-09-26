@@ -7,7 +7,7 @@
     "build": "pnpm run build:css && pnpm run build:renderer && pnpm run build:bridge",
     "build:bridge": "esbuild src/bridge.ts --bundle --format=iife --outfile=renderer/bridge.js --target=safari17 --sourcemap",
     "build:css": "tailwindcss -i src/styles.css -o renderer/prism.css",
-    "build:renderer": "esbuild src/setup.tsx src/home.tsx src/panel.tsx src/transfers.tsx --bundle --format=esm --outdir=renderer --target=safari17 --jsx=automatic --sourcemap --define:process.env.NODE_ENV=\\\"production\\\"",
+    "build:renderer": "esbuild src/setup.tsx src/home.tsx src/panel.tsx src/transfers.tsx src/banner.tsx --bundle --format=esm --outdir=renderer --target=safari17 --jsx=automatic --sourcemap --define:process.env.NODE_ENV=\\\"production\\\"",
     "typecheck": "tsc -p tsconfig.renderer.json --noEmit"
   },
   "dependencies": {

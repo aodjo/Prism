@@ -38,6 +38,9 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+/** Where cargo writes, which is `target` unless `CARGO_TARGET_DIR` moved it somewhere else. */
+const TARGET = process.env.CARGO_TARGET_DIR || join(ROOT, 'target');
+
 /** Where the account server lives. */
 const SERVER = process.env.PRISM_ACCOUNT_SERVER ?? 'https://accounts.presm.kr';
 
@@ -58,9 +61,15 @@ const DEFAULT_KEY = join(homedir(), 'Documents/prism-keys/prism-update.key');
  * The names Rust uses for a target, which is what Tauri asks the endpoint with — not the ones
  * Node uses for the same two things.
  *
- * @returns {{target: string, arch: string, bundle: string, installer: string}} The platform,
- *   what its bundle file is called under `target/release/bundle`, and the directory holding
- *   the installer where that is a different file.
+ * The bundle is named by where it lands and what it ends in rather than in full, because the
+ * bundler puts the version and the architecture into the file name: `Prism_1.0.0-local.4_x64`
+ * on one machine and `…_arm64` on the next. Naming one of them meant this worked on the machine
+ * it was written on and looked for a file that does not exist on every other — which is what
+ * stopped a Windows on ARM from publishing at all.
+ *
+ * @returns {{target: string, arch: string, dir: string, ends: string, installer: string}} The
+ *   platform, where its bundle lands under `target/release/bundle` and what that file ends in,
+ *   and the directory holding the installer where that is a different file.
  */
 function platform() {
   const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
@@ -70,14 +79,54 @@ function platform() {
     // the disk image, and they are not the same bytes. Elsewhere the installer is the file the
     // updater fetches, so there is nothing else to send.
     case 'darwin':
-      return { target: 'darwin', arch, bundle: 'macos/Prism.app.tar.gz', installer: 'dmg' };
+      return { target: 'darwin', arch, dir: 'macos', ends: '.app.tar.gz', installer: 'dmg' };
     case 'win32':
-      return { target: 'windows', arch, bundle: 'nsis/Prism_x64-setup.exe', installer: '' };
+      return { target: 'windows', arch, dir: 'nsis', ends: '-setup.exe', installer: '' };
     case 'linux':
-      return { target: 'linux', arch, bundle: 'appimage/prism.AppImage', installer: '' };
+      return { target: 'linux', arch, dir: 'appimage', ends: '.AppImage', installer: '' };
     default:
       throw new Error(`nothing is published for ${process.platform}`);
   }
+}
+
+/**
+ * The file in a bundle directory that this build produced.
+ *
+ * A directory that has been built in before holds the last build as well as this one, and
+ * publishing whichever the filesystem listed first is how a version goes out carrying the bytes
+ * of the one before it. So where there are several, the version decides: the bundler writes it
+ * into the name, and exactly one of them is this build's.
+ *
+ * Where the name carries no version — the macOS archive is simply `Prism.app.tar.gz`, rewritten
+ * in place each time — there is only ever one, and that one is it.
+ *
+ * @param {string} folder - The directory to look in.
+ * @param {string} ends - What the file's name ends with.
+ * @param {string} version - What this build calls itself.
+ * @returns {string} The full path to it.
+ * @throws {Error} If there is none, or several and none of them is this build's.
+ */
+function theOne(folder, ends, version) {
+  const found = readdirSync(folder).filter((each) => each.endsWith(ends));
+
+  if (found.length === 0) {
+    throw new Error(`nothing in ${folder} ends in ${ends}`);
+  }
+
+  if (found.length === 1) {
+    return join(folder, found[0]);
+  }
+
+  const mine = found.filter((each) => each.includes(version));
+
+  if (mine.length !== 1) {
+    throw new Error(
+      `${folder} holds ${found.length} files ending in ${ends} and ${mine.length} of them are ` +
+        `${version}: ${found.join(', ')}. Delete the ones that are not this build and run again.`,
+    );
+  }
+
+  return join(folder, mine[0]);
 }
 
 /**
@@ -169,7 +218,120 @@ function asked(argv) {
 }
 
 /**
+ * Whether this shell can reach the Microsoft compiler.
+ *
+ * Asked of the shell rather than by looking for an installation, because being installed is not
+ * what matters — a compiler Visual Studio has put on disk but not on this `PATH` is one the
+ * build cannot call, and `PATH` is what the shell Visual Studio sets up is for.
+ *
+ * Presence and nothing more. An earlier version of this read the compiler's banner to check it
+ * built for this machine, on a guess that the architecture was the problem. It was not, and the
+ * check cost three attempts of its own to get right — `where.exe` rather than a bare name,
+ * because Windows will not start a program by a name missing its extension; the banner from
+ * standard error rather than standard output; and then the discovery that `cl` with nothing to
+ * compile succeeds, so the failing path was never taken. A check nobody can keep correct is
+ * worse than the error it replaces.
+ *
+ * @returns {boolean} Whether `cl` resolves to anything.
+ */
+function hasMsvc() {
+  try {
+    execFileSync('where.exe', ['cl'], { stdio: 'ignore' });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether clang is reachable, which on Windows for ARM is not optional.
+ *
+ * `ring` — the TLS this shell speaks to the account server through — compiles its own C, and on
+ * that one platform it refuses the Microsoft compiler and asks for clang instead. Its own build
+ * script says so, under a `FIXME`. So a machine with a perfectly good ARM64 `cl` still cannot
+ * build this, and the way it says so is four hundred lines away from the reason.
+ *
+ * @returns {boolean} Whether `clang` resolves to anything.
+ */
+function hasClang() {
+  try {
+    execFileSync('where.exe', ['clang'], { stdio: 'ignore' });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The libraries a Linux build finds through pkg-config, as pkg-config names them.
+ *
+ * WebKitGTK and the tray library are the shell's; PipeWire is the screen; the rest are what SDL
+ * is built against for the stream window. SDL's build does not fail without a display server's
+ * headers — it builds a window that cannot open on that desktop — so they are checked here, where
+ * a missing one can still be said plainly.
+ */
+const LINUX_LIBRARIES = [
+  'webkit2gtk-4.1',
+  'ayatana-appindicator3-0.1',
+  'libpipewire-0.3',
+  'x11',
+  'wayland-client',
+  'xkbcommon',
+  'egl',
+];
+
+/**
+ * Which of the Linux build's libraries pkg-config cannot find, and whether it can run at all.
+ *
+ * @returns {string[]} The missing ones, or `['pkg-config']` when there is no pkg-config to ask.
+ */
+function missingLinuxLibraries() {
+  try {
+    execFileSync('pkg-config', ['--version'], { stdio: 'ignore' });
+  } catch {
+    return ['pkg-config'];
+  }
+
+  return LINUX_LIBRARIES.filter((library) => {
+    try {
+      execFileSync('pkg-config', ['--exists', library], { stdio: 'ignore' });
+
+      return false;
+    } catch {
+      return true;
+    }
+  });
+}
+
+/**
+ * Whether a program can be started by name.
+ *
+ * @param {string} program - Its name.
+ * @returns {boolean} Whether `which` finds it.
+ */
+function onPath(program) {
+  try {
+    execFileSync('which', [program], { stdio: 'ignore' });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Runs a command, letting it write to this terminal, and stops everything if it fails.
+ *
+ * Through a shell on Windows, and only there. What a package manager installs on that platform
+ * is not a program but a `.cmd` beside one — `pnpm` is `pnpm.cmd` — and Node will not start one
+ * of those without a shell: it refuses with `EINVAL`, which it began doing to close a hole where
+ * an argument to a batch file became a command. A shell is also what resolves the name to the
+ * file in the first place, so both halves of the problem are the same fix.
+ *
+ * Arguments are quoted on the way in because a shell splits on spaces and nothing here would
+ * otherwise. None of the ones passed today contain any; the next one might.
  *
  * @param {string} command - What to run.
  * @param {string[]} args - Its arguments.
@@ -177,9 +339,12 @@ function asked(argv) {
  * @returns {void}
  */
 function run(command, args, env = {}) {
-  execFileSync(command, args, {
+  const windows = process.platform === 'win32';
+
+  execFileSync(command, windows ? args.map((one) => `"${one}"`) : args, {
     cwd: ROOT,
     stdio: 'inherit',
+    shell: windows,
     env: { ...process.env, ...env },
   });
 }
@@ -371,16 +536,25 @@ async function allowed(what) {
  * @returns {void}
  */
 function open(link) {
-  const opener = { darwin: 'open', win32: 'start', linux: 'xdg-open' }[process.platform];
+  // `start` is not a program on Windows — it is a thing `cmd` understands — so it has to be
+  // handed to one. Run as an executable it throws, and the one step of this that needs a
+  // browser is the approval, which is exactly where a link that never opens is felt.
+  //
+  // The empty argument after it is the window title `start` takes first. Without it the link
+  // is read as the title and nothing opens.
+  const [program, ...ahead] =
+    process.platform === 'win32'
+      ? ['cmd', '/c', 'start', '']
+      : [process.platform === 'darwin' ? 'open' : 'xdg-open'];
 
   try {
-    execFileSync(opener, [link], { stdio: 'ignore' });
+    execFileSync(program, [...ahead, link], { stdio: 'ignore' });
   } catch {
     // Printed above, which is the part that matters.
   }
 }
 
-const { target, arch, bundle, installer } = platform();
+const { target, arch, dir, ends, installer } = platform();
 const { build, notes } = asked(process.argv.slice(2));
 const key = process.env.PRISM_UPDATE_KEY ?? DEFAULT_KEY;
 
@@ -411,6 +585,67 @@ if (process.platform === 'darwin' && !identity) {
   process.exit(2);
 }
 
+// Checked before anything is built, because what it costs to find out otherwise is a full
+// dependency compile that ends in two hundred lines of `cc` reporting that it went looking for
+// clang. It went looking for clang because it could not find MSVC, and it could not find MSVC
+// because this shell is not the one Visual Studio sets up.
+if (process.platform === 'win32' && !hasMsvc()) {
+  console.error(
+    'No Microsoft compiler is reachable from this shell, and parts of this are C. Visual\n' +
+      'Studio makes a shell that can reach one:\n\n' +
+      '  Import-Module "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll"\n' +
+      '  Enter-VsDevShell -VsInstallPath "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools" -DevCmdArguments "-arch=arm64 -host_arch=arm64"\n\n' +
+      'That shell starts somewhere else and builds its environment fresh, so come back to this\n' +
+      'directory and set PRISM_UPDATE_KEY again inside it.\n\n' +
+      'If `where.exe cl` still says nothing there, the compiler for this machine is not\n' +
+      'installed: add "MSVC v143 - VS 2022 C++ ARM64/ARM64EC build tools" in Visual Studio\n' +
+      'Installer. It is not one of the components chosen for you.',
+  );
+  process.exit(2);
+}
+
+// And clang as well as MSVC, on this one platform. Checked separately because it fails for a
+// reason nothing about the message would suggest: the Microsoft compiler being present and
+// correct changes nothing, since the crate that needs this one never looks at it.
+if (process.platform === 'win32' && process.arch === 'arm64' && !hasClang()) {
+  console.error(
+    'clang is not reachable from this shell, and on Windows for ARM this build needs it as\n' +
+      'well as MSVC. Not for anything here: `ring`, which is the TLS underneath the calls to\n' +
+      'the account server, compiles C of its own and on this platform refuses the Microsoft\n' +
+      'compiler outright. Its build script says as much, under a FIXME.\n\n' +
+      'Add "C++ Clang compiler for Windows" in Visual Studio Installer, or install LLVM:\n\n' +
+      '  winget install LLVM.LLVM\n\n' +
+      'Then open a new developer shell — `where.exe clang` should name a path.',
+  );
+  process.exit(2);
+}
+
+// Everything a Linux build links or compiles against, asked for in one go. Checked before cargo
+// starts rather than left to it, because it fails a library at a time, twenty minutes apart, and
+// SDL's build does not fail at all without a display server's headers: it quietly makes a window
+// that cannot open on that desktop.
+if (process.platform === 'linux') {
+  const missing = missingLinuxLibraries();
+  const tools = ['clang', 'cmake', ...(process.arch === 'x64' ? ['nasm'] : [])].filter(
+    (tool) => !onPath(tool),
+  );
+
+  if (missing.length > 0 || tools.length > 0) {
+    console.error(
+      `This machine is missing what the Linux build needs: ${[...missing, ...tools].join(', ')}.\n\n` +
+        'On Ubuntu or Debian, one command installs all of it:\n\n' +
+        '  sudo apt install build-essential clang cmake nasm pkg-config \\\n' +
+        '    libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev \\\n' +
+        '    libayatana-appindicator3-dev libpipewire-0.3-dev libspa-0.2-dev \\\n' +
+        '    libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev \\\n' +
+        '    libxss-dev libxtst-dev libwayland-dev libxkbcommon-dev libdecor-0-dev \\\n' +
+        '    libegl-dev libgl-dev libdrm-dev libgbm-dev libasound2-dev libpulse-dev libudev-dev\n\n' +
+        'docs/linux-build.md says what each is for.',
+    );
+    process.exit(2);
+  }
+}
+
 const token = (await kept()) || (await allowed(`prism · ${target} · ${arch}`));
 
 const numbered = build || (await nextNumber(token));
@@ -427,7 +662,7 @@ run('pnpm', ['package'], {
 });
 
 const version = `1.0.0-local.${numbered}`;
-const made = join(ROOT, 'target/release/bundle', bundle);
+const made = theOne(join(TARGET, 'release/bundle', dir), ends, version);
 const signature = readFileSync(`${made}.sig`, 'utf8').trim();
 const body = readFileSync(made);
 
@@ -459,7 +694,7 @@ if (!put.ok) {
 // an installer with nothing behind it would be a download that installs an update nobody can
 // receive.
 if (installer) {
-  const folder = join(ROOT, 'target/release/bundle', installer);
+  const folder = join(TARGET, 'release/bundle', installer);
   const image = readdirSync(folder).find((each) => each.endsWith('.dmg'));
 
   if (image) {

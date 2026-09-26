@@ -41,6 +41,9 @@ mod surface;
 #[cfg(target_os = "windows")]
 #[path = "display/d3d11.rs"]
 mod surface;
+#[cfg(target_os = "linux")]
+#[path = "display/sdl.rs"]
+mod surface;
 #[cfg(target_os = "macos")]
 #[path = "display/toolbar.rs"]
 mod toolbar;
@@ -176,6 +179,28 @@ fn shown_in(picture: Option<(u32, u32)>, area: (u32, u32)) -> Fitted {
     picture.map_or_else(|| Fitted::whole(area), |picture| fit(picture, area))
 }
 
+/// Returns how many frames a second the screens here can actually show, or `None` if none says.
+///
+/// The fastest of them, because the window can be dragged onto any of them, and rounded up so
+/// that a screen reporting 59.97 asks for sixty rather than fifty-nine.
+///
+/// What this is for: a host sending more frames than this window can present is a host spending
+/// capture, encoder and bandwidth on pictures thrown away before anybody sees one. Worse than
+/// wasted — the work competes with the frames that do get shown, which is what somebody reads
+/// as stutter on a session set to a high rate.
+pub fn fastest_screen(video: &sdl3::VideoSubsystem) -> Option<u16> {
+    let best = video
+        .displays()
+        .ok()?
+        .iter()
+        .filter_map(|display| display.get_mode().ok())
+        .map(|mode| mode.refresh_rate)
+        .filter(|rate| *rate > 0.0)
+        .fold(0.0_f32, f32::max);
+
+    (best > 0.0).then(|| best.ceil().clamp(1.0, f32::from(u16::MAX)) as u16)
+}
+
 /// Returns the size of the largest screen attached, in pixels, or `None` if none will say.
 ///
 /// Largest by area, and in pixels rather than points: a Retina screen of 1728 points across has
@@ -220,10 +245,31 @@ fn where_clicked(event: &Event, shown: Fitted) -> Option<InputEvent> {
 /// moved instead leaves the two pointers wherever they each happened to start, and they never
 /// meet.
 ///
+/// Unless the pointer is caged, which is what `aiming` says. A game that hides the cursor reads
+/// how far the mouse moved and puts the cursor back in the middle itself, so there is no place
+/// to send: the far pointer is not where this one points, and a stream of destinations fights
+/// the game for it. Worse, a pointer that is not caged stops at the edge of this window, which
+/// in a game is a player who cannot turn any further right. Caged, the pointer disappears here,
+/// never reaches an edge, and what crosses is the movement itself.
+///
 /// Key repeats are dropped. The host's own operating system generates repeats from the
 /// key being held, so forwarding the client's as well would double them.
-fn to_input_event(event: &Event, shown: Fitted) -> Option<InputEvent> {
+fn to_input_event(event: &Event, shown: Fitted, aiming: bool) -> Option<InputEvent> {
     match event {
+        Event::MouseMotion { xrel, yrel, .. } if aiming => {
+            // Whole pixels, because that is the unit the far machine moves its pointer in.
+            // Fractions of one would be dropped there and the aim would drift short.
+            let dx = xrel.round() as i16;
+            let dy = yrel.round() as i16;
+
+            // Caged, always: this branch is only reached while the pointer is, and that is
+            // exactly what the host has to be told so it does not park its own at an edge.
+            (dx != 0 || dy != 0).then_some(InputEvent::MouseMove {
+                dx,
+                dy,
+                caged: true,
+            })
+        }
         Event::MouseMotion { x, y, .. } => {
             let (x, y) = to_fraction(*x, *y, shown);
 
@@ -272,7 +318,7 @@ fn to_input_event(event: &Event, shown: Fitted) -> Option<InputEvent> {
 /// Only motion. A button or a key changes nothing about where the pointer is, and a scroll
 /// moves the content rather than the cursor.
 fn predict(cursor: &mut CursorTracker, stamped_ts_us: u64, event: InputEvent) {
-    if let InputEvent::MouseMove { dx, dy } = event {
+    if let InputEvent::MouseMove { dx, dy, .. } = event {
         cursor.moved(stamped_ts_us, dx, dy);
     }
 }
@@ -493,30 +539,45 @@ fn choose_a_file(
     }
 }
 
-/// Says that this machine has started controlling the far one, or stopped.
+/// Moves to a stop on the one road this machine's keyboard and pointer travel, and says so.
 ///
-/// One place, because there are two ways to ask — the chord and the toolbar — and the flag the
-/// loop holds and the picture in the title bar have to agree afterwards. Nothing about the
-/// pointer changes here: it stays this machine's, visible and free, and what the flag decides
-/// is only whether where it points is sent on.
-fn announce_control(bar: Option<&toolbar::Toolbar>, say: &Reporter, on: bool) {
+/// One place, because there are two ways to ask — the chord and the toolbar — and the state the
+/// loop holds, the picture in the title bar and the cage around the pointer all have to agree
+/// afterwards. Caging is done here rather than by the caller for the same reason: a stop that
+/// changed without the cage following it is a cursor nobody can find.
+fn take(
+    hands: toolbar::Hands,
+    bar: Option<&toolbar::Toolbar>,
+    mouse: &sdl3::mouse::MouseUtil,
+    window: &sdl3::video::Window,
+    say: &Reporter,
+) -> toolbar::Hands {
+    mouse.set_relative_mouse_mode(window, hands.caged());
+
     if let Some(bar) = bar {
-        bar.set_controlling(on);
+        bar.set_hands(hands);
     }
 
-    say.note(if on {
-        "display: controlling this machine, control option to stop"
-    } else {
-        "display: watching only, control option to take control"
+    say.note(match hands {
+        toolbar::Hands::Watching => "display: this session is watching only",
+        toolbar::Hands::Controlling => "display: controlling this machine",
+        toolbar::Hands::Aiming => {
+            "display: the pointer is caged and sent as movement, control option gives it back"
+        }
     });
+
+    hands
 }
 
 /// How the stream is to be shown, as against what is to be shown.
 ///
-/// Five numbers that all answer the same question — what this window does with what arrives —
-/// and passing them one at a time made the call a row of bare literals nobody could read.
-#[derive(Debug, Clone, Copy)]
+/// A handful of values that all answer the same question — what this window does with what
+/// arrives — and passing them one at a time made the call a row of bare literals nobody could
+/// read.
+#[derive(Debug, Clone)]
 pub struct Shown {
+    /// What the window is called: the machine being watched, then the application.
+    pub title: String,
     /// How large to open the window.
     pub width: u32,
     /// How large to open the window.
@@ -549,6 +610,7 @@ pub fn run(
     talk: &crate::ipc::Talkback,
 ) -> Result<(), Box<dyn Error>> {
     let Shown {
+        title,
         width,
         height,
         pacing_us,
@@ -562,11 +624,16 @@ pub fn run(
     // Every pixel the screen has. Without this the window is drawn at one pixel to a point
     // and the compositor doubles it on a Retina display, which is a picture that arrives sharp
     // and is shown soft.
+    // Built hidden and shown once there is something in it. A window that opens the moment this
+    // process starts is a black rectangle sitting over everything for as long as the handshake
+    // takes — and the handshake is the part that can be slow, or fail. The shell says what is
+    // happening meanwhile, in the window somebody is already looking at.
     let mut window = video
-        .window("Prism", width, height)
+        .window(&title, width, height)
         .position_centered()
         .resizable()
         .high_pixel_density()
+        .hidden()
         .build()?;
 
     // Installed before anything is drawn, because adding a toolbar moves the content view
@@ -586,6 +653,18 @@ pub fn run(
 
     config.offer.max_width = u16::try_from(most_across.max(drawable_width)).unwrap_or(u16::MAX);
     config.offer.max_height = u16::try_from(most_down.max(drawable_height)).unwrap_or(u16::MAX);
+
+    // And the same argument for time as for pixels. This window cannot present faster than the
+    // screen it is on refreshes, so frames beyond that are captured, encoded, sent and decoded
+    // only to be dropped here — and the work of making them is work the frames that are shown
+    // have to share a machine with. Offering everything was a host set to a high rate spending
+    // itself on pictures nobody could ever see, which is felt at this end as stutter.
+    //
+    // The fastest screen attached rather than the one the window is on, for the same reason the
+    // size is: the window can be dragged to another one mid-session and nothing asks again.
+    if let Some(fastest) = fastest_screen(&video) {
+        config.offer.max_fps = fastest;
+    }
 
     // Declared after the window so it is dropped before it: the surface holds objects the
     // window owns, and releasing them afterwards would be releasing them into nothing.
@@ -680,10 +759,16 @@ pub fn run(
     // have ended. Given back when this function returns, whatever ends it.
     let _awake = prism_core::power::Awake::hold("Prism is showing another machine");
 
-    // Whether what happens in this window is sent on to the far machine. On from the start,
-    // because nothing is seized to make it so: the pointer stays this machine's, visible and
-    // free to leave the window, and only where it points inside it goes across.
-    let mut controlling = capture_input;
+    // What this machine's keyboard and pointer are doing to the far one. Controlling from the
+    // start on a session that may, because nothing is seized to get there: the pointer stays
+    // this machine's, visible and free to leave the window. Never caged from the start — that
+    // takes the cursor away, and nothing should do that until somebody asks.
+    let mut hands = if capture_input {
+        toolbar::Hands::Controlling
+    } else {
+        toolbar::Hands::Watching
+    };
+    let mouse = sdl.mouse();
 
     // The size the pointer's coordinates are measured against, which is the window's own and
     // not the drawable's: the two differ on a screen with more than one pixel to a point.
@@ -697,6 +782,10 @@ pub fn run(
     // somebody asks for the size the far machine is actually sending.
     let mut picture: Option<(u32, u32)> = None;
 
+    // Whether the window has been put on screen. It is built hidden and raised by the first
+    // picture, so nothing is shown until there is something to show.
+    let mut opened = false;
+
     // Where the file chooser puts what somebody picked. A channel rather than a shared slot,
     // because the dialog answers from inside the event pump and this loop reads it outside.
     let (chosen_tx, chosen_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
@@ -706,7 +795,7 @@ pub fn run(
     let mut told_moving: Vec<crate::ipc::Moving> = Vec::new();
 
     if capture_input {
-        announce_control(bar.as_ref(), say, controlling);
+        hands = take(hands, bar.as_ref(), &mouse, &window, say);
     }
 
     'main: loop {
@@ -719,13 +808,14 @@ pub fn run(
 
         while let Some(tool) = bar.as_ref().and_then(toolbar::Toolbar::pressed) {
             match tool {
-                toolbar::Tool::Control if capture_input => {
-                    controlling = !controlling;
-                    announce_control(bar.as_ref(), say, controlling);
+                // Watching, then controlling, then aiming, then back to watching. Each stop
+                // does what the one before it did and one thing more.
+                toolbar::Tool::Hands if capture_input => {
+                    hands = take(hands.next(), bar.as_ref(), &mouse, &window, say);
                 }
                 // Asked for on a session that is only watching. Said rather than ignored,
                 // because a control that does nothing when pressed is a fault to look for.
-                toolbar::Tool::Control => {
+                toolbar::Tool::Hands => {
                     say.note(
                         "display: this session is watching only, so there is nothing to control",
                     );
@@ -877,8 +967,16 @@ pub fn run(
                 break 'main;
             }
             if capture_input && is_control_toggle(&event) {
-                controlling = !controlling;
-                announce_control(bar.as_ref(), say, controlling);
+                // The chord gives the pointer back. That is the half of this that is hard to
+                // undo any other way: a caged cursor has left this machine, and reaching the
+                // button that would free it means finding a pointer that is not there.
+                hands = take(
+                    toolbar::Hands::Controlling,
+                    bar.as_ref(),
+                    &mouse,
+                    &window,
+                    say,
+                );
                 continue;
             }
             if resized(&event) {
@@ -891,18 +989,22 @@ pub fn run(
                 drawable_height = height;
                 area = window.size();
             }
-            if capture_input && (controlling || is_release(&event)) {
+            if capture_input && (hands.sends() || is_release(&event)) {
                 let shown = shown_in(picture, area);
 
                 if let Some(sender) = input_slot.get() {
-                    if controlling {
+                    // Where a click was made, so that the first one after control was taken
+                    // lands where it was aimed. Not while the pointer is caged: there is no
+                    // place then, and sending one would throw the far pointer to wherever in
+                    // this window the caged cursor happens to be held.
+                    if hands.sends() && !hands.caged() {
                         if let Some(place) = where_clicked(&event, shown) {
                             if sender.send(place).is_ok() {
                                 sent_input += 1;
                             }
                         }
                     }
-                    if let Some(input) = to_input_event(&event, shown) {
+                    if let Some(input) = to_input_event(&event, shown, hands.caged()) {
                         if let Ok(stamped) = sender.send(input) {
                             sent_input += 1;
                             predict(&mut cursor, stamped, input);
@@ -965,7 +1067,7 @@ pub fn run(
                             shown,
                             missed,
                             clock_offset_us: clock_offset,
-                            control: capture_input.then_some(controlling),
+                            control: capture_input.then_some(hands.sends()),
                             picture,
                             drawable: (drawable_width, drawable_height),
                         },
@@ -983,6 +1085,15 @@ pub fn run(
                 if surface.present(&decoded, cursor.normalised(), target)? {
                     shown += 1;
                     hud_frames += 1;
+
+                    // The first picture is what the window was waiting for. Shown after it has
+                    // been presented rather than before, so what appears already has the far
+                    // machine in it — a window raised a frame early is a black flash.
+                    if !opened {
+                        opened = true;
+                        window.show();
+                        window.raise();
+                    }
                 } else {
                     missed += 1;
                 }
@@ -1042,7 +1153,7 @@ const SESSION_WIND_DOWN: Duration = Duration::from_millis(1500);
 
 #[cfg(test)]
 mod tests {
-    use super::{shown_in, to_fraction};
+    use super::{InputEvent, shown_in, to_fraction};
 
     /// A window the shape of the picture in it, so the picture fills it.
     fn filled() -> prism_core::render::Fitted {
@@ -1090,5 +1201,80 @@ mod tests {
         let shown = shown_in(None, (1280, 752));
 
         assert_eq!(to_fraction(1279.0, 751.0, shown), (65535, 65535));
+    }
+
+    /// One pointer movement, as SDL reports it.
+    fn motion(x: f32, y: f32, xrel: f32, yrel: f32) -> sdl3::event::Event {
+        sdl3::event::Event::MouseMotion {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            mousestate: sdl3::mouse::MouseState::from_sdl_state(0),
+            x,
+            y,
+            xrel,
+            yrel,
+        }
+    }
+
+    #[test]
+    fn a_free_pointer_says_where_it_is() {
+        let sent = super::to_input_event(&motion(639.5, 375.5, 12.0, -4.0), filled(), false);
+
+        assert!(matches!(sent, Some(InputEvent::MouseTo { .. })), "{sent:?}");
+    }
+
+    #[test]
+    fn a_caged_pointer_says_how_far_it_moved() {
+        // Which is the only thing a game that hides the cursor can use. Where it is would be
+        // wherever the cage happens to hold it, and that is not where the player is looking.
+        let sent = super::to_input_event(&motion(639.5, 375.5, 12.0, -4.0), filled(), true);
+
+        assert_eq!(
+            sent,
+            Some(InputEvent::MouseMove {
+                dx: 12,
+                dy: -4,
+                // Said on the packet, so the host knows not to park its pointer at an edge.
+                caged: true,
+            })
+        );
+    }
+
+    #[test]
+    fn the_control_chooses_between_pointing_and_being_caged() {
+        use crate::display::toolbar::Hands;
+
+        assert_eq!(Hands::Controlling.next(), Hands::Aiming);
+        assert_eq!(Hands::Aiming.next(), Hands::Controlling);
+    }
+
+    #[test]
+    fn pressing_it_never_stops_the_session_sending() {
+        use crate::display::toolbar::Hands;
+
+        // Watching is what a session that was never allowed to control is, and not somewhere
+        // the button can put one: parking a session halfway is what closing it is for.
+        assert!(Hands::Controlling.next().sends());
+        assert!(Hands::Aiming.next().sends());
+    }
+
+    #[test]
+    fn caging_the_pointer_means_something_is_being_sent() {
+        use crate::display::toolbar::Hands;
+
+        assert!(!Hands::Watching.sends() && !Hands::Watching.caged());
+        assert!(Hands::Controlling.sends() && !Hands::Controlling.caged());
+        assert!(Hands::Aiming.sends() && Hands::Aiming.caged());
+    }
+
+    #[test]
+    fn a_caged_pointer_that_did_not_move_says_nothing() {
+        // SDL reports motion for a pointer held still against the edge of its cage. Sending
+        // a movement of nothing is a packet an hour of aiming would produce thousands of.
+        assert_eq!(
+            super::to_input_event(&motion(0.0, 0.0, 0.2, -0.1), filled(), true),
+            None
+        );
     }
 }

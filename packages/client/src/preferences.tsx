@@ -196,6 +196,17 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
     })();
   }, []);
 
+  /**
+   * Whether this machine is already off the released line.
+   *
+   * Either because the build running on it came from somewhere else, or because somebody has
+   * set it to follow one. Both are developers' machines; a machine that is neither is one
+   * nobody should be able to move onto unfinished software from a settings panel.
+   */
+  const offLine =
+    (build !== null && build.channel !== '' && build.channel !== 'production') ||
+    (settings !== null && settings.updateChannel !== '' && settings.updateChannel !== 'production');
+
   // A window is as tall as what is in it. Measured rather than calculated, because the account
   // section changes height by a form's worth when somebody signs in.
   useEffect(() => {
@@ -529,24 +540,31 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
               }}
             />
           </Row>
-          <Row label={t('Builds')}>
-            <select
-              className={SELECT}
-              value={settings?.updateChannel || build?.channel || 'production'}
-              onChange={(event) => {
-                save({ updateChannel: event.target.value });
-                setUpdate(null);
-              }}
-            >
-              <option value="production">{t('Released')}</option>
-              <option value="development">{t('Every build')}</option>
-              {/* Builds made on somebody's own machine and published straight to this account's
-                  server. Offered because the machine being tested is usually not the machine the
-                  fix was written on, and carrying a bundle between them by hand stops working
-                  the moment there are three of them. */}
-              <option value="local">{t('Built here')}</option>
-            </select>
-          </Row>
+          {/* Only where it is already true. A released build shows no way onto the other lines
+              at all: somebody who wanders onto one is running software nobody has finished, and
+              on a remote desktop that is a machine they may no longer be able to reach. The row
+              appears on a machine already off the released line — which is the developer's, and
+              which is also the only machine that needs the way back. */}
+          {offLine && (
+            <Row label={t('Builds')}>
+              <select
+                className={SELECT}
+                value={settings?.updateChannel || build?.channel || 'production'}
+                onChange={(event) => {
+                  save({ updateChannel: event.target.value });
+                  setUpdate(null);
+                }}
+              >
+                <option value="production">{t('Released')}</option>
+                <option value="development">{t('Every build')}</option>
+                {/* Builds made on somebody's own machine and published straight to this
+                    account's server. Offered because the machine being tested is usually not the
+                    machine the fix was written on, and carrying a bundle between them by hand
+                    stops working the moment there are three of them. */}
+                <option value="local">{t('Built here')}</option>
+              </select>
+            </Row>
+          )}
         </Band>
 
         <Band title={t('Watching')}>
@@ -656,11 +674,13 @@ export function SharingTerms(): JSX.Element {
           onBlur={flush}
         />
       </Row>
+      {/* The ceiling is the shell's own, in `sharing.rs`. A field that accepted more would be
+          one where a number is typed, accepted, and then quietly becomes a different number. */}
       <Row label={t('Frame rate')}>
         <input
           type="number"
           min={1}
-          max={480}
+          max={240}
           step={1}
           className={NUMBER}
           value={settings?.fps ?? 60}

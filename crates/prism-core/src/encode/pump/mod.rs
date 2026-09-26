@@ -27,6 +27,12 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// The Linux pipeline: the desktop portal's PipeWire stream into OpenH264.
+#[cfg(linux_desktop)]
+mod linux;
+
+#[cfg(linux_desktop)]
+pub use linux::ScreenPump;
 #[cfg(target_os = "macos")]
 pub use macos::ScreenPump;
 #[cfg(target_os = "windows")]

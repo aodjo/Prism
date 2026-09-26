@@ -192,6 +192,8 @@ interface Device {
   readonly label: string;
   /** Whether it is shared right now, which is what puts it on the others' home screens. */
   readonly shared: boolean;
+  /** Which operating system it runs, or empty from a build that never said. */
+  readonly platform: string;
 }
 
 /**
@@ -204,16 +206,17 @@ interface Device {
 async function devicesOf(env: Env, email: string): Promise<Device[]> {
   const { results } = await env.prism_accounts
     .prepare(
-      'SELECT public_key, label, shared_until > ? AS shared FROM devices WHERE email = ? ' +
-        'ORDER BY added_unix',
+      'SELECT public_key, label, platform, shared_until > ? AS shared FROM devices ' +
+        'WHERE email = ? ORDER BY added_unix',
     )
     .bind(nowUnix(), email)
-    .all<{ public_key: string; label: string; shared: number }>();
+    .all<{ public_key: string; label: string; platform: string; shared: number }>();
 
   return (results ?? []).map((row) => ({
     public_key: row.public_key,
     label: row.label,
     shared: row.shared === 1,
+    platform: row.platform ?? '',
   }));
 }
 
@@ -1542,7 +1545,7 @@ export default {
           return fail(401, REFUSED);
         }
 
-        const sent = await body<{ public_key?: string; label?: string }>();
+        const sent = await body<{ public_key?: string; label?: string; platform?: string }>();
         const key = (sent?.public_key ?? '').trim().toLowerCase();
 
         if (unhex(key)?.length !== 32) {
@@ -1551,10 +1554,17 @@ export default {
 
         await env.prism_accounts
           .prepare(
-            'INSERT INTO devices (email, public_key, label, added_unix) VALUES (?, ?, ?, ?) ' +
-              'ON CONFLICT(email, public_key) DO UPDATE SET label = excluded.label',
+            'INSERT INTO devices (email, public_key, label, platform, added_unix) ' +
+              'VALUES (?, ?, ?, ?, ?) ON CONFLICT(email, public_key) DO UPDATE SET ' +
+              'label = excluded.label, platform = excluded.platform',
           )
-          .bind(signedIn, key, (sent?.label ?? '').slice(0, 120), nowUnix())
+          .bind(
+            signedIn,
+            key,
+            (sent?.label ?? '').slice(0, 120),
+            (sent?.platform ?? '').slice(0, 16),
+            nowUnix(),
+          )
           .run();
 
         return json({ devices: await devicesOf(env, signedIn) });

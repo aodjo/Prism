@@ -8,6 +8,11 @@
 //! and again whenever the person sitting here takes hold of their own mouse — the moment they
 //! might be wondering why the pointer is moving by itself — and fades a few seconds after they
 //! let go. The machine watching does not see it: the panel refuses to be captured.
+//!
+//! Drawn twice, because the two platforms give the shell different things to draw with. macOS
+//! has a panel that floats over every desktop without ever taking focus, and nothing a web view
+//! can be made into behaves quite like it, so there the banner is AppKit. Everywhere else it is
+//! a small window of the shell's own, and the same words.
 
 use tauri::AppHandle;
 
@@ -27,8 +32,17 @@ pub fn watch(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.run_on_main_thread(banner::listen);
 
+    // What tells the two hands apart here. Started once, at launch, and left running: it costs
+    // nothing while nobody is watching, and a hook installed as a session opens would miss the
+    // hand that was already on the mouse.
+    #[cfg(target_os = "windows")]
+    prism_core::input::windows::watch_local_mouse();
+
     std::thread::spawn(move || {
         let mut was: Option<String> = None;
+
+        #[cfg(not(target_os = "macos"))]
+        let mut bar = bar::Bar::new();
 
         loop {
             std::thread::sleep(LOOK_EVERY);
@@ -49,19 +63,303 @@ pub fn watch(app: &AppHandle) {
                 let _ = app.run_on_main_thread(move || banner::tick(&on_main, showing));
             }
 
+            // From this thread rather than the main one, and every look rather than only while
+            // a session is open. A window built on the main thread is one Windows cannot finish
+            // building, and one that is fading still has to be looked at until it has gone.
+            #[cfg(not(target_os = "macos"))]
+            bar.tick(&app, now.clone());
+
             was = now;
         }
     });
 }
 
+/// Told that a window's page has finished loading.
+///
+/// Only the banner's matters, and only where the banner is a page: that is the moment it can be
+/// seen, and so the moment its first showing is counted from.
+pub fn loaded(label: &str) {
+    #[cfg(not(target_os = "macos"))]
+    if label == bar::LABEL {
+        bar::loaded();
+    }
+
+    #[cfg(target_os = "macos")]
+    let _ = label;
+}
+
 /// Hides every window Prism has open, as a session opens.
 ///
-/// Hidden rather than closed, so each comes back from the menu bar exactly as it was.
+/// Hidden rather than closed, so each comes back from the menu bar exactly as it was. The
+/// banner is one of the shell's windows where it is a window at all, and is the one thing that
+/// is meant to be there.
 fn step_aside(app: &AppHandle) {
     use tauri::Manager as _;
 
     for window in app.webview_windows().values() {
+        #[cfg(not(target_os = "macos"))]
+        if window.label() == bar::LABEL {
+            continue;
+        }
+
         let _ = window.hide();
+    }
+}
+
+/// The banner, where the shell draws it in a window of its own.
+#[cfg(not(target_os = "macos"))]
+mod bar {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use tauri::{
+        AppHandle, Manager as _, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    };
+
+    /// What the window is called, which is how it is found again and told apart from the rest.
+    pub const LABEL: &str = "banner";
+
+    /// How long the banner stays after the mouse was last touched here, or the session opened.
+    const FADE_AFTER: Duration = Duration::from_secs(3);
+
+    /// How long the page takes to fade, after which the window of a finished session can go.
+    const FADING: Duration = Duration::from_millis(800);
+
+    /// How wide the banner is.
+    const WIDTH: f64 = 470.0;
+
+    /// How tall the banner is.
+    const HEIGHT: f64 = 46.0;
+
+    /// How far below the top of the screen it sits.
+    const DROP: f64 = 12.0;
+
+    /// When the banner's page finished loading, in milliseconds since the Unix epoch, or zero
+    /// while it has not.
+    ///
+    /// What the first showing is counted from. It used to be counted from the session opening,
+    /// and a web view takes longer to start than the three seconds a banner stays up — on a slow
+    /// machine all of it — so the page arrived to be told the moment had already passed, and a
+    /// session opened with nothing on screen to say so. An atomic because it is written from
+    /// the page-load event and read from the thread that watches for a session.
+    static READY: AtomicU64 = AtomicU64::new(0);
+
+    /// Records that the banner's page has finished loading, and so can now be seen.
+    pub fn loaded() {
+        eprintln!("watched: the banner's page has loaded");
+
+        READY.store(now_ms(), Ordering::Relaxed);
+    }
+
+    /// The banner's window, and what is remembered about it between one look and the next.
+    ///
+    /// Owned by the thread that watches for a session, which is the only thing that touches it.
+    pub struct Bar {
+        /// Whether a session is open, so that its start is noticed once.
+        session: bool,
+        /// Whether the window would not be built for this session, so that it is asked for
+        /// once rather than four times a second until the session ends.
+        refused: bool,
+        /// When that session ended, which starts the fade the window is kept for.
+        ended: Option<Instant>,
+        /// Who was last named, kept so the words do not change under a banner that is fading.
+        name: String,
+        /// Whether the banner is up.
+        shown: bool,
+        /// When it was last told to go down, so the window can be hidden once it has faded.
+        dimmed: Option<Instant>,
+    }
+
+    impl Bar {
+        /// A banner with no window yet, because there has been no session to show one for.
+        pub const fn new() -> Self {
+            Self {
+                session: false,
+                refused: false,
+                ended: None,
+                name: String::new(),
+                shown: false,
+                dimmed: None,
+            }
+        }
+
+        /// Shows the banner for a session, fades it, or takes it away once the session is over.
+        pub fn tick(&mut self, app: &AppHandle, watcher: Option<String>) {
+            let Some(name) = watcher else {
+                self.session = false;
+                self.refused = false;
+
+                let Some(window) = app.get_webview_window(LABEL) else {
+                    return;
+                };
+
+                let ended = *self.ended.get_or_insert_with(Instant::now);
+
+                self.say(&window, false);
+
+                // Gone once it has faded rather than kept for next time. A web view held open
+                // for a session that may never come is a process the machine is paying for.
+                if ended.elapsed() >= FADING {
+                    let _ = window.destroy();
+                    self.ended = None;
+                }
+
+                return;
+            };
+
+            self.ended = None;
+            self.name = name;
+
+            let opening = !std::mem::replace(&mut self.session, true);
+
+            let window = match app.get_webview_window(LABEL) {
+                // Still here from a session that ended a moment ago, and already loaded. The
+                // session opening now is owed the same first showing as any other.
+                Some(window) => {
+                    if opening && READY.load(Ordering::Relaxed) != 0 {
+                        READY.store(now_ms(), Ordering::Relaxed);
+                    }
+
+                    window
+                }
+                None if self.refused => return,
+                None => {
+                    READY.store(0, Ordering::Relaxed);
+
+                    // Said before as well as after, because a window that cannot be finished is
+                    // a call that never returns, and the line after it would never be written.
+                    eprintln!("watched: building the banner's window");
+
+                    match build(app) {
+                        Ok(window) => window,
+                        Err(error) => {
+                            eprintln!("watched: the banner's window could not be built: {error}");
+                            self.refused = true;
+
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let ready = READY.load(Ordering::Relaxed);
+            let just_opened =
+                ready != 0 && u128::from(now_ms().saturating_sub(ready)) < FADE_AFTER.as_millis();
+
+            let up = just_opened
+                || prism_core::input::touched_within(FADE_AFTER)
+                || (self.shown && hovered(app, &window));
+
+            self.say(&window, up);
+        }
+
+        /// Tells the page what to show, and puts the window on screen or takes it off.
+        ///
+        /// Said on every look rather than on a change, so a page that finished loading after
+        /// the look that mattered is right by the next one.
+        ///
+        /// Shown and hidden rather than left up and made click-through. Click-through on
+        /// Windows is `WS_EX_LAYERED`, and a layered window that has never been handed layered
+        /// attributes is one the system does not paint at all — which is what a banner that
+        /// loaded its page and was never seen turned out to be. A hidden window takes no
+        /// clicks either, which was the whole reason for the other thing.
+        ///
+        /// Hidden only once the page has finished fading, so what goes is a banner that has
+        /// already gone rather than one cut off mid-fade.
+        fn say(&mut self, window: &WebviewWindow, up: bool) {
+            let said = serde_json::json!({ "name": self.name, "shown": up });
+
+            let _ = window.eval(format!("window.__banner && window.__banner({said})"));
+
+            if up != self.shown {
+                self.shown = up;
+                self.dimmed = (!up).then(Instant::now);
+
+                if up {
+                    let _ = window.show();
+                }
+            }
+
+            if let Some(dimmed) = self.dimmed
+                && dimmed.elapsed() >= FADING
+            {
+                self.dimmed = None;
+                let _ = window.hide();
+            }
+        }
+    }
+
+    /// Builds the banner's window: no frame, no taskbar entry, above everything, see-through
+    /// around the bar, never the window that has focus, and left out of every capture — it is
+    /// for the person sitting here, and drawn into the picture it would cover part of the
+    /// screen the other machine came to see.
+    fn build(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+        let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("banner.html".into()))
+            .title("Prism")
+            .inner_size(WIDTH, HEIGHT)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .resizable(false)
+            .always_on_top(true)
+            .visible_on_all_workspaces(true)
+            .skip_taskbar(true)
+            // Off screen until it is told to show, which is what keeps a window nobody has
+            // asked for yet from being a dead patch at the top of somebody's screen.
+            .visible(false)
+            .focused(false)
+            .focusable(false)
+            .content_protected(true)
+            .build()?;
+
+        place(&window);
+
+        Ok(window)
+    }
+
+    /// Puts the banner at the top of the main display, in the middle.
+    ///
+    /// The main display because it is the one being sent, and so the one somebody sitting here
+    /// sees their pointer being moved on.
+    fn place(window: &WebviewWindow) {
+        let Ok(Some(screen)) = window.primary_monitor() else {
+            return;
+        };
+
+        let scale = screen.scale_factor();
+        let across = f64::from(screen.size().width);
+
+        let _ = window.set_position(PhysicalPosition::new(
+            f64::from(screen.position().x) + (across - WIDTH * scale) / 2.0,
+            f64::from(screen.position().y) + DROP * scale,
+        ));
+    }
+
+    /// Whether the pointer is over the banner, which keeps it up for as long as it is.
+    fn hovered(app: &AppHandle, window: &WebviewWindow) -> bool {
+        let (Ok(at), Ok(corner), Ok(size)) = (
+            app.cursor_position(),
+            window.outer_position(),
+            window.outer_size(),
+        ) else {
+            return false;
+        };
+
+        let (left, top) = (f64::from(corner.x), f64::from(corner.y));
+
+        at.x >= left
+            && at.x <= left + f64::from(size.width)
+            && at.y >= top
+            && at.y <= top + f64::from(size.height)
+    }
+
+    /// The time, in milliseconds since the Unix epoch.
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            })
     }
 }
 

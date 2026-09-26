@@ -334,6 +334,17 @@
       "hex": "030040420f0000000000fbff0a0000"
     },
     {
+      "name": "mouse-move-caged",
+      "fields": {
+        "kind": 0,
+        "x": -5,
+        "y": 10,
+        "flags": 1,
+        "originTsUs": "1000000"
+      },
+      "hex": "030040420f0000000000fbff0a0001"
+    },
+    {
       "name": "mouse-button-left-down",
       "fields": {
         "kind": 1,

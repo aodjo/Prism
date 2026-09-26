@@ -61,6 +61,11 @@ const COLUMNS = [
     column: 'shared_until',
     sql: 'ALTER TABLE devices ADD COLUMN shared_until INTEGER NOT NULL DEFAULT 0',
   },
+  {
+    table: 'devices',
+    column: 'platform',
+    sql: "ALTER TABLE devices ADD COLUMN platform TEXT NOT NULL DEFAULT ''",
+  },
 ];
 
 /** The one description of what this database is meant to look like. */

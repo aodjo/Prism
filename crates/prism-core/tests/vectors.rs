@@ -184,6 +184,7 @@ fn input_packets_round_trip_through_the_vectors() {
             0 => InputEvent::MouseMove {
                 dx: x,
                 dy: fields["y"].as_i64().unwrap() as i16,
+                caged: pressed,
             },
             1 => InputEvent::MouseButton {
                 button: MouseButton::try_from(x).unwrap(),

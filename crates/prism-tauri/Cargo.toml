@@ -17,7 +17,11 @@ prism-core.workspace = true
 prism-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["unstable", "tray-icon"] }
+# `devtools` so that a build somebody is testing can be opened up and looked at. Tauri gives a
+# debug build the inspector for nothing; a packaged one gets it only when asked for here, and a
+# packaged build is what these windows are always reported against. Turning it on does not open
+# anything — see `windows::inspect`, which is what decides when it is offered.
+tauri = { version = "2", features = ["unstable", "tray-icon", "devtools"] }
 tauri-plugin-updater = "2.11.0"
 # The smallest thing that does blocking HTTPS. The account is control plane — a request here is
 # a function call on its own thread, and an async runtime would be a scheduler this shell has no
@@ -25,10 +29,24 @@ tauri-plugin-updater = "2.11.0"
 # no gzip because every body in this API is a few hundred bytes of JSON.
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 
+# What lets a Linux machine watch and be watched at all: the software codec, the screen through
+# PipeWire and the input through the desktop portal. Only here, where the shell is built for Linux,
+# because each builds C or binds a system library that a Mac checking the Linux target has neither
+# a toolchain nor headers for.
+[target.'cfg(target_os = "linux")'.dependencies]
+prism-core = { workspace = true, features = ["linux-desktop"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6.2"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSGeometry", "NSString"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSGeometry",
+    "NSString",
+    # What a double-click on a title bar is meant to do here, which is a preference and not a
+    # constant: the same gesture zooms on one machine and minimises on another.
+    "NSUserDefaults",
+] }
 objc2-core-graphics = "0.3.2"
 # The banner a machine being controlled shows at the top of its screen: a panel of its own,
 # which is AppKit's and not the webview's, because a window the webview draws cannot be

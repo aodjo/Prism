@@ -23,3 +23,4 @@ pub mod power;
 pub mod render;
 pub mod stats;
 pub mod store;
+pub mod yuv;

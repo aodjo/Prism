@@ -229,8 +229,31 @@ fn opening() -> (&'static str, &'static str) {
 }
 
 /// How large the log may grow before a launch starts it afresh.
-#[cfg(all(unix, not(debug_assertions)))]
+#[cfg(all(any(unix, windows), not(debug_assertions)))]
 const LOG_CEILING: u64 = 1024 * 1024;
+
+/// Opens the log, beside this machine's key.
+///
+/// Started afresh once it has grown past [`LOG_CEILING`], so it never becomes the thing filling
+/// the disk. Nothing when there is no home directory to keep it under, or the file will not open
+/// — a log that cannot be kept is not a reason for the application not to start.
+#[cfg(all(any(unix, windows), not(debug_assertions)))]
+fn the_log() -> Option<std::fs::File> {
+    let path = identity::default_path().ok()?.with_file_name("prism.log");
+    let _ = std::fs::create_dir_all(path.parent()?);
+
+    let fresh = std::fs::metadata(&path).is_ok_and(|about| about.len() > LOG_CEILING);
+
+    if fresh {
+        std::fs::File::create(&path)
+    } else {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+    }
+    .ok()
+}
 
 /// Keeps what the application says on standard error, which is otherwise lost.
 ///
@@ -238,9 +261,6 @@ const LOG_CEILING: u64 = 1024 * 1024;
 /// every line a host writes about itself ends up — a session opening, why it ended — along with
 /// any panic. So a build not being run from a terminal points it at a file beside this machine's
 /// key, where somebody asked what happened on it can find the answer.
-///
-/// Started afresh at launch once it has grown past [`LOG_CEILING`], so it never becomes the
-/// thing filling the disk.
 #[cfg(all(unix, not(debug_assertions)))]
 fn keep_the_log() {
     use std::os::fd::AsRawFd as _;
@@ -249,25 +269,7 @@ fn keep_the_log() {
         fn dup2(from: std::ffi::c_int, to: std::ffi::c_int) -> std::ffi::c_int;
     }
 
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
-    };
-
-    let folder = std::path::Path::new(&home).join(".prism");
-    let path = folder.join("prism.log");
-    let _ = std::fs::create_dir_all(&folder);
-
-    let fresh = std::fs::metadata(&path).is_ok_and(|about| about.len() > LOG_CEILING);
-    let file = if fresh {
-        std::fs::File::create(&path)
-    } else {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-    };
-
-    if let Ok(file) = file {
+    if let Some(file) = the_log() {
         // SAFETY: both are open descriptors for the length of the call — the file's own, and
         // standard error, which every process starts with — and `dup2` only makes the second
         // refer to what the first does. The file's descriptor can close after; the copy stays.
@@ -275,8 +277,34 @@ fn keep_the_log() {
     }
 }
 
+/// Keeps what the application says on standard error, which is otherwise lost.
+///
+/// The same file, for the same reason, and needed here more: a windowed application on Windows
+/// has no standard error at all, so until this was written a machine that failed to share had
+/// said why to nobody, and finding out meant starting it by hand from a shell.
+#[cfg(all(windows, not(debug_assertions)))]
+fn keep_the_log() {
+    use std::os::windows::io::IntoRawHandle as _;
+
+    /// `STD_ERROR_HANDLE`, which the headers write as minus twelve.
+    const STANDARD_ERROR: u32 = 0xFFFF_FFF4;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetStdHandle(which: u32, handle: *mut std::ffi::c_void) -> i32;
+    }
+
+    if let Some(file) = the_log() {
+        // SAFETY: the handle is an open file's, and `into_raw_handle` gives it up so that
+        // nothing closes it while standard error refers to it — which is until the process
+        // ends. The standard library asks for this handle again at every write, so what is
+        // set here is what `eprintln!` and a panic both reach.
+        unsafe { SetStdHandle(STANDARD_ERROR, file.into_raw_handle()) };
+    }
+}
+
 /// Leaves standard error where it is: a build run from a terminal is read in that terminal.
-#[cfg(not(all(unix, not(debug_assertions))))]
+#[cfg(not(all(any(unix, windows), not(debug_assertions))))]
 fn keep_the_log() {}
 
 fn main() {
@@ -284,6 +312,18 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // When one of the two full-size windows replaces the other, the one being replaced is
+        // hidden at once and destroyed here — once the page in the new one has finished
+        // loading, which is the point at which its web view certainly exists. The banner is
+        // told the same thing for a different reason: that is when it can first be seen.
+        .on_page_load(|webview, payload| {
+            use tauri::Manager as _;
+
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                windows::settled(webview.app_handle(), webview.label());
+                watched::loaded(webview.label());
+            }
+        })
         .setup(|app| {
             eprintln!(
                 "prism: {} started at {}, process {}",
@@ -293,6 +333,8 @@ fn main() {
                     .map_or(0, |since| since.as_secs()),
                 std::process::id()
             );
+
+            windows::no_tabbing();
 
             app.manage(Held(Mutex::new(settings::load())));
             app.manage(account::Held::new());
@@ -438,6 +480,7 @@ fn main() {
             windows::open_settings,
             windows::open_transfers,
             windows::fit,
+            windows::title_bar_double_click,
             updates::build_info,
             updates::check_for_update,
             updates::install_update,

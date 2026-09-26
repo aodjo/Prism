@@ -862,7 +862,16 @@ function expectControl(bytes: Uint8Array, expected: ControlType, length: number)
  * Windows and macOS can be mapped from and neither uses natively.
  */
 export type InputEvent =
-  | { kind: InputKind.MouseMove; dx: number; dy: number }
+  /**
+   * Motion relative to the last report.
+   *
+   * `caged` says the far pointer has no edges to reach — it is hidden and the client is
+   * reporting how far the mouse moved, which is what a game that captured the cursor reads. The
+   * host must then not let its own pointer rest against a side of the screen, or every further
+   * report moves it nowhere and the turn stops halfway. Without it, stopping at an edge is
+   * exactly right: that is what a mouse on a desk does.
+   */
+  | { kind: InputKind.MouseMove; dx: number; dy: number; caged: boolean }
   | { kind: InputKind.MouseButton; button: MouseButton; pressed: boolean }
   | { kind: InputKind.MouseScroll; dx: number; dy: number }
   | { kind: InputKind.Key; usage: number; pressed: boolean }
@@ -902,6 +911,10 @@ export function encodeInputPacket(packet: InputPacket): Uint8Array {
 
   switch (packet.event.kind) {
     case InputKind.MouseMove:
+      x = packet.event.dx;
+      y = packet.event.dy;
+      flags = packet.event.caged ? 1 : 0;
+      break;
     case InputKind.MouseScroll:
       x = packet.event.dx;
       y = packet.event.dy;
@@ -968,7 +981,7 @@ export function decodeInputPacket(bytes: Uint8Array): InputPacket {
 
   switch (kind) {
     case InputKind.MouseMove:
-      return { originTsUs, event: { kind: InputKind.MouseMove, dx: x, dy: y } };
+      return { originTsUs, event: { kind: InputKind.MouseMove, dx: x, dy: y, caged: pressed } };
     case InputKind.MouseScroll:
       return { originTsUs, event: { kind: InputKind.MouseScroll, dx: x, dy: y } };
     case InputKind.MouseButton:

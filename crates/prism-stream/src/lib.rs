@@ -17,8 +17,8 @@
 //! sentences back — it sends one [`ipc::Start`] and receives [`ipc::Event`]s, which is an
 //! interface that can be changed without both sides having to agree on a wording.
 
-#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
+#[cfg(windowed)]
 mod audio;
-#[cfg(all(feature = "window", any(target_os = "macos", target_os = "windows")))]
+#[cfg(windowed)]
 pub mod display;
 pub mod ipc;

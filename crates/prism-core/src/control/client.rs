@@ -68,8 +68,15 @@ pub type PictureSink = SyncSender<crate::decode::videotoolbox::DecodedFrame>;
 #[cfg(target_os = "windows")]
 pub type PictureSink = SyncSender<crate::decode::mediafoundation::DecodedFrame>;
 
+/// Where decoded pictures go when the client is showing them.
+///
+/// In system memory rather than on a GPU: the one decoder every Linux machine has is a software
+/// one.
+#[cfg(linux_desktop)]
+pub type PictureSink = SyncSender<crate::decode::openh264::Picture>;
+
 /// Where decoded pictures would go on a platform with no decoder yet.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", linux_desktop)))]
 pub type PictureSink = SyncSender<()>;
 
 /// The GPU a client decodes onto, when something is drawing the pictures.
@@ -201,8 +208,9 @@ pub fn decodable() -> crate::net::negotiate::Codecs {
         Codecs::none().with(H264).with(crate::net::negotiate::HEVC)
     }
 
-    // Every other platform decodes nothing yet, so it offers the floor and gets a session it
-    // can at least reassemble and measure.
+    // Everywhere else it is H.264 alone: the Media Foundation decoder is given nothing else to
+    // decode yet, and the software decoder on Linux decodes nothing else at all. A build with
+    // no decoder still offers it, and gets a session it can at least reassemble and measure.
     #[cfg(not(target_os = "macos"))]
     {
         Codecs::none().with(H264)
@@ -1084,15 +1092,15 @@ pub fn run(config: ClientConfig, hooks: ClientHooks) -> io::Result<()> {
 /// one being waited for is measured as late and may be dropped. Roughly two frame intervals is
 /// long enough to absorb the decoder's own pipelining and short enough that a stall cannot
 /// cascade.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 const POLL_TIMEOUT: Duration = Duration::from_millis(8);
 
 /// What the decode loop needs of a platform's decoder.
 ///
-/// Both backends already have this shape. Naming it is what lets one loop drive either, so the
-/// counters, the timestamps and the bitstream dump behave identically on the two clients by
-/// construction rather than by two people having written the same thing twice.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+/// Every backend already has this shape. Naming it is what lets one loop drive any of them, so
+/// the counters, the timestamps and the bitstream dump behave identically on every client by
+/// construction rather than by several people having written the same thing more than once.
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 trait Decoder {
     /// What this decoder hands back, which stays in its own platform's GPU memory.
     type Picture;
@@ -1157,11 +1165,32 @@ impl Decoder for crate::decode::mediafoundation::MediaFoundationDecoder {
     }
 }
 
+#[cfg(linux_desktop)]
+impl Decoder for crate::decode::openh264::SoftwareDecoder {
+    type Picture = crate::decode::openh264::Picture;
+
+    fn decode(&mut self, annexb: &[u8], pts_us: u64) -> Result<(), crate::decode::DecodeError> {
+        Self::decode(self, annexb, pts_us)
+    }
+
+    fn poll(&mut self, timeout: Duration) -> Option<Self::Picture> {
+        Self::poll(self, timeout)
+    }
+
+    fn pts_of(picture: &Self::Picture) -> u64 {
+        picture.pts_us
+    }
+
+    fn take_errors(&mut self) -> Vec<i32> {
+        Self::take_errors(self)
+    }
+}
+
 /// Decodes everything the receive thread hands over and reports what came of it.
 ///
 /// The decoder is moved in and never leaves, which keeps every platform session object on the
 /// one thread that owns it.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", linux_desktop))]
 fn decode_until_closed<D: Decoder>(
     mut decoder: D,
     frames: &Receiver<FrameBuf>,
@@ -1297,10 +1326,56 @@ fn spawn_decoder(
     })
 }
 
+/// Starts the decode thread.
+///
+/// A decoder that will not start is said once and the frames drained, so the receive thread
+/// never blocks handing them over and the session goes on being measured with nothing shown.
+#[cfg(linux_desktop)]
+fn spawn_decoder(
+    frames: Receiver<FrameBuf>,
+    recycle: Sender<FrameBuf>,
+    pictures: Option<PictureSink>,
+    offset: Arc<AtomicI64>,
+    codec: crate::net::negotiate::Codec,
+    say: Say,
+) -> thread::JoinHandle<DecodeReport> {
+    use crate::decode::openh264::SoftwareDecoder;
+
+    thread::spawn(move || {
+        let decoder = match SoftwareDecoder::new() {
+            Ok(decoder) if codec == crate::net::negotiate::Codec::H264 => decoder,
+            Ok(_) => {
+                say.note(format!(
+                    "{codec:?} arrived, and this machine decodes only H.264"
+                ));
+
+                return drain(&frames, &recycle);
+            }
+            Err(err) => {
+                say.note(err.to_string());
+
+                return drain(&frames, &recycle);
+            }
+        };
+
+        decode_until_closed(decoder, &frames, &recycle, pictures, &offset, &say)
+    })
+}
+
+/// Hands every frame straight back, for a client with nothing to decode them with.
+#[cfg(linux_desktop)]
+fn drain(frames: &Receiver<FrameBuf>, recycle: &Sender<FrameBuf>) -> DecodeReport {
+    while let Ok(buf) = frames.recv() {
+        let _ = recycle.send(buf);
+    }
+
+    DecodeReport::default()
+}
+
 /// Starts a decode thread on a platform with no decoder yet.
 ///
 /// Drains the channel so the receive thread never blocks handing frames over.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", linux_desktop)))]
 fn spawn_decoder(
     frames: Receiver<FrameBuf>,
     recycle: Sender<FrameBuf>,
@@ -1398,6 +1473,9 @@ pub fn synthetic_motion(sequence: u64) -> InputEvent {
     InputEvent::MouseMove {
         dx: if sequence % 2 == 0 { 2 } else { -2 },
         dy: 0,
+        // Not caged: this is a measurement of the input path, and it belongs on a pointer the
+        // host treats exactly as it treats a mouse on a desk.
+        caged: false,
     }
 }
 

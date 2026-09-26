@@ -39,8 +39,13 @@ use sdl3_sys::video::{SDL_GetWindowProperties, SDL_PROP_WINDOW_COCOA_WINDOW_POIN
 /// One control in the title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    /// Hand the pointer and the keyboard to the machine being watched, or take them back.
-    Control,
+    /// Step through what this machine's keyboard and pointer are doing to the far one.
+    ///
+    /// One control rather than two, because the three states are stops on one road and not
+    /// independent switches: caging the pointer only means anything once input is being sent
+    /// at all, and two adjacent buttons both showing a cursor said nothing about which was
+    /// which.
+    Hands,
     /// Take the window down one step: out of full screen, or into the Dock.
     Shrink,
     /// Fill the screen, and leave it again.
@@ -59,7 +64,7 @@ impl Tool {
     /// The name the window server knows this item by.
     fn identifier(self) -> &'static str {
         match self {
-            Tool::Control => "kr.presm.prism.control",
+            Tool::Hands => "kr.presm.prism.hands",
             Tool::Shrink => "kr.presm.prism.shrink",
             Tool::Fullscreen => "kr.presm.prism.fullscreen",
             Tool::Send => "kr.presm.prism.send",
@@ -80,7 +85,7 @@ impl Tool {
     /// What the item is called underneath its picture.
     fn label(self) -> &'static str {
         match self {
-            Tool::Control => "제어",
+            Tool::Hands => Hands::Watching.label(),
             Tool::Shrink => "축소",
             Tool::Fullscreen => "전체 화면",
             Tool::Send => "파일 보내기",
@@ -97,7 +102,7 @@ impl Tool {
     /// this window uses did.
     fn symbol(self) -> &'static str {
         match self {
-            Tool::Control => "cursorarrow",
+            Tool::Hands => Hands::Watching.symbol(),
             Tool::Shrink => "arrow.down.right.and.arrow.up.left",
             Tool::Fullscreen => "arrow.up.left.and.arrow.down.right",
             Tool::Send => "square.and.arrow.up",
@@ -110,7 +115,7 @@ impl Tool {
 
 /// The controls, in the order they appear.
 const TOOLS: [Tool; 7] = [
-    Tool::Control,
+    Tool::Hands,
     Tool::Shrink,
     Tool::Fullscreen,
     Tool::Send,
@@ -119,8 +124,63 @@ const TOOLS: [Tool; 7] = [
     Tool::Disconnect,
 ];
 
-/// The symbol the control item carries while the machine is being controlled.
-const CONTROLLING: &str = "cursorarrow.rays";
+/// What this machine's keyboard and pointer are doing to the far one.
+///
+/// Three stops on one road rather than a pair of switches. Each one does everything the one
+/// before it did and one thing more, so there is never a question of which combination somebody
+/// is in — there is only how far along they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hands {
+    /// Nothing crosses. The far machine is a picture.
+    Watching,
+    /// Keys and clicks cross, and the pointer points at the picture from this side.
+    Controlling,
+    /// The pointer is caged here and crosses as movement, which is what a game reads.
+    Aiming,
+}
+
+impl Hands {
+    /// The other stop.
+    ///
+    /// Watching is not one of them. A session that may control starts controlling and stays
+    /// that way: the button chooses between pointing at the picture and being caged in it, and
+    /// somebody who wants to stop sending anything closes the session rather than parking it.
+    /// Watching remains the state of a session that was never allowed to control at all.
+    pub fn next(self) -> Self {
+        match self {
+            Hands::Aiming => Hands::Controlling,
+            Hands::Watching | Hands::Controlling => Hands::Aiming,
+        }
+    }
+
+    /// What the control is called while this is what it is doing.
+    pub fn label(self) -> &'static str {
+        match self {
+            Hands::Watching => "보기만",
+            Hands::Controlling => "제어 중",
+            Hands::Aiming => "게임",
+        }
+    }
+
+    /// The system symbol drawn on it.
+    fn symbol(self) -> &'static str {
+        match self {
+            Hands::Watching => "eye",
+            Hands::Controlling => "cursorarrow.rays",
+            Hands::Aiming => "scope",
+        }
+    }
+
+    /// Whether anything this machine does crosses to the other one.
+    pub fn sends(self) -> bool {
+        !matches!(self, Hands::Watching)
+    }
+
+    /// Whether the pointer is caged here and sent as movement.
+    pub fn caged(self) -> bool {
+        matches!(self, Hands::Aiming)
+    }
+}
 
 /// How large the symbols on the controls are drawn, in points.
 ///
@@ -444,17 +504,19 @@ impl Toolbar {
         menu.popUpMenuPositioningItem_atLocation_inView(None, NSEvent::mouseLocation(), None);
     }
 
-    /// Redraws the control item to say whether the far machine is being controlled.
-    pub fn set_controlling(&self, controlling: bool) {
-        let symbol = if controlling {
-            CONTROLLING
-        } else {
-            Tool::Control.symbol()
-        };
+    /// Redraws the hands item to say what this machine is doing to the other one.
+    ///
+    /// The label changes as well as the picture. A symbol alone leaves somebody counting stops
+    /// to work out where they are, and the whole reason this is one control is that they should
+    /// not have to.
+    pub fn set_hands(&self, hands: Hands) {
+        let label = NSString::from_str(hands.label());
 
         for (tool, item) in self.controls.ivars().items.borrow().iter() {
-            if *tool == Tool::Control {
-                item.setImage(symbol_image(symbol).as_deref());
+            if *tool == Tool::Hands {
+                item.setImage(symbol_image(hands.symbol()).as_deref());
+                item.setLabel(&label);
+                item.setToolTip(Some(&label));
             }
         }
     }

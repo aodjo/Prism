@@ -291,6 +291,10 @@ export function installBridge(): void {
       void call('fit', { height });
     },
 
+    titleBarDoubleClick: (): void => {
+      void call('title_bar_double_click');
+    },
+
     // Measured by asking every server a name resolves to, which the shell can do but does not
     // expose yet. An empty list is what a window draws when no server answered, which is the
     // truthful thing to show until this is wired.

@@ -991,6 +991,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn Error>> {
                     prism_stream::display::run(
                         config,
                         prism_stream::display::Shown {
+                            // No account here to ask what the machine is called, and the key
+                            // is not a title. The shell is where a name comes from.
+                            title: "Prism".to_owned(),
                             width: window_width,
                             height: window_height,
                             pacing_us,

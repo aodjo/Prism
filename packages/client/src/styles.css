@@ -19,3 +19,29 @@
   src: url('fonts/geist-latin.woff2') format('woff2');
 }
 
+/* Geist Mono, subset the same way, for figures.
+   Every number this window shows is one that changes while somebody is reading it — a frame
+   rate, a round trip, a rate in megabits. In a proportional face each of those redraws at a
+   different width, so a figure updating once a second jitters and the label beside it moves. A
+   monospaced face holds the column still, which is the whole of why it is here: not a look, but
+   a number that stays where it was put. */
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: block;
+  src: url('fonts/geist-mono-latin.woff2') format('woff2');
+}
+
+
+/* The bar that runs while a session opens. Indeterminate, because nothing on either side knows
+   how long a handshake takes: a percentage here would be a number chosen to look reassuring. */
+@keyframes sweep {
+  0% {
+    left: -34%;
+  }
+
+  100% {
+    left: 100%;
+  }
+}
