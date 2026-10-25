@@ -323,31 +323,41 @@ function Setup(): JSX.Element {
    */
   const [arrivedSignedIn, setArrivedSignedIn] = useState(false);
   const [accountTrouble, setAccountTrouble] = useState<string | null>(null);
+  /** Startup failures can be retried without discarding successful account or settings reads. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
-    void (async () => {
-      const [identity, account, stored] = await Promise.all([
-        prism.identity(),
-        prism.accountState(),
-        prism.getSettings(),
-      ]);
-
-      setVersion(identity.version);
+    let active = true;
+    setLoadError(null);
+    /** Applies each successful startup read independently while this attempt is mounted. */
+    const receive = <T,>(read: Promise<T>, apply: (value: T) => void): void => {
+      void read.then((value) => {
+        if (active) {
+          apply(value);
+        }
+      }).catch((error: unknown) => {
+        if (active) {
+          setLoadError(reason(error));
+        }
+      });
+    };
+    receive(prism.identity(), (identity) => { setVersion(identity.version); });
+    receive(prism.getSettings(), (stored) => {
       speak(stored.language);
       setSettings(stored);
+    });
+    receive(prism.accountState(), (account) => {
       setSignedIn(account.email);
       setArrivedSignedIn(account.email !== null);
-
-      // Arriving already signed in means this window was opened by a launch that found an
-      // account but no finished setup, and there is only one way to be in that state: the
-      // permissions step sent somebody to System Settings, and macOS reads a new grant only
-      // when the application starts again. They are coming back to that step, so start there
-      // rather than walking them through the welcome and the introduction a second time.
       if (account.email !== null) {
         setStep('permissions');
       }
-    })();
-  }, []);
+    });
+    return () => {
+      active = false;
+    };
+  }, [loadAttempt]);
 
   useEffect(() => {
     if (step !== 'permissions') {
@@ -1092,6 +1102,17 @@ function Setup(): JSX.Element {
             <Wordmark />
           </div>
         </div>
+
+        {loadError !== null && (
+          <div role="alert" className="mx-auto mt-4 text-center">
+            <Trouble message={`${t('Some information could not be loaded.')} ${loadError}`} />
+            <button type="button" className="btn-secondary mt-2" onClick={() => {
+              setLoadAttempt((attempt) => attempt + 1);
+            }}>
+              {t('Retry')}
+            </button>
+          </div>
+        )}
 
         {/* Both screens are in the same cell while one is arriving and the other leaving, so
             the move is a move rather than a jump through an empty page. */}

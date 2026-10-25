@@ -44,3 +44,34 @@ describe('signup recovery', () => {
     expect(app.button('I already have an account').props.disabled).toBe(true);
   });
 });
+
+
+describe('setup startup recovery', () => {
+  it('resumes permissions despite an identity failure and offers a working retry', async () => {
+    const app = setup();
+    app.api.identity.mockRejectedValueOnce(new Error('identity unavailable'));
+    app.api.accountState.mockResolvedValue({ email: 'test@example.invalid' });
+    app.effect('prism.identity')();
+    await settle();
+    expect(app.state).toContain('identity unavailable');
+    expect(app.button('Allow')).toBeDefined();
+    app.button('Retry').props.onClick();
+    app.render();
+    app.effect('prism.identity')();
+    await settle();
+    expect(app.api.identity).toHaveBeenCalledTimes(2);
+    expect(app.button('Retry')).toBeUndefined();
+  });
+
+  it('does not apply late startup replies after cleanup', async () => {
+    const app = setup();
+    let resolve!: (value: { email: string }) => void;
+    app.api.accountState.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const stop = app.effect('prism.identity')();
+    stop();
+    const before = [...app.state];
+    resolve({ email: 'test@example.invalid' });
+    await settle();
+    expect(app.state).toEqual(before);
+  });
+});
