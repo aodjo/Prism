@@ -5,6 +5,8 @@
  * setup flow and another way on the home window is two different claims about the same thing.
  */
 
+import { speaking, t } from './i18n.js';
+
 /** The names for each thousand-fold step, in the order they are reached. */
 const SIZES = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
 
@@ -77,11 +79,18 @@ const DAY = 24 * HOUR;
  */
 export function span(ms: number): string {
   if (ms < MINUTE) {
-    return `${Math.max(Math.round(ms / 1000), 1)}s`;
+    const seconds = Math.max(Math.round(ms / 1000), 1);
+    return speaking() === 'ko' ? t('{count} seconds', { count: seconds }) : `${seconds}s`;
   }
 
   const hours = Math.floor(ms / HOUR);
   const minutes = Math.floor((ms % HOUR) / MINUTE);
+
+  if (speaking() === 'ko') {
+    return hours > 0
+      ? t('{hours}h {minutes}m', { hours, minutes })
+      : t('{count} minutes', { count: minutes });
+  }
 
   return hours > 0 ? `${hours}h ${String(minutes).padStart(2, '0')}m` : `${minutes}m`;
 }
@@ -100,25 +109,25 @@ export function ago(at: number, now: number = Date.now()): string {
   const since = Math.max(now - at, 0);
 
   if (since < MINUTE) {
-    return 'just now';
+    return t('just now');
   }
 
   if (since < HOUR) {
     const minutes = Math.floor(since / MINUTE);
 
-    return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+    return t(minutes === 1 ? '{count} minute ago' : '{count} minutes ago', { count: minutes });
   }
 
   if (since < DAY) {
     const hours = Math.floor(since / HOUR);
 
-    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    return t(hours === 1 ? '{count} hour ago' : '{count} hours ago', { count: hours });
   }
 
   if (since < 7 * DAY) {
     const days = Math.floor(since / DAY);
 
-    return `${days} day${days === 1 ? '' : 's'} ago`;
+    return t(days === 1 ? '{count} day ago' : '{count} days ago', { count: days });
   }
 
   return when(at, now).split(' · ')[0] ?? '';
@@ -138,16 +147,16 @@ export function when(at: number, now: number = Date.now()): string {
   const days = Math.round((midnight(now) - midnight(at)) / DAY);
 
   if (days === 0) {
-    return `Today · ${clock}`;
+    return `${t('Today')} · ${clock}`;
   }
 
   if (days === 1) {
-    return `Yesterday · ${clock}`;
+    return `${t('Yesterday')} · ${clock}`;
   }
 
-  const month = then.toLocaleString('en-US', { month: 'short' });
+  const date = then.toLocaleDateString(speaking(), { month: 'short', day: 'numeric' });
 
-  return `${month} ${then.getDate()} · ${clock}`;
+  return `${date} · ${clock}`;
 }
 
 /**

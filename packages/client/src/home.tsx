@@ -650,7 +650,8 @@ function Home(): JSX.Element {
           <div className="flex min-h-full w-full flex-col px-8 pt-[80px] pb-[108px]">
             {loadError !== null && (
               <div role="alert" className="mb-4">
-                <Trouble message={`${t('Some information could not be loaded.')} ${loadError}`} />
+                <p>{t('Some information could not be loaded.')}</p>
+                <Trouble message={loadError} />
                 <button type="button" className="btn-secondary" onClick={() => {
                   setLoadAttempt((attempt) => attempt + 1);
                 }}>
@@ -898,7 +899,7 @@ function Home(): JSX.Element {
             {update.notes.trim() !== '' && (
               <p className="mt-2 mb-0 max-h-24 overflow-y-auto text-ui text-dim">{update.notes}</p>
             )}
-            {updateError !== '' && <p className="mt-3 mb-0 text-ui text-danger-ink">{updateError}</p>}
+            {updateError !== '' && <Trouble message={updateError} className="mt-3" />}
             <div className="mt-4 flex justify-end gap-2">
               <button
                 type="button"
@@ -921,7 +922,7 @@ function Home(): JSX.Element {
                   void prism
                     .installUpdate()
                     .catch((error: unknown) => {
-                      setUpdateError(error instanceof Error ? error.message : String(error));
+                      setUpdateError(reason(error));
                     })
                     .finally(() => {
                       setInstalling(false);

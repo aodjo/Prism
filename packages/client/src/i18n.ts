@@ -51,6 +51,35 @@ const KO: Record<string, string> = {
   "production": "정식",
   "development": "개발",
   "local": "로컬",
+  "just now": "방금",
+  "{count} second": "{count}초",
+  "{count} seconds": "{count}초",
+  "{count} minute": "{count}분",
+  "{count} minutes": "{count}분",
+  "{count} hour": "{count}시간",
+  "{count} hours": "{count}시간",
+  "{hours}h {minutes}m": "{hours}시간 {minutes}분",
+  "{count} minute ago": "{count}분 전",
+  "{count} minutes ago": "{count}분 전",
+  "{count} hour ago": "{count}시간 전",
+  "{count} hours ago": "{count}시간 전",
+  "{count} day ago": "{count}일 전",
+  "{count} days ago": "{count}일 전",
+  "Today": "오늘",
+  "Yesterday": "어제",
+  "The email, password or code is wrong.": "이메일, 비밀번호 또는 인증 코드가 올바르지 않아요.",
+  "That does not look like an email address.": "올바른 이메일 주소를 입력해요.",
+  "That address already has an account — sign in instead.": "이미 가입한 이메일 주소예요. 로그인해 주세요.",
+  "That code is wrong or has expired. Ask for a new one.": "코드가 올바르지 않거나 만료됐어요. 새 코드를 받아 주세요.",
+  "That code is wrong or has expired.": "코드가 올바르지 않거나 만료됐어요.",
+  "Open the link sent to that address, then sign in.": "이메일로 받은 링크를 연 뒤 로그인해 주세요.",
+  "A code from an authenticator app is six digits.": "인증 앱의 6자리 코드를 입력해요.",
+  "That machine is not on this account.": "이 계정에 등록되지 않은 기기예요.",
+  "The server could not finish that. Try again in a moment.": "서버에서 요청을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.",
+  "The account server could not be reached. Check your connection and try again.": "계정 서버에 연결하지 못했어요. 네트워크 연결을 확인하고 다시 시도해 주세요.",
+  "The server returned an unreadable response. Try again or update PRISM.": "서버 응답을 읽지 못했어요. 다시 시도하거나 PRISM을 업데이트해 주세요.",
+  "The operation could not be completed. Please try again.": "요청을 처리하지 못했어요. 다시 시도해 주세요.",
+  "Technical details": "오류 상세 정보",
   /* ── Setup ─────────────────────────────────────────────────────────────── */
   'Your desktop.': '내 컴퓨터를',
   'Everywhere.': '어디서나.',
@@ -285,12 +314,12 @@ let chosen = '';
  * @returns {void}
  */
 export function speak(language: string): void {
-  chosen =
-    language ||
-    // What the system is set to, which is what the webview reports. Only the part before the
-    // region: `ko-KR` and `ko` are the same language and there is one Korean here.
-    (navigator.language || 'en').split('-')[0] ||
-    'en';
+  const requested = language || navigator.language || 'en';
+  chosen = requested.toLowerCase().split(/[-_]/u)[0] === 'ko' ? 'ko' : 'en';
+
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = chosen;
+  }
 }
 
 /**
@@ -305,9 +334,8 @@ export function speaking(): string {
 /**
  * Says something in the language the windows are in.
  *
- * The English is the key, so a string with no translation comes out as itself. That is the right
- * failure: a screen in one language with a sentence in another is legible, and a screen showing
- * a key is not.
+ * The English sentence is the key. Dictionaries cover application copy; external names and
+ * release notes retain their original text.
  *
  * @param {string} english - What it says in English.
  * @param {Record<string, string | number>} [values] - What to put in `{braces}`, if any.
@@ -330,3 +358,26 @@ export function t(english: string, values?: Record<string, string | number>): st
 }
 
 speak('');
+
+
+/**
+ * Translates expected failures while retaining unknown diagnostics for an expandable detail.
+ *
+ * @param {string} message - The unmodified failure reported by the bridge or server.
+ * @returns {string} A readable description in the selected language.
+ */
+export function failure(message: string): string {
+  if (chosen !== 'ko' || message in KO) {
+    return t(message);
+  }
+
+  if (/^(?:the account server could not be reached:|Failed to fetch|NetworkError|Load failed)/iu.test(message)) {
+    return t('The account server could not be reached. Check your connection and try again.');
+  }
+
+  if (/^the account server(?:'s answer could not be read:| sent (?:an answer|a salt) this build could not read)/iu.test(message)) {
+    return t('The server returned an unreadable response. Try again or update PRISM.');
+  }
+
+  return t('The operation could not be completed. Please try again.');
+}

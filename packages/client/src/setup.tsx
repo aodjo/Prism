@@ -555,13 +555,13 @@ function Setup(): JSX.Element {
       return;
     }
     if ([...password].length < MIN_PASSWORD) {
-      setAccountTrouble(t('A password needs at least 8 characters.'));
+      setAccountTrouble('A password needs at least 8 characters.');
       return;
     }
     // Checked here because it cannot be checked anywhere else: the password never leaves this
     // machine, so a mistyped one is only ever two strings in this window that differ.
     if (password !== confirm) {
-      setAccountTrouble(t('Those two passwords are not the same'));
+      setAccountTrouble('Those two passwords are not the same');
       return;
     }
     submitting.current = true;
@@ -1007,7 +1007,7 @@ function Setup(): JSX.Element {
           </div>
           {trouble !== '' && (
             <div role="alert" className="mt-4 text-center">
-              <p className="text-note text-danger-ink">{trouble}</p>
+              <Trouble message={trouble} />
               <button type="button" className="btn-secondary mt-2" disabled={permissionBusy} onClick={() => {
                 setPermissionAttempt((attempt) => attempt + 1);
               }}>
@@ -1151,7 +1151,8 @@ function Setup(): JSX.Element {
 
         {loadError !== null && (
           <div role="alert" className="mx-auto mt-4 text-center">
-            <Trouble message={`${t('Some information could not be loaded.')} ${loadError}`} />
+            <p>{t('Some information could not be loaded.')}</p>
+            <Trouble message={loadError} />
             <button type="button" className="btn-secondary mt-2" onClick={() => {
               setLoadAttempt((attempt) => attempt + 1);
             }}>
