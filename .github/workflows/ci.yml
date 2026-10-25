@@ -36,6 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Test deployment isolation and rollback
+        run: python3 -m unittest discover -s deploy/rendezvous -p 'test_*.py'
+
       # This job compiles the Linux host, which encodes through VAAPI, and the shell, whose
       # Linux backend is WebKitGTK. Both are found through pkg-config, so a runner without the
       # headers does not skip them — it stops.
@@ -353,7 +356,7 @@ jobs:
   # would produce unsigned bundles nobody could install.
   release:
     name: release
-    needs: build
+    needs: [build, lint, rendezvous]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v'))
@@ -567,7 +570,7 @@ jobs:
     if: >-
       needs.touched.outputs.rendezvous == 'true' &&
       vars.RENDEZVOUS_DEPLOY_ENABLED != 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
@@ -597,61 +600,49 @@ jobs:
         with:
           context: .
           file: deploy/rendezvous/Dockerfile
-          # What the regions actually run, and nothing else. Every one of the five is x86_64;
-          # the arm64 half was built under emulation for machines that do not exist, and it was
-          # seventeen of this job's nineteen minutes.
-          #
-          # An arm region is a `ubuntu-24.04-arm` runner building its half natively and a
-          # manifest joining the two — which is a change to make when there is one, not a
-          # standing cost paid on every push in case there ever is.
-          platforms: linux/amd64
+          # The remaining Osaka region is ARM64. Build it natively on an ARM runner.
+          platforms: linux/arm64
           push: true
           tags: ${{ steps.name.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: The ARM64 image runs natively
+        run: docker run --rm '${{ steps.name.outputs.image }}@${{ steps.push.outputs.digest }}' --help
+
       - name: Pin what was built
         id: pinned
         run: echo "image=${{ steps.name.outputs.image }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
-  # Putting it where it runs, on every region at once.
-  #
-  # Here rather than in a workflow of its own, and that is not tidiness. GitHub fires
-  # `workflow_run` and `workflow_dispatch` only for a file on the **default branch**, which is
-  # `main` — so `deploy.yml`, which lives on `develop`, has never run and cannot be run by hand.
-  # It is not even listed. This job is in the workflow that *is* registered from `main`.
-  #
-  # Every region is one shape: this repository's `compose.yaml`, an `.env` that is the only
-  # thing differing between them, and an image pulled by digest. The `.env` is not deployed and
-  # never should be — it holds the region's name and its report token, and a server's secrets
-  # belong to the server rather than to the repository that builds it.
+  # Use an ephemeral OIDC identity to reach Osaka's private management SSH service. The
+  # restricted SSH key invokes only deploy/rendezvous/deploy.py; server secrets stay in .env.
   deploy:
     name: deploy ${{ matrix.region.region }}
-    needs: image
+    needs: [image, build, lint]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       # To pull what the job above pushed. Read, not write: nothing here publishes.
       packages: read
+      id-token: write
+    concurrency:
+      group: prism-region-${{ matrix.region.region }}
+      cancel-in-progress: false
+    timeout-minutes: 10
     strategy:
-      # One unreachable machine must not stop the others being updated. A half-updated set is
-      # the ordinary state of a rolling deploy; a set nobody updated because the first machine
-      # was down is worse.
       fail-fast: false
       matrix:
-        # A repository variable rather than a secret, and rather than a list in this file.
-        #
-        # Not a secret because it is not one: every address here is already public, in the
-        # `rv.presm.kr` records that tell every client where to look. Making it a secret bought
-        # nothing and cost the first run — GitHub scrubs secret values out of job outputs, so
-        # the list arrived as `***`, `fromJson` refused it, and the matrix produced no jobs at
-        # all. Every job reported success and the run failed with nothing to look at.
-        #
-        # Not a list here because adding a region should stay a machine, a port, an address
-        # record and a line in that variable — not a commit.
+        # Separate the private management address from the public UDP probe address.
         region: ${{ fromJson(vars.DEPLOY_HOSTS) }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Join the deployment network
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ vars.TAILSCALE_CLIENT_ID }}
+          audience: ${{ vars.TAILSCALE_AUDIENCE }}
+          tags: tag:prism-deploy
 
       - name: Reach the region
         env:
@@ -665,43 +656,26 @@ jobs:
           # pointed somewhere else by anything that answers first.
           printf '%s\n' "$HOSTS" > ~/.ssh/known_hosts
 
-      - name: Send what describes the deployment
-        run: |
-          scp deploy/rendezvous/compose.yaml \
-            "${{ matrix.region.user }}@${{ matrix.region.host }}:/tmp/compose.yaml"
-
       - name: Pull the image and bring it up
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+          DEPLOY_HOST: ${{ matrix.region.host }}
+          DEPLOY_USER: ${{ matrix.region.user }}
+          DEPLOY_PORT: ${{ matrix.region.port || 2222 }}
         run: |
-          ssh "${{ matrix.region.user }}@${{ matrix.region.host }}" "
-            set -e
-            # Root on most of these, a sudoer on the rest. One command shape either way.
-            if [ \"\$(id -u)\" -eq 0 ]; then SUDO=; else SUDO=sudo; fi
-            \$SUDO install -d -m 700 /opt/prism
-            \$SUDO mv /tmp/compose.yaml /opt/prism/compose.yaml
-            echo '${{ secrets.GITHUB_TOKEN }}' | \$SUDO docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-            # Named in full rather than reached by changing directory. The directory is root's
-            # and mode 700, so on the one region that connects as a sudoer rather than as root
-            # the \`cd\` failed before any of this ran — four regions updated and one did not.
-            \$SUDO env PRISM_IMAGE='${{ needs.image.outputs.image }}' \
-              docker compose -f /opt/prism/compose.yaml --env-file /opt/prism/.env \
-              up -d --no-build --pull always
-            \$SUDO docker image prune -f
-          "
-
-      # Asking whether the container is running is not the same as asking whether it works. A
-      # region that came up but bound nothing is a container in perfect health serving nobody,
-      # which is exactly what a restart that lost its `.env` looks like.
-      - name: It is running and holding its ports
-        run: |
-          ssh "${{ matrix.region.user }}@${{ matrix.region.host }}" "
-            set -e
-            if [ \"\$(id -u)\" -eq 0 ]; then SUDO=; else SUDO=sudo; fi
-            sleep 8
-            \$SUDO docker inspect -f '{{.State.Running}}' prism-rendezvous | grep -qx true
-            ss -lnu | grep -q ':47300 '
-            ss -lnu | grep -q ':47301 '
-            \$SUDO docker logs --tail 5 prism-rendezvous
-          "
+          python3 - <<'PY' | ssh -T -p "$DEPLOY_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+            "$DEPLOY_USER@$DEPLOY_HOST"
+          import json, os, pathlib
+          print(json.dumps({
+              "image": os.environ["IMAGE"],
+              "registry_user": os.environ["REGISTRY_USER"],
+              "registry_token": os.environ["REGISTRY_TOKEN"],
+              "compose": pathlib.Path("deploy/rendezvous/compose.yaml").read_text(),
+          }))
+          PY
 
       # And the question neither of those answers: does it serve *this* region to somebody who
       # is not on the machine? Asked from here, over the internet, in the protocol itself.
@@ -714,7 +688,7 @@ jobs:
           python3 - <<'PY'
           import os, socket, sys
 
-          host = "${{ matrix.region.host }}"
+          host = "${{ matrix.region.public_host || matrix.region.host }}"
           want = """${{ matrix.region.region }}"""
 
           for attempt in range(3):
