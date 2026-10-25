@@ -11,6 +11,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -93,13 +94,13 @@ pub struct Settings {
     pub setup_finished: bool,
     /// The blocks on the home board, in the arrangement somebody left them.
     ///
-    /// Empty until somebody moves something, and empty is what a fresh machine wants: the window
-    /// lays out a default board from whatever machines the account has, which is a better first
-    /// screen than one saved before those machines existed. Once anything here is set it is
-    /// taken as the whole arrangement, so a block missing from this list is a block that was
-    /// deliberately removed rather than one that has yet to be placed.
+    /// A fresh machine gets a default arrangement. `board_initialized` distinguishes that state
+    /// from a saved board whose blocks have all been removed. Older nonempty boards remain valid.
     #[serde(default)]
     pub board: Vec<Block>,
+    /// Whether an arrangement was saved, including an intentionally empty board.
+    #[serde(default)]
+    pub board_initialized: bool,
 }
 
 /// One block on the home board.
@@ -184,8 +185,47 @@ impl Default for Settings {
             language: String::new(),
             setup_finished: false,
             board: Vec::new(),
+            board_initialized: false,
         }
     }
+}
+
+/// Applies a partial update to the latest settings and persists it under the same lock.
+///
+/// Failed validation or persistence leaves the in-memory settings unchanged.
+///
+/// # Errors
+///
+/// Returns an error for unknown fields, invalid values, a poisoned lock or a failed write.
+pub fn update(
+    held: &Mutex<Settings>,
+    patch: serde_json::Map<String, serde_json::Value>,
+    persist: impl FnOnce(&Settings) -> Result<(), String>,
+) -> Result<Settings, String> {
+    let mut current = held
+        .lock()
+        .map_err(|_| "the settings lock was poisoned".to_owned())?;
+    let mut next = serde_json::to_value(&*current).map_err(|error| error.to_string())?;
+    let fields = next
+        .as_object_mut()
+        .expect("settings serialize as an object");
+    let arranged = patch.contains_key("board");
+
+    for (key, value) in patch {
+        let field = fields
+            .get_mut(&key)
+            .ok_or_else(|| format!("unknown setting: {key}"))?;
+        *field = value;
+    }
+
+    if arranged {
+        fields.insert("boardInitialized".to_owned(), true.into());
+    }
+
+    let next: Settings = serde_json::from_value(next).map_err(|error| error.to_string())?;
+    persist(&next)?;
+    *current = next;
+    Ok(current.clone())
 }
 
 /// Returns the directory the two shells share.
@@ -268,6 +308,79 @@ pub fn save(settings: &Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_patches_preserve_both_changes() {
+        use std::sync::{Arc, Barrier};
+
+        let held = Arc::new(Mutex::new(Settings::default()));
+        let ready = Arc::new(Barrier::new(2));
+        let jobs: Vec<_> = [
+            serde_json::json!({"fps": 120}),
+            serde_json::json!({"bitrateBps": 80_000_000}),
+        ]
+        .into_iter()
+        .map(|patch| {
+            let held = held.clone();
+            let ready = ready.clone();
+            std::thread::spawn(move || {
+                ready.wait();
+                update(&held, patch.as_object().unwrap().clone(), |_| Ok(())).unwrap();
+            })
+        })
+        .collect();
+
+        for job in jobs {
+            job.join().unwrap();
+        }
+
+        let settings = held.lock().unwrap();
+        assert_eq!(settings.fps, 120);
+        assert_eq!(settings.bitrate_bps, 80_000_000);
+        assert!(settings.control);
+    }
+
+    #[test]
+    fn a_failed_write_preserves_the_current_settings() {
+        let held = Mutex::new(Settings::default());
+        let patch = serde_json::json!({"fps": 120});
+        let result = update(&held, patch.as_object().unwrap().clone(), |_| {
+            Err("disk full".to_owned())
+        });
+
+        assert_eq!(result.unwrap_err(), "disk full");
+        assert_eq!(held.lock().unwrap().fps, 60);
+    }
+
+    #[test]
+    fn invalid_patches_are_rejected_before_persistence() {
+        let held = Mutex::new(Settings::default());
+        for patch in [
+            serde_json::json!({"unknown": true}),
+            serde_json::json!({"fps": null}),
+            serde_json::json!({"fps": "120"}),
+        ] {
+            assert!(
+                update(&held, patch.as_object().unwrap().clone(), |_| {
+                    panic!("an invalid patch must not be persisted")
+                })
+                .is_err()
+            );
+            assert_eq!(held.lock().unwrap().fps, 60);
+        }
+    }
+
+    #[test]
+    fn saving_an_empty_board_marks_it_as_intentional() {
+        let held = Mutex::new(Settings::default());
+        let patch = serde_json::json!({"board": []});
+        let saved = update(&held, patch.as_object().unwrap().clone(), |_| Ok(())).unwrap();
+        let loaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+
+        assert!(loaded.board.is_empty());
+        assert!(loaded.board_initialized);
+    }
 
     #[test]
     fn unknown_keys_do_not_survive_a_read() {

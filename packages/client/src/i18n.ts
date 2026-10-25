@@ -17,24 +17,87 @@
  * explains itself in a clause, the Korean names the subject and says it directly.
  */
 const KO: Record<string, string> = {
+  'Some information could not be loaded.': '일부 정보를 불러오지 못했어요.',
+  'A password needs at least 8 characters.': '비밀번호는 8자 이상 입력해요.',
+  'Those two passwords are not the same': '두 비밀번호가 서로 달라요.',
+  'Send a new code': '새 코드 보내기',
+  'Edit signup details': '가입 정보 수정',
+  Retry: '다시 시도',
+  "Hello, {email}": "{email}님, 반가워요",
+  "Create account": "계정 만들기",
+  "Confirm code": "코드 확인",
+  "Password — at least eight characters": "비밀번호 · 8자 이상",
+  "Every machine on this account now knows about this one, and this one knows about them.": "같은 계정에 로그인한 기기에서 이 컴퓨터를 찾을 수 있어요.",
+  "Enter what your authenticator shows now, so you know it works before you need it.": "인증 앱에 표시된 코드를 입력해 정상적으로 등록됐는지 확인해요.",
+  "Six digits from your authenticator, for {email}.": "{email} 계정의 인증 앱에 표시된 6자리 코드를 입력해요.",
+  "Set up the second factor now. It is the only time it is shown.": "인증 앱을 등록해요. 등록용 QR 코드와 키는 지금만 볼 수 있어요.",
+  "Six digits went to {email}. Nothing is created until they come back.": "{email}로 6자리 코드를 보냈어요. 코드를 확인한 뒤 가입을 진행해요.",
+  "An account is how your machines find each other, and how this one is recognised when it asks.": "계정을 만들면 내 기기끼리 서로 찾고 안전하게 연결할 수 있어요.",
+  "Sign in and every machine on your account finds this one.": "로그인하면 같은 계정의 기기에서 이 컴퓨터를 찾을 수 있어요.",
+  "This machine is ready. Sign in to an account to reach it from anywhere else.": "이 컴퓨터가 준비됐어요. 계정에 로그인하면 다른 곳에서도 연결할 수 있어요.",
+  "Signed in as {email}. Every machine you sign in to this account keeps its own screen, and can reach the others.": "{email} 계정으로 로그인했어요. 같은 계정의 기기끼리 화면을 공유하고 연결할 수 있어요.",
+  "Digit {n}": "코드 {n}번째 자리",
+  "That code was refused": "코드가 올바르지 않아요",
+  "That code was accepted": "코드를 확인했어요",
+  "Beta": "베타",
+  "Signed in as {email}": "{email} 계정으로 로그인됨",
+  "Not signed in": "로그인 안 됨",
+  "Last seen": "마지막 접속",
+  "A new build is available": "새 빌드를 사용할 수 있어요",
+  "Installing {version} will restart PRISM.": "{version}을 설치하면 PRISM이 다시 시작돼요.",
+  "Later": "나중에",
+  "Installing…": "설치 중…",
+  "Scan this with an authenticator app. It is shown once — the server keeps only enough to check codes, which is not enough to show it again.": "인증 앱으로 QR 코드를 스캔해요. 등록용 QR 코드와 키는 이 화면에서만 볼 수 있어요.",
+  "production": "정식",
+  "development": "개발",
+  "local": "로컬",
+  "just now": "방금",
+  "{count} second": "{count}초",
+  "{count} seconds": "{count}초",
+  "{count} minute": "{count}분",
+  "{count} minutes": "{count}분",
+  "{count} hour": "{count}시간",
+  "{count} hours": "{count}시간",
+  "{hours}h {minutes}m": "{hours}시간 {minutes}분",
+  "{count} minute ago": "{count}분 전",
+  "{count} minutes ago": "{count}분 전",
+  "{count} hour ago": "{count}시간 전",
+  "{count} hours ago": "{count}시간 전",
+  "{count} day ago": "{count}일 전",
+  "{count} days ago": "{count}일 전",
+  "Today": "오늘",
+  "Yesterday": "어제",
+  "The email, password or code is wrong.": "이메일, 비밀번호 또는 인증 코드가 올바르지 않아요.",
+  "That does not look like an email address.": "올바른 이메일 주소를 입력해요.",
+  "That address already has an account — sign in instead.": "이미 가입한 이메일 주소예요. 로그인해 주세요.",
+  "That code is wrong or has expired. Ask for a new one.": "코드가 올바르지 않거나 만료됐어요. 새 코드를 받아 주세요.",
+  "That code is wrong or has expired.": "코드가 올바르지 않거나 만료됐어요.",
+  "Open the link sent to that address, then sign in.": "이메일로 받은 링크를 연 뒤 로그인해 주세요.",
+  "A code from an authenticator app is six digits.": "인증 앱의 6자리 코드를 입력해요.",
+  "That machine is not on this account.": "이 계정에 등록되지 않은 기기예요.",
+  "The server could not finish that. Try again in a moment.": "서버에서 요청을 처리하지 못했어요. 잠시 후 다시 시도해 주세요.",
+  "The account server could not be reached. Check your connection and try again.": "계정 서버에 연결하지 못했어요. 네트워크 연결을 확인하고 다시 시도해 주세요.",
+  "The server returned an unreadable response. Try again or update PRISM.": "서버 응답을 읽지 못했어요. 다시 시도하거나 PRISM을 업데이트해 주세요.",
+  "The operation could not be completed. Please try again.": "요청을 처리하지 못했어요. 다시 시도해 주세요.",
+  "Technical details": "오류 상세 정보",
   /* ── Setup ─────────────────────────────────────────────────────────────── */
   'Your desktop.': '내 컴퓨터를',
   'Everywhere.': '어디서나.',
   Everywhere: '어디서나',
   'Low-latency remote access for macOS, Windows, and Linux.':
-    'macOS · Windows · Linux를 지연 없이 원격으로 씁니다.',
+    'macOS · Windows · Linux를 지연 없이 원격으로 사용하세요.',
   Begin: '시작',
-  'Already using PRISM? Sign in': '이미 쓰고 있다면 로그인',
+  Back: '뒤로가기',
+  'Already using PRISM? Sign in': '계정이 이미 있다면 로그인',
   'One machine, every screen.': '한 대의 컴퓨터, 모든 화면.',
   'PRISM streams your desktop to any other device you own — with latency low enough that you stop noticing it’s remote.':
-    'PRISM은 내 컴퓨터 화면을 내가 가진 다른 기기로 보냅니다. 원격이라는 걸 잊을 만큼 빠릅니다.',
-  'Scan this with an authenticator app. It is shown once — the server keeps only enough to check codes, which is not enough to show it again.':
-    '인증 앱으로 스캔하세요. 이 화면은 한 번만 보여집니다.',
+    'PRISM은 내 컴퓨터 화면을 내가 가진 다른 기기로 보냅니다.',
+  'Scan this with an authenticator app, then test its code to finish creating your account. If you close this screen first, start signup again.':
+    '인증 앱으로 스캔한 뒤 코드를 확인하면 가입이 완료돼요. 먼저 이 화면을 닫았다면 가입을 다시 시작해요.',
   'I have it — test it': '등록했습니다 — 확인하기',
   'A few permissions first': '먼저 권한이 필요합니다',
   'PRISM needs these to capture and control this machine.':
-    '이 컴퓨터의 화면을 보내고 조작하려면 필요합니다.',
-  'Nothing is sent outside your own network.': '내 네트워크 밖으로 나가지 않습니다.',
+    '이 컴퓨터의 화면을 보내고 조작하려면 다음 권한이 필요합니다.',
   Granted: '허용됨',
   'Screen Recording': '화면 기록',
   Accessibility: '손쉬운 사용',
@@ -106,7 +169,7 @@ const KO: Record<string, string> = {
   Opening: '여는 중',
   'Sharing failed': '공유하지 못했습니다',
   '{name} is watching this machine': '{name}에서 이 컴퓨터를 보는 중',
-  '{name} is controlling this machine': '{name}에서 이 컴퓨터를 제어하는 중입니다',
+  '{name} is controlling this machine': '{name}에서 이 컴퓨터를 제어하는 중이에요',
   Disconnect: '연결 끊기',
   'Turn on sharing on the machine you want to watch, and it turns up here.':
     '보고 싶은 컴퓨터에서 공유를 켜면 여기에 나타납니다.',
@@ -141,8 +204,8 @@ const KO: Record<string, string> = {
     '로그인하면 내 컴퓨터들이 서로 찾습니다. 계정 없이도 화면의 코드를 읽어 연결할 수 있습니다.',
   'Sign in': '로그인',
   'Sign out': '로그아웃',
-  Forget: '해제',
-  Email: '주소',
+  Forget: '등록 해제',
+  Email: '이메일',
   Password: '비밀번호',
   'Password again': '비밀번호 확인',
   Code: '코드',
@@ -250,12 +313,12 @@ let chosen = '';
  * @returns {void}
  */
 export function speak(language: string): void {
-  chosen =
-    language ||
-    // What the system is set to, which is what the webview reports. Only the part before the
-    // region: `ko-KR` and `ko` are the same language and there is one Korean here.
-    (navigator.language || 'en').split('-')[0] ||
-    'en';
+  const requested = language || navigator.language || 'en';
+  chosen = requested.toLowerCase().split(/[-_]/u)[0] === 'ko' ? 'ko' : 'en';
+
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = chosen;
+  }
 }
 
 /**
@@ -270,9 +333,8 @@ export function speaking(): string {
 /**
  * Says something in the language the windows are in.
  *
- * The English is the key, so a string with no translation comes out as itself. That is the right
- * failure: a screen in one language with a sentence in another is legible, and a screen showing
- * a key is not.
+ * The English sentence is the key. Dictionaries cover application copy; external names and
+ * release notes retain their original text.
  *
  * @param {string} english - What it says in English.
  * @param {Record<string, string | number>} [values] - What to put in `{braces}`, if any.
@@ -295,3 +357,26 @@ export function t(english: string, values?: Record<string, string | number>): st
 }
 
 speak('');
+
+
+/**
+ * Translates expected failures while retaining unknown diagnostics for an expandable detail.
+ *
+ * @param {string} message - The unmodified failure reported by the bridge or server.
+ * @returns {string} A readable description in the selected language.
+ */
+export function failure(message: string): string {
+  if (chosen !== 'ko' || message in KO) {
+    return t(message);
+  }
+
+  if (/^(?:the account server could not be reached:|Failed to fetch|NetworkError|Load failed)/iu.test(message)) {
+    return t('The account server could not be reached. Check your connection and try again.');
+  }
+
+  if (/^the account server(?:'s answer could not be read:| sent (?:an answer|a salt) this build could not read)/iu.test(message)) {
+    return t('The server returned an unreadable response. Try again or update PRISM.');
+  }
+
+  return t('The operation could not be completed. Please try again.');
+}

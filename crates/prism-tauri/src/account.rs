@@ -1747,6 +1747,7 @@ pub fn account_register(
 /// is reported as one failure.
 #[tauri::command(async)]
 pub fn account_sign_in(
+    app: tauri::AppHandle,
     email: String,
     password: String,
     code: String,
@@ -1754,7 +1755,10 @@ pub fn account_sign_in(
     held: State<'_, Held>,
     settings: State<'_, Chosen>,
 ) -> Result<AccountState, String> {
-    held.with(|holder| holder.sign_in(&settings, &email, &password, &code, &label))?
+    let state =
+        held.with(|holder| holder.sign_in(&settings, &email, &password, &code, &label))??;
+    crate::sharing::refresh_peers(&app)?;
+    Ok(state)
 }
 
 /// Ends the session, here and on the server.
@@ -1798,11 +1802,14 @@ pub fn account_rename(
 /// Fails if nobody is signed in, or the server refuses.
 #[tauri::command(async)]
 pub fn account_forget_device(
+    app: tauri::AppHandle,
     public_key: String,
     held: State<'_, Held>,
     settings: State<'_, Chosen>,
 ) -> Result<AccountState, String> {
-    held.with(|holder| holder.forget(&settings, &public_key))?
+    let state = held.with(|holder| holder.forget(&settings, &public_key))??;
+    crate::sharing::refresh_peers(&app)?;
+    Ok(state)
 }
 
 /// Asks the account again who its machines are, and says whether they changed.

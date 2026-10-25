@@ -23,6 +23,7 @@ required-features = ["window"]
 prism-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sys-locale = "0.3.2"
 
 [features]
 default = ["window"]

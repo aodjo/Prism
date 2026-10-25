@@ -54,7 +54,67 @@ const BITRATE_BPS: (u32, u32) = (500_000, 200_000_000);
 /// The number counts the times sharing has been turned on, so that what watches one of them can
 /// tell it apart from the next: sharing stopped and started again inside one of its checks would
 /// otherwise look to it like the same sharing still running, and two would go on watching.
-pub struct Held(Mutex<Option<HostService>>, AtomicU64);
+pub struct Held(Mutex<Option<Running>>, AtomicU64);
+
+/// A sharing process and the exact peers its handshake will admit.
+struct Running {
+    service: HostService,
+    allowed: Vec<[u8; 32]>,
+}
+
+/// Replaces a running host when the account changes its authorization list.
+///
+/// Joining the previous host also ends any active or pending handshake before the new list is used.
+fn reconcile(slot: &mut Option<Running>, config: HostConfig, keys: HostKeys) -> Result<(), String> {
+    let Some(running) = slot.as_ref() else {
+        return Ok(());
+    };
+    if running.allowed.len() == keys.allowed.len()
+        && running.allowed.iter().all(|key| keys.allowed.contains(key))
+    {
+        return Ok(());
+    }
+    if let Some(old) = slot.take() {
+        old.service.join();
+    }
+    let allowed = keys.allowed.clone();
+    let service = HostService::start(config, keys).map_err(|error| say(&error))?;
+    *slot = Some(Running { service, allowed });
+    Ok(())
+}
+
+/// Refreshes a live host after the account's trusted devices change.
+///
+/// # Errors
+///
+/// Fails if keys, settings or the sharing lock cannot be read, or the replacement cannot start.
+pub fn refresh_peers(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager as _;
+    let held = app.state::<Held>();
+    let chosen = app.state::<Chosen>();
+    let mut slot = held
+        .0
+        .lock()
+        .map_err(|_| "the sharing lock was poisoned".to_owned())?;
+    if slot.is_none() {
+        return Ok(());
+    }
+    let result = (|| {
+        let settings = chosen
+            .0
+            .lock()
+            .map_err(|_| "the settings lock was poisoned".to_owned())?
+            .clone();
+        reconcile(&mut slot, configure(&settings)?, keys()?)
+    })();
+    if result.is_err() {
+        if let Some(old) = slot.take() {
+            old.service.join();
+        }
+        remember(&chosen, false)?;
+    }
+    result
+}
 
 impl Held {
     /// Builds the sharing state of a machine that is not shared.
@@ -304,6 +364,11 @@ fn keep_watch(app: tauri::AppHandle, turn: u64) {
                 return;
             }
 
+            if let Err(error) = refresh_peers(&app) {
+                eprintln!("sharing: could not refresh trusted devices: {error}");
+                continue;
+            }
+
             let chosen: State<'_, Chosen> = app.state();
 
             if !holds_what_it_needs(&chosen) {
@@ -407,7 +472,7 @@ pub fn start_sharing(
     // A window that asks twice — two of them are open, or one was reloaded — is told what the
     // running session is doing rather than given a second one.
     if let Some(service) = session.as_ref() {
-        return Ok(describe(&service.snapshot()));
+        return Ok(describe(&service.service.snapshot()));
     }
 
     let settings = chosen
@@ -416,11 +481,12 @@ pub fn start_sharing(
         .map_err(|_| "the settings lock was poisoned".to_owned())?
         .clone();
 
-    let service =
-        HostService::start(configure(&settings)?, keys()?).map_err(|error| say(&error))?;
+    let keys = keys()?;
+    let allowed = keys.allowed.clone();
+    let service = HostService::start(configure(&settings)?, keys).map_err(|error| say(&error))?;
     let snapshot = describe(&service.snapshot());
 
-    *session = Some(service);
+    *session = Some(Running { service, allowed });
     let turn = held.1.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Let go of the session before the settings are written, so a window polling for a
@@ -469,7 +535,7 @@ pub fn stop_sharing(held: State<'_, Held>, chosen: State<'_, Chosen>) -> Result<
     // Taken out of the lock before being joined, so that a window polling for a snapshot
     // during the join is answered instead of waiting behind it.
     if let Some(service) = running {
-        service.join();
+        service.service.join();
     }
 
     remember(&chosen, false)
@@ -484,7 +550,7 @@ pub fn watcher(app: &tauri::AppHandle) -> Option<String> {
     use tauri::Manager as _;
 
     let held: State<'_, Held> = app.state();
-    let snapshot = held.0.lock().ok()?.as_ref()?.snapshot();
+    let snapshot = held.0.lock().ok()?.as_ref()?.service.snapshot();
 
     if snapshot.phase != Phase::Streaming {
         return None;
@@ -517,7 +583,7 @@ pub fn disconnect_viewer(held: State<'_, Held>) -> Result<(), String> {
         .map_err(|_| "the sharing lock was poisoned".to_owned())?;
 
     if let Some(service) = session.as_ref() {
-        service.disconnect();
+        service.service.disconnect();
     }
 
     Ok(())
@@ -551,7 +617,7 @@ pub fn leave(app: &tauri::AppHandle) {
         return;
     };
 
-    let _ = service.join_within(LEAVING_PATIENCE);
+    let _ = service.service.join_within(LEAVING_PATIENCE);
 
     let telling = {
         let app = app.clone();
@@ -583,12 +649,67 @@ pub fn sharing_state(held: State<'_, Held>) -> Result<Option<Snapshot>, String> 
 
     Ok(session
         .as_ref()
-        .map(|service| describe(&service.snapshot())))
+        .map(|service| describe(&service.service.snapshot())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs an authentication exchange without starting capture or touching a real profile.
+    fn admitted(host: &HostKeys, peer: &prism_core::net::handshake::Identity) -> bool {
+        use prism_core::net::handshake::{Answer, Initiator, PeerPolicy, Responder};
+        let request = Initiator::new(peer, host.identity.public(), &[]).unwrap();
+        let mut responder = Responder::new(
+            host.identity.clone(),
+            PeerPolicy::Paired(host.allowed.clone()),
+        );
+        matches!(
+            responder.accept(request.first_message(), &mut |_, _| Some(0), &mut [0; 1024]),
+            Answer::Reply(_)
+        )
+    }
+
+    #[test]
+    fn changed_devices_replace_the_running_authorization_list() {
+        use prism_core::net::handshake::Identity;
+        let removed = Identity::generate().unwrap();
+        let added = Identity::generate().unwrap();
+        let local = Identity::generate().unwrap();
+        let config = HostConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            audio_bitrate_bps: None,
+            inject_input: false,
+            shared_folder: None,
+            ..HostConfig::default()
+        };
+        let old = HostKeys {
+            identity: local.clone(),
+            allowed: vec![*removed.public()],
+        };
+        assert!(admitted(&old, &removed));
+        let mut slot = Some(Running {
+            allowed: old.allowed.clone(),
+            service: HostService::start(config.clone(), old).unwrap(),
+        });
+        reconcile(
+            &mut slot,
+            config,
+            HostKeys {
+                identity: local.clone(),
+                allowed: vec![*added.public()],
+            },
+        )
+        .unwrap();
+        let live = slot.take().unwrap();
+        let current = HostKeys {
+            identity: local,
+            allowed: live.allowed.clone(),
+        };
+        assert!(!admitted(&current, &removed));
+        assert!(admitted(&current, &added));
+        live.service.join();
+    }
 
     #[test]
     fn a_rate_nobody_could_capture_at_is_brought_back_in_range() {

@@ -878,6 +878,13 @@ pub fn run(
         // What the shell is asking for, if a shell is driving this run. The same three things
         // the toolbar can ask for, so neither surface can do something the other cannot.
         while let Some(command) = talk.asked.as_ref().and_then(|asked| asked.try_recv().ok()) {
+            if let crate::ipc::Command::Language { language } = &command {
+                crate::locale::set_language(language);
+                if let Some(bar) = bar.as_ref() {
+                    bar.set_hands(hands);
+                }
+                continue;
+            }
             let Some(files) = moving.as_ref() else {
                 say.note("files: this session has nowhere to keep files".to_owned());
                 continue;
@@ -887,6 +894,7 @@ pub fn run(
             };
 
             match command {
+                crate::ipc::Command::Language { .. } => {}
                 crate::ipc::Command::Send { path } => {
                     if let Err(err) = files.send(std::path::Path::new(&path)) {
                         say.note(format!("files: {path} did not go ({err})"));

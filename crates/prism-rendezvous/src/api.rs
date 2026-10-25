@@ -528,7 +528,7 @@ async fn sign_in(
     let auth = unhex_array::<SECRET_LEN>(&body.auth).ok_or(ApiError::Malformed("auth"))?;
 
     let (sealed_key, devices, relay_allowed) = {
-        let accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
+        let mut accounts = service.accounts.lock().map_err(|_| ApiError::Unavailable)?;
         let account = accounts.sign_in(&body.email, &auth, body.code, now_unix())?;
 
         (

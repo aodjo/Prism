@@ -191,12 +191,12 @@ export interface Settings {
   /**
    * The blocks on the home board, in the arrangement somebody left them.
    *
-   * Empty until somebody moves something, and empty is what a fresh machine wants: the window
-   * lays out a default board from whatever machines the account has. Once anything is here it is
-   * the whole arrangement, so a block missing from this list was removed rather than not yet
-   * placed.
+   * A fresh machine gets a default arrangement. `boardInitialized` distinguishes that state
+   * from a saved board whose blocks have all been removed. Older nonempty boards remain valid.
    */
   board: readonly Block[];
+  /** Whether an arrangement was saved, including an intentionally empty board. */
+  boardInitialized: boolean;
 }
 
 /**
@@ -396,6 +396,8 @@ export interface MissingGrant {
  * somewhere else, and the moment to ask is once, at the start.
  */
 export interface HostPermissions {
+  /** Whether this platform has a local-network privacy settings pane. */
+  readonly networkSettings: boolean;
   /** Whether the screen may be recorded. */
   readonly screen: boolean;
   /** Whether this machine may be controlled. */
@@ -484,9 +486,13 @@ export interface PrismApi {
    *
    * @param {(snapshot: HostSnapshot | null) => void} listener - Called five times a second
    *   while shared, and once with `null` when sharing stops.
-   * @returns {void}
+   * @param {(error: unknown) => void} [onError] - Reports subscription failures.
+   * @returns {() => void} Stops the subscription.
    */
-  onSharing(listener: (snapshot: HostSnapshot | null) => void): void;
+  onSharing(
+    listener: (snapshot: HostSnapshot | null) => void,
+    onError?: (error: unknown) => void,
+  ): () => void;
 
   /**
    * Closes setup and opens the home window.
@@ -494,9 +500,10 @@ export interface PrismApi {
    * Called once, at the end of the flow or when somebody skips it. Setup does not run again
    * unless this machine forgets everything it knows.
    *
-   * @returns {void}
+   * @returns {Promise<null>} Resolves after setup is saved and the home window is opened.
+   * @throws {Error} If saving settings or opening the home window fails.
    */
-  finishSetup(): void;
+  finishSetup(): Promise<null>;
 
   /**
    * Opens the settings window, or brings it forward if it is already open.
@@ -569,9 +576,13 @@ export interface PrismApi {
    * anything, and the list is the account's to answer rather than this machine's to remember.
    *
    * @param {(state: AccountState) => void} listener - Called when the machines change.
-   * @returns {void}
+   * @param {(error: unknown) => void} [onError] - Reports subscription failures.
+   * @returns {() => void} Stops the subscription.
    */
-  onAccount(listener: (state: AccountState) => void): void;
+  onAccount(
+    listener: (state: AccountState) => void,
+    onError?: (error: unknown) => void,
+  ): () => void;
 
   /**
    * Registers a listener for a newer build being available.
@@ -581,9 +592,13 @@ export interface PrismApi {
    * on somebody's behalf while they are watching another machine.
    *
    * @param {(available: Available) => void} listener - Called with what was found.
-   * @returns {void}
+   * @param {(error: unknown) => void} [onError] - Reports subscription failures.
+   * @returns {() => void} Stops the subscription.
    */
-  onUpdate(listener: (available: Available) => void): void;
+  onUpdate(
+    listener: (available: Available) => void,
+    onError?: (error: unknown) => void,
+  ): () => void;
 
   /**
    * Asks the server to send a signup code to an address.
@@ -679,6 +694,16 @@ export interface PrismApi {
   setSettings(next: Partial<Settings>): Promise<Settings>;
 
   /**
+   * Subscribes to successfully saved settings changes from any window.
+   *
+   * @param {(settings: Settings) => void} listener - Receives the saved settings.
+   * @param {(error: unknown) => void} [onError] - Reports subscription failures.
+   * @returns {() => void} Stops the subscription.
+   */
+  onSettings(listener: (settings: Settings) => void, onError?: (error: unknown) => void): () => void;
+
+
+  /**
    * Returns what this build is: its version, which copy of it, and which line it follows.
    *
    * @async
@@ -758,9 +783,13 @@ export interface PrismApi {
    * Registers a listener for the history, which grows by one whenever a stream ends.
    *
    * @param {(sessions: readonly Session[]) => void} listener - Called with the whole list.
-   * @returns {void}
+   * @param {(error: unknown) => void} [onError] - Reports subscription failures.
+   * @returns {() => void} Stops the subscription.
    */
-  onSessions(listener: (sessions: readonly Session[]) => void): void;
+  onSessions(
+    listener: (sessions: readonly Session[]) => void,
+    onError?: (error: unknown) => void,
+  ): () => void;
 
   /**
    * Tells the main process how tall the window's content is.
@@ -785,7 +814,11 @@ export interface PrismApi {
    * Registers a listener for stream state the main process pushes.
    *
    * @param {(state: StreamState) => void} listener - Called whenever the state changes.
-   * @returns {void}
+   * @param {(error: unknown) => void} [onError] - Reports subscription failures.
+   * @returns {() => void} Stops the subscription.
    */
-  onStream(listener: (state: StreamState) => void): void;
+  onStream(
+    listener: (state: StreamState) => void,
+    onError?: (error: unknown) => void,
+  ): () => void;
 }

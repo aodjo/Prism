@@ -15,6 +15,7 @@ import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'r
 import type { JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { useLanguage } from './language.js';
 import type {
   AccountDeviceView,
   Available,
@@ -100,6 +101,7 @@ function watchable(devices: readonly AccountDeviceView[], mine: string): string[
  * @returns {JSX.Element} The whole of it.
  */
 function Home(): JSX.Element {
+  const languagePreference = useLanguage();
   const [machines, setMachines] = useState<readonly string[]>([]);
   const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
   const [account, setAccount] = useState<{ email: string | null }>({ email: null });
@@ -109,6 +111,8 @@ function Home(): JSX.Element {
   /** What this machine's own session is doing, or `null` when it is not shared. */
   const [mine, setMine] = useState<HostSnapshot | null>(null);
   const [trouble, setTrouble] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   /** The blocks, as they stand. */
   const [board, setBoard] = useState<readonly Block[]>([]);
@@ -158,67 +162,88 @@ function Home(): JSX.Element {
   );
 
   useEffect(() => {
-    void (async () => {
-      const [identity, signedIn, stored, state, own, past] = await Promise.all([
-        prism.identity(),
-        prism.accountState(),
-        prism.getSettings(),
-        prism.streamState(),
-        prism.sharing(),
-        prism.sessions(),
-      ]);
+    let active = true;
+    let publicKey: string | null = null;
+    let known: readonly AccountDeviceView[] | null = null;
+    setLoadError(null);
 
-      speak(stored.language);
-      setSettings(stored);
-      setDevices(signedIn.devices);
-      setAccount({ email: signedIn.email });
-      setMine(own);
-      setStream(state);
-      setHistory(past);
-      setMachines(watchable(signedIn.devices, identity.publicKey));
-      setBoard(stored.board);
-    })();
-  }, []);
+    /** Applies each successful read independently and reports failures while mounted. */
+    const receive = <T,>(read: Promise<T>, apply: (value: T) => void): void => {
+      void read.then((value) => {
+        if (active) {
+          apply(value);
+        }
+      }).catch((error: unknown) => {
+        if (active) {
+          setLoadError(reason(error));
+        }
+      });
+    };
 
-  // Subscribing is allowed to fail without taking the window with it. An error thrown out of an
-  // effect is one React answers by unmounting everything, and what that leaves is a black
-  // rectangle — no window furniture, no message, nothing to press. A window that opened and
-  // then stopped hearing about one thing is worth far more than that, and the line below is
-  // what says which thing.
-  useEffect(() => {
-    const listen = (what: string, subscribe: () => void): void => {
-      try {
-        subscribe();
-      } catch (error: unknown) {
-        setTrouble(`${what}: ${reason(error)}`);
+    /** Resolves watchable machines once both identity and account data are available. */
+    const listMachines = (): void => {
+      if (known !== null && publicKey !== null) {
+        setMachines(watchable(known, publicKey));
       }
     };
 
-    listen('sharing', () => {
-      prism.onSharing(setMine);
+    receive(prism.identity(), (identity) => {
+      publicKey = identity.publicKey;
+      listMachines();
     });
-    listen('sessions', () => {
-      prism.onSessions(setHistory);
+    receive(prism.accountState(), (signedIn) => {
+      known = signedIn.devices;
+      setDevices(known);
+      setAccount({ email: signedIn.email });
+      listMachines();
     });
-    listen('stream', () => {
-      prism.onStream((state) => {
-        setStream(state);
+    receive(prism.getSettings(), (stored) => {
+      speak(stored.language);
+      setSettings(stored);
+      setBoard(stored.board);
+    });
+    receive(prism.streamState(), setStream);
+    receive(prism.sharing(), setMine);
+    receive(prism.sessions(), setHistory);
 
+    return () => {
+      active = false;
+    };
+  }, [loadAttempt]);
+
+  useEffect(() => {
+    const report = (error: unknown): void => {
+      setTrouble(reason(error));
+    };
+    /** Keeps one synchronous bridge failure from preventing the other subscriptions. */
+    const subscribe = (start: () => () => void): (() => void) => {
+      try {
+        return start();
+      } catch (error: unknown) {
+        report(error);
+        return () => {};
+      }
+    };
+    const stop = [
+      subscribe(() => prism.onSharing(setMine, report)),
+      subscribe(() => prism.onSessions(setHistory, report)),
+      subscribe(() => prism.onStream((state) => {
+        setStream(state);
         if (state.departed !== null && !RUNNING.has(state.phase)) {
           setGone(state.departed);
         }
-      });
-    });
-    listen('account', () => {
-      prism.onAccount((state) => {
+      }, report)),
+      subscribe(() => prism.onAccount((state) => {
         setDevices(state.devices);
         setAccount({ email: state.email });
         setMachines(watchable(state.devices, state.publicKey));
-      });
-    });
-    listen('updates', () => {
-      prism.onUpdate(setUpdate);
-    });
+      }, report)),
+      subscribe(() => prism.onUpdate(setUpdate, report)),
+    ];
+
+    return () => {
+      stop.forEach((unsubscribe) => { unsubscribe(); });
+    };
   }, []);
 
   // How wide the board is decides how many holes there are, so it is measured rather than
@@ -249,7 +274,7 @@ function Home(): JSX.Element {
   // the account and the settings have both arrived, and only when nothing is saved: a board
   // somebody built is theirs, including one they emptied.
   useEffect(() => {
-    if (settings === null || settings.board.length > 0 || board.length > 0) {
+    if (settings === null || settings.boardInitialized || settings.board.length > 0 || board.length > 0) {
       return;
     }
 
@@ -439,7 +464,7 @@ function Home(): JSX.Element {
 
   const working = board.find((one) => one.id === opened) ?? null;
   const chosen = board.find((one) => one.id === picked) ?? null;
-  const language = LANGUAGES.find((one) => one.id === (settings?.language ?? '')) ?? LANGUAGES[0];
+  const language = LANGUAGES.find((one) => one.id === languagePreference) ?? LANGUAGES[0];
 
   return (
     <div className="relative h-full w-full overflow-hidden">
@@ -504,7 +529,7 @@ function Home(): JSX.Element {
                 type="button"
                 aria-haspopup="menu"
                 aria-expanded={menu}
-                aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
+                aria-label={account.email ? t('Signed in as {email}', { email: account.email }) : t('Not signed in')}
                 onClick={() => {
                   setMenu(!menu);
                 }}
@@ -569,11 +594,12 @@ function Home(): JSX.Element {
                   role="menuitem"
                   className="flex w-full items-center gap-[11px] px-3.5 py-2.5 text-note font-medium text-ink-3 hover:bg-wash-2"
                   onClick={() => {
-                    const at = LANGUAGES.findIndex((one) => one.id === (settings?.language ?? ''));
+                    const at = LANGUAGES.findIndex((one) => one.id === languagePreference);
                     const next = LANGUAGES[(at + 1) % LANGUAGES.length] as { id: string };
 
-                    speak(next.id);
-                    void prism.setSettings({ language: next.id }).then(setSettings);
+                    void prism.setSettings({ language: next.id }).then(setSettings).catch((error: unknown) => {
+                      setTrouble(reason(error));
+                    });
                   }}
                 >
                   <Language size={16} />
@@ -625,6 +651,17 @@ function Home(): JSX.Element {
             scrolled clear of it rather than ending underneath. */}
         <div className="h-full w-full overflow-x-hidden overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent_76px,black_100px)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <div className="flex min-h-full w-full flex-col px-8 pt-[80px] pb-[108px]">
+            {loadError !== null && (
+              <div role="alert" className="mb-4">
+                <p>{t('Some information could not be loaded.')}</p>
+                <Trouble message={loadError} />
+                <button type="button" className="btn-secondary" onClick={() => {
+                  setLoadAttempt((attempt) => attempt + 1);
+                }}>
+                  {t('Retry')}
+                </button>
+              </div>
+            )}
             <Trouble
               message={
                 trouble ??
@@ -857,15 +894,15 @@ function Home(): JSX.Element {
         <div className="fixed inset-0 z-[8] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
           <div className="w-full max-w-[420px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
             <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
-              새로운 빌드가 있습니다
+              {t('A new build is available')}
             </h2>
             <p className="mt-3 mb-0 text-ui text-dim">
-              {update.version} 을 설치하면 Prism이 다시 시작됩니다.
+              {t('Installing {version} will restart PRISM.', { version: update.version })}
             </p>
             {update.notes.trim() !== '' && (
               <p className="mt-2 mb-0 max-h-24 overflow-y-auto text-ui text-dim">{update.notes}</p>
             )}
-            {updateError !== '' && <p className="mt-3 mb-0 text-ui text-danger-ink">{updateError}</p>}
+            {updateError !== '' && <Trouble message={updateError} className="mt-3" />}
             <div className="mt-4 flex justify-end gap-2">
               <button
                 type="button"
@@ -876,7 +913,7 @@ function Home(): JSX.Element {
                   setUpdateError('');
                 }}
               >
-                나중에
+                {t('Later')}
               </button>
               <button
                 type="button"
@@ -888,14 +925,14 @@ function Home(): JSX.Element {
                   void prism
                     .installUpdate()
                     .catch((error: unknown) => {
-                      setUpdateError(error instanceof Error ? error.message : String(error));
+                      setUpdateError(reason(error));
                     })
                     .finally(() => {
                       setInstalling(false);
                     });
                 }}
               >
-                {installing ? '설치 중…' : '설치'}
+                {t(installing ? 'Installing…' : 'Install')}
               </button>
             </div>
           </div>

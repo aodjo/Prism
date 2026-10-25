@@ -447,6 +447,7 @@ mod banner {
     struct Banner {
         panel: Retained<NSPanel>,
         line: Retained<NSTextField>,
+        button: Retained<NSButton>,
         /// Kept alive here, because a button does not keep its target.
         _target: Retained<Target>,
         /// Whether a session is open, so its start is noticed once.
@@ -571,9 +572,25 @@ mod banner {
                 TOUCHED.store(now_ms(), Ordering::Relaxed);
             }
 
-            banner.line.setStringValue(&NSString::from_str(&format!(
-                "{name}에서 이 컴퓨터를 제어하는 중입니다"
-            )));
+            let line = prism_stream::locale::text(
+                "{name} is controlling this machine",
+                "{name}에서 이 컴퓨터를 제어하는 중이에요",
+            )
+            .replace("{name}", &name);
+            banner.line.setStringValue(&NSString::from_str(&line));
+            banner
+                .button
+                .setTitle(&NSString::from_str(prism_stream::locale::text(
+                    "Disconnect",
+                    "연결 끊기",
+                )));
+            let size = banner.button.fittingSize();
+            banner.button.setFrame(rect(
+                WIDTH - size.width - 12.0,
+                (HEIGHT - size.height) / 2.0,
+                size.width,
+                size.height,
+            ));
 
             let since = now_ms().saturating_sub(TOUCHED.load(Ordering::Relaxed));
 
@@ -653,7 +670,7 @@ mod banner {
         // the button exists. The selector is one the class defines, taking the sender.
         let button = unsafe {
             NSButton::buttonWithTitle_target_action(
-                &NSString::from_str("연결 끊기"),
+                &NSString::from_str(prism_stream::locale::text("Disconnect", "연결 끊기")),
                 Some(&target),
                 Some(sel!(disconnect:)),
                 marker,
@@ -671,6 +688,7 @@ mod banner {
         Some(Banner {
             panel,
             line,
+            button,
             _target: target,
             session: Cell::new(false),
             shown: Cell::new(false),

@@ -8,6 +8,8 @@
 
 import type { JSX, ReactNode } from 'react';
 
+import { failure, t } from './i18n.js';
+
 /**
  * How each permission reads, in the order the design puts them.
  *
@@ -234,8 +236,18 @@ export function Trouble({
     return null;
   }
 
+  const translated = failure(message);
+
   return (
-    <p className={`whitespace-pre-wrap text-note-2 text-danger-ink ${className}`}>{message}</p>
+    <div className={`whitespace-pre-wrap text-note-2 text-danger-ink ${className}`}>
+      <p className="m-0">{translated}</p>
+      {translated !== t(message) && (
+        <details className="mt-1 text-fine text-dim">
+          <summary className="cursor-pointer">{t('Technical details')}</summary>
+          <p className="mt-1 select-text break-words">{message}</p>
+        </details>
+      )}
+    </div>
   );
 }
 

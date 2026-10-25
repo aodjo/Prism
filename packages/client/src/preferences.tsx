@@ -17,6 +17,7 @@ import type {
   PrismApi,
   Settings,
 } from './api.js';
+import { useLanguage } from './language.js';
 import { speak, t } from './i18n.js';
 import { Trouble, reason, short } from './ui.js';
 
@@ -164,6 +165,7 @@ const SELECT =
  * @returns {JSX.Element} Every band of them.
  */
 export function Preferences({ onResize }: { onResize?: (height: number) => void }): JSX.Element {
+  const languagePreference = useLanguage();
   const [account, setAccount] = useState<AccountState>(UNKNOWN);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
@@ -182,18 +184,29 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
   const body = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    void (async () => {
-      const [known, stored, made] = await Promise.all([
-        prism.accountState(),
-        prism.getSettings(),
-        prism.buildInfo(),
-      ]);
-
+    let active = true;
+    /** Applies successful initial reads without discarding them when another read fails. */
+    const receive = <T,>(read: Promise<T>, apply: (value: T) => void): void => {
+      void read.then((value) => {
+        if (active) {
+          apply(value);
+        }
+      }).catch((error: unknown) => {
+        if (active) {
+          setTrouble(reason(error));
+        }
+      });
+    };
+    receive(prism.accountState(), setAccount);
+    receive(prism.getSettings(), (stored) => {
       speak(stored.language);
-      setAccount(known);
       setSettings(stored);
-      setBuild(made);
-    })();
+    });
+    receive(prism.buildInfo(), setBuild);
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   /**
@@ -295,18 +308,15 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
           <Row label={t('Language')}>
             <select
               className={SELECT}
-              value={settings?.language ?? ''}
+              value={languagePreference}
               onChange={(event) => {
-                void (async () => {
-                  await prism.setSettings({ language: event.target.value });
-                  speak(event.target.value);
-
-                  // Drawn again from the top, because every sentence already on screen was
-                  // built with the language before this one and React has no reason to ask for
-                  // any of them a second time. A window that is not this one keeps what it has
-                  // until it is opened again.
-                  location.reload();
-                })();
+                const language = event.target.value;
+                void prism.setSettings({ language }).then((saved) => {
+                  speak(saved.language);
+                  setSettings(saved);
+                }).catch((error: unknown) => {
+                  setTrouble(reason(error));
+                });
               }}
             >
               <option value="">{t('Follow the system')}</option>
@@ -358,7 +368,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                     type="email"
                     spellCheck={false}
                     autoComplete="username"
-                    placeholder={t('you@example.com')}
+                    placeholder={'you@example.com'}
                     className={FIELD}
                     value={email}
                     onChange={(event) => {
@@ -408,7 +418,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                 )}
                 <div className="mt-2.5 flex justify-end gap-2">
                   <button type="button" className="btn-secondary" disabled={busy} onClick={create}>
-                    {proof === null ? 'Create account' : 'Confirm code'}
+                    {t(proof === null ? 'Create account' : 'Confirm code')}
                   </button>
                   <button
                     type="button"
@@ -485,7 +495,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
           <Row
             label={build ? build.version : '—'}
             note={
-              build ? t('build {build} · {channel}', { build: build.build, channel: build.channel }) : ''
+              build ? t('build {build} · {channel}', { build: build.build, channel: t(build.channel) }) : ''
             }
           >
             <span className="text-fine-2 text-muted-2">

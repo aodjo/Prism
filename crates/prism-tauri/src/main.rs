@@ -50,6 +50,9 @@ fn refresh_account(app: &tauri::AppHandle) {
     if account::refresh(&account, &chosen).unwrap_or(false)
         && let Ok(state) = account::account_state(account, chosen)
     {
+        if let Err(error) = sharing::refresh_peers(app) {
+            eprintln!("sharing: could not refresh trusted devices: {error}");
+        }
         let _ = app.emit("account:state", state);
     }
 }
@@ -134,23 +137,35 @@ fn get_settings(held: tauri::State<'_, Held>) -> Result<Settings, String> {
 
 /// Writes what changed and returns the settings as they now stand.
 ///
-/// Takes the whole object rather than one field, because the window already holds a copy and
-/// sending back the part it changed would mean two places deciding what the rest still is.
+/// Merges only the supplied fields while holding the settings lock, so simultaneous changes
+/// from different windows cannot overwrite one another with an older snapshot.
 ///
 /// # Errors
 ///
 /// Fails if there is no home directory, or the file cannot be written.
 #[tauri::command]
-fn set_settings(next: Settings, held: tauri::State<'_, Held>) -> Result<Settings, String> {
-    let mut settings = held
-        .0
-        .lock()
-        .map_err(|_| "the settings lock was poisoned".to_owned())?;
-
-    settings::save(&next)?;
-    *settings = next;
-
-    Ok(settings.clone())
+fn set_settings(
+    app: tauri::AppHandle,
+    next: serde_json::Map<String, serde_json::Value>,
+    held: tauri::State<'_, Held>,
+) -> Result<Settings, String> {
+    let language_changed = next.contains_key("language");
+    let saved = settings::update(&held.0, next, settings::save)?;
+    if language_changed {
+        prism_stream::locale::set_language(&saved.language);
+        if let Err(error) = tray::relabel(&app) {
+            eprintln!("tray: could not update language: {error}");
+        }
+        if let Some(stream) = app.try_state::<stream::Held>() {
+            let _ = stream.ask(&prism_stream::ipc::Command::Language {
+                language: saved.language.clone(),
+            });
+        }
+    }
+    if let Err(error) = app.emit("settings:changed", &saved) {
+        eprintln!("settings: could not announce saved settings: {error}");
+    }
+    Ok(saved)
 }
 
 /// Ends the session and undoes what signing in set up.
@@ -336,7 +351,9 @@ fn main() {
 
             windows::no_tabbing();
 
-            app.manage(Held(Mutex::new(settings::load())));
+            let stored = settings::load();
+            prism_stream::locale::set_language(&stored.language);
+            app.manage(Held(Mutex::new(stored)));
             app.manage(account::Held::new());
             app.manage(sharing::Held::new());
             // Before the stream, whose recorder looks this up when a session ends.

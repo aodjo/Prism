@@ -15,6 +15,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { useLanguage } from './language.js';
 import type {
   AccountEnrolmentView,
   HostPermissions,
@@ -79,6 +80,9 @@ const HAS_NEXT: ReadonlySet<Step> = new Set<Step>(['intro', 'permissions']);
 
 /** How many characters a pairing code has. */
 const CODE_LENGTH = 6;
+
+/** Minimum password length, counted as Unicode characters like the native derivation. */
+const MIN_PASSWORD = 8;
 
 /** How far apart the code boxes are, centre to centre: 62 wide with 10 between. */
 const CODE_PITCH = 72;
@@ -225,6 +229,7 @@ function PrismArt(): JSX.Element {
  * @returns {JSX.Element} The whole of it.
  */
 function Setup(): JSX.Element {
+  const languagePreference = useLanguage();
   const [step, setStep] = useState<Step>('welcome');
   /** The screen on its way out, kept mounted only as long as it takes to leave. */
   const [leaving, setLeaving] = useState<Step | null>(null);
@@ -243,6 +248,11 @@ function Setup(): JSX.Element {
   const [asked, setAsked] = useState<ReadonlySet<string>>(new Set());
   /** What went wrong asking the system for a grant, when something did. */
   const [trouble, setTrouble] = useState('');
+  const [permissionAttempt, setPermissionAttempt] = useState(0);
+  const [permissionBusy, setPermissionBusy] = useState(false);
+  /** Prevents duplicate requests and ignores reads superseded by a newer system reply. */
+  const permissionRequest = useRef(false);
+  const permissionRead = useRef(0);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -262,6 +272,8 @@ function Setup(): JSX.Element {
    * factor of their choosing until the owner does something that turns it on.
    */
   const [proving, setProving] = useState(false);
+  /** Remounts email code entry after a resend, clearing the previous attempt. */
+  const [challengeAttempt, setChallengeAttempt] = useState(0);
   /**
    * Whether the second factor was set up a moment ago.
    *
@@ -291,6 +303,8 @@ function Setup(): JSX.Element {
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
   const [working, setWorking] = useState(false);
+  /** Guards keyboard and pointer submissions before React commits the busy state. */
+  const submitting = useRef(false);
   /**
    * Which of the two account screens is showing.
    *
@@ -316,31 +330,45 @@ function Setup(): JSX.Element {
    */
   const [arrivedSignedIn, setArrivedSignedIn] = useState(false);
   const [accountTrouble, setAccountTrouble] = useState<string | null>(null);
+  /** Startup failures can be retried without discarding successful account or settings reads. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  /** Completion stays retryable when persistence or native window creation fails. */
+  const [finishError, setFinishError] = useState<string | null>(null);
+  const [finishing, setFinishing] = useState(false);
+  const finishPending = useRef(false);
 
   useEffect(() => {
-    void (async () => {
-      const [identity, account, stored] = await Promise.all([
-        prism.identity(),
-        prism.accountState(),
-        prism.getSettings(),
-      ]);
-
-      setVersion(identity.version);
+    let active = true;
+    setLoadError(null);
+    /** Applies each successful startup read independently while this attempt is mounted. */
+    const receive = <T,>(read: Promise<T>, apply: (value: T) => void): void => {
+      void read.then((value) => {
+        if (active) {
+          apply(value);
+        }
+      }).catch((error: unknown) => {
+        if (active) {
+          setLoadError(reason(error));
+        }
+      });
+    };
+    receive(prism.identity(), (identity) => { setVersion(identity.version); });
+    receive(prism.getSettings(), (stored) => {
       speak(stored.language);
       setSettings(stored);
+    });
+    receive(prism.accountState(), (account) => {
       setSignedIn(account.email);
       setArrivedSignedIn(account.email !== null);
-
-      // Arriving already signed in means this window was opened by a launch that found an
-      // account but no finished setup, and there is only one way to be in that state: the
-      // permissions step sent somebody to System Settings, and macOS reads a new grant only
-      // when the application starts again. They are coming back to that step, so start there
-      // rather than walking them through the welcome and the introduction a second time.
       if (account.email !== null) {
         setStep('permissions');
       }
-    })();
-  }, []);
+    });
+    return () => {
+      active = false;
+    };
+  }, [loadAttempt]);
 
   useEffect(() => {
     if (step !== 'permissions') {
@@ -352,11 +380,19 @@ function Setup(): JSX.Element {
      *
      * @returns {Promise<void>}
      */
+    let active = true;
     const read = async (): Promise<void> => {
+      const attempt = ++permissionRead.current;
       try {
-        setHeld(await prism.permissions());
-      } catch {
-        setHeld({ screen: false, input: false, missing: [] });
+        const current = await prism.permissions();
+        if (active && attempt === permissionRead.current) {
+          setHeld(current);
+          setTrouble('');
+        }
+      } catch (error: unknown) {
+        if (active && attempt === permissionRead.current) {
+          setTrouble(reason(error));
+        }
       }
     };
 
@@ -383,10 +419,12 @@ function Setup(): JSX.Element {
     document.addEventListener('visibilitychange', uncovered);
 
     return () => {
+      active = false;
+      ++permissionRead.current;
       window.removeEventListener('focus', again);
       document.removeEventListener('visibilitychange', uncovered);
     };
-  }, [step]);
+  }, [step, permissionAttempt]);
 
   /**
    * Moves to another screen, and starts the one being left on its way out.
@@ -424,8 +462,43 @@ function Setup(): JSX.Element {
     }
   };
 
+  /** Requests a grant without treating a failed command as a completed permission prompt. */
+  const requestGrant = (id: string): void => {
+    if (permissionRequest.current) {
+      return;
+    }
+    permissionRequest.current = true;
+    setPermissionBusy(true);
+    setTrouble('');
+    void (async () => {
+      try {
+        const current = await prism.requestPermission(id);
+        ++permissionRead.current;
+        setHeld(current);
+        setAsked((was) => new Set(was).add(id));
+      } catch (error: unknown) {
+        setTrouble(reason(error));
+      } finally {
+        permissionRequest.current = false;
+        setPermissionBusy(false);
+      }
+    })();
+  };
+
+  /** Completes setup once, reporting a failed save or window transition for retry. */
   const finish = (): void => {
-    prism.finishSetup();
+    if (finishPending.current) {
+      return;
+    }
+    finishPending.current = true;
+    setFinishing(true);
+    setFinishError(null);
+    void prism.finishSetup().catch((error: unknown) => {
+      setFinishError(reason(error));
+    }).finally(() => {
+      finishPending.current = false;
+      setFinishing(false);
+    });
   };
 
   /**
@@ -438,6 +511,10 @@ function Setup(): JSX.Element {
    * @param {string} code - The six digits.
    */
   const signIn = (code: string): void => {
+    if (submitting.current) {
+      return;
+    }
+    submitting.current = true;
     void (async () => {
       setWorking(true);
       setAccountTrouble(null);
@@ -464,6 +541,7 @@ function Setup(): JSX.Element {
         setAccountTrouble(reason(error));
         setRefused((was) => was + 1);
       } finally {
+        submitting.current = false;
         setWorking(false);
       }
     })();
@@ -475,12 +553,20 @@ function Setup(): JSX.Element {
    * No account is made here. That is the whole of what this step is for.
    */
   const createAccount = (): void => {
+    if (submitting.current) {
+      return;
+    }
+    if ([...password].length < MIN_PASSWORD) {
+      setAccountTrouble('A password needs at least 8 characters.');
+      return;
+    }
     // Checked here because it cannot be checked anywhere else: the password never leaves this
     // machine, so a mistyped one is only ever two strings in this window that differ.
     if (password !== confirm) {
       setAccountTrouble('Those two passwords are not the same');
       return;
     }
+    submitting.current = true;
 
     void (async () => {
       setWorking(true);
@@ -489,6 +575,8 @@ function Setup(): JSX.Element {
       try {
         if (await prism.accountChallenge(email.trim())) {
           setProving(true);
+          setRefused(0);
+          setChallengeAttempt((attempt) => attempt + 1);
         } else {
           // A server with no mail configured sends nothing and asks for nothing. The account
           // is made on the spot, which is what this server did before it could send at all.
@@ -498,6 +586,7 @@ function Setup(): JSX.Element {
       } catch (error) {
         setAccountTrouble(reason(error));
       } finally {
+        submitting.current = false;
         setWorking(false);
       }
     })();
@@ -509,6 +598,10 @@ function Setup(): JSX.Element {
    * @param {string} code - The six digits from the message.
    */
   const proveAddress = (code: string): void => {
+    if (submitting.current) {
+      return;
+    }
+    submitting.current = true;
     void (async () => {
       setWorking(true);
       setAccountTrouble(null);
@@ -528,6 +621,7 @@ function Setup(): JSX.Element {
         setAccountTrouble(reason(error));
         setRefused((was) => was + 1);
       } finally {
+        submitting.current = false;
         setWorking(false);
       }
     })();
@@ -608,8 +702,7 @@ function Setup(): JSX.Element {
             {t('One machine, every screen.')}
           </h2>
           <p className="mt-4 max-w-[min(520px,36.1vw)] text-body text-muted">
-            PRISM streams your desktop to any other device you own — with latency low enough
-            that you stop noticing it&rsquo;s remote.
+            {t('PRISM streams your desktop to any other device you own — with latency low enough that you stop noticing it’s remote.')}
           </p>
         </section>
       )}
@@ -618,33 +711,33 @@ function Setup(): JSX.Element {
         <section className={cls}>
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
             {greeted
-              ? `Hello, ${signedIn ?? ''}`
+              ? t('Hello, {email}', { email: signedIn ?? '' })
               : askingCode
                 ? justEnrolled
-                  ? 'Test it once'
-                  : 'Enter your code'
+                  ? t('Test it once')
+                  : t('Enter your code')
                 : enrolment
-                  ? 'One more thing'
+                  ? t('One more thing')
                   : proving
-                    ? 'Check your email'
+                    ? t('Check your email')
                     : joining
-                      ? 'Create your account'
-                      : 'Welcome back'}
+                      ? t('Create your account')
+                      : t('Welcome back')}
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
             {greeted
-              ? 'Every machine on this account now knows about this one, and this one knows about them.'
+              ? t('Every machine on this account now knows about this one, and this one knows about them.')
               : askingCode
                 ? justEnrolled
-                  ? 'Enter what your authenticator shows now, so you know it works before you need it.'
-                  : `Six digits from your authenticator, for ${email.trim()}.`
+                  ? t('Enter what your authenticator shows now, so you know it works before you need it.')
+                  : t('Six digits from your authenticator, for {email}.', { email: email.trim() })
                 : enrolment
-                  ? 'Set up the second factor now. It is the only time it is shown.'
+                  ? t('Set up the second factor now. It is the only time it is shown.')
                   : proving
-                    ? `Six digits went to ${email.trim()}. Nothing is created until they come back.`
+                    ? t('Six digits went to {email}. Nothing is created until they come back.', { email: email.trim() })
                     : joining
-                      ? 'An account is how your machines find each other, and how this one is recognised when it asks.'
-                      : 'Sign in and every machine on your account finds this one.'}
+                      ? t('An account is how your machines find each other, and how this one is recognised when it asks.')
+                      : t('Sign in and every machine on your account finds this one.')}
           </p>
 
           {greeted ? null : askingCode ? (
@@ -658,6 +751,7 @@ function Setup(): JSX.Element {
             />
           ) : proving ? (
             <CodeBoxes
+              key={challengeAttempt}
               disabled={working}
               refused={refused}
               passed={passed}
@@ -668,7 +762,7 @@ function Setup(): JSX.Element {
           ) : enrolment ? (
             <div className="card mt-9 w-[min(440px,30.6vw)] p-6">
               <p className="mx-auto max-w-[36ch] text-note leading-normal text-dim">
-            {t('Scan this with an authenticator app. It is shown once — the server keeps only enough to check codes, which is not enough to show it again.')}
+            {t('Scan this with an authenticator app, then test its code to finish creating your account. If you close this screen first, start signup again.')}
               </p>
               <img
                 src={enrolment.qr}
@@ -699,6 +793,7 @@ function Setup(): JSX.Element {
                 <span className="text-fine-2 text-dim">{t('Email')}</span>
                 <input
                   type="email"
+                  disabled={working}
                   autoComplete="username"
                   spellCheck={false}
                   placeholder="you@example.com"
@@ -711,10 +806,11 @@ function Setup(): JSX.Element {
               </label>
               <label className="flex flex-col gap-1.5">
                 <span className="text-fine-2 text-dim">
-                  {joining ? 'Password — at least eight characters' : 'Password'}
+                  {t(joining ? 'Password — at least eight characters' : 'Password')}
                 </span>
                 <input
                   type="password"
+                  disabled={working}
                   autoComplete={joining ? 'new-password' : 'current-password'}
                   placeholder="••••••••"
                   className={ACCOUNT_FIELD}
@@ -751,6 +847,7 @@ function Setup(): JSX.Element {
                     <span className="text-fine-2 text-dim">{t('Password again')}</span>
                     <input
                       type="password"
+                      disabled={working}
                       autoComplete="new-password"
                       placeholder="••••••••"
                       tabIndex={joining ? undefined : -1}
@@ -786,37 +883,51 @@ function Setup(): JSX.Element {
                       }
                 }
               >
-                {joining ? 'Create account' : 'Continue'}
+                {t(joining ? 'Create account' : 'Continue')}
               </button>
             </div>
           )}
 
           <Trouble message={accountTrouble} className="mt-4" />
 
-          {askingCode && (
-            <button
-              type="button"
-              className="btn-ghost mt-5"
-              onClick={() => {
-                setAccountTrouble(null);
-                setAskingCode(false);
-              }}
-            >
-              {t('Use a different email')}
+          {proving && (
+            <button type="button" className="btn-secondary mt-5" disabled={working} onClick={createAccount}>
+              {t('Send a new code')}
             </button>
           )}
 
-          {enrolment === null && !greeted && !askingCode && (
+          {(askingCode || proving || enrolment !== null) && (
             <button
               type="button"
               className="btn-ghost mt-5"
+              disabled={working}
+              onClick={() => {
+                setAccountTrouble(null);
+                setAskingCode(false);
+                setProving(false);
+                setEnrolment(null);
+                setJoining(joining || justEnrolled);
+                setJustEnrolled(false);
+                setPassed(false);
+                setRefused(0);
+              }}
+            >
+              {t(proving || enrolment !== null || justEnrolled ? 'Edit signup details' : 'Use a different email')}
+            </button>
+          )}
+
+          {enrolment === null && !greeted && !askingCode && !proving && (
+            <button
+              type="button"
+              className="btn-ghost mt-5"
+              disabled={working}
               onClick={() => {
                 setAccountTrouble(null);
                 setConfirm('');
                 setJoining(!joining);
               }}
             >
-              {joining ? 'I already have an account' : 'I need an account'}
+              {t(joining ? 'I already have an account' : 'I need an account')}
             </button>
           )}
         </section>
@@ -829,11 +940,9 @@ function Setup(): JSX.Element {
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
             {t('PRISM needs these to capture and control this machine.')}
-            <br />
-            {t('Nothing is sent outside your own network.')}
           </p>
           <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
-            {GRANTS.map((grant) => {
+            {GRANTS.filter((grant) => grant.id !== 'network' || held?.networkSettings === true).map((grant) => {
               // Local Network is the one the system will not answer for: there is no call
               // that asks whether it has been given. So it is shown as neither held nor
               // refused, and its button opens the pane rather than requesting anything.
@@ -868,52 +977,44 @@ function Setup(): JSX.Element {
                       <span className="text-fine">✓</span>
                       <span>{t('Granted')}</span>
                     </span>
-                  ) : grant.id === 'screen' && asked.has(grant.id) ? (
-                    // Screen recording only. It is the grant the system reads once for the
-                    // life of a process, so one given a moment ago is one this run will go
-                    // on calling missing however many times it is asked — and the way to a
-                    // machine that can be shared is through starting this one again.
-                    //
-                    // Not the others. Accessibility is read afresh every time, so allowing it
-                    // shows up in the check this window makes when it comes back, and a row
-                    // offering to restart for it would be advice that fixes nothing.
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => {
-                        void prism.restart();
-                      }}
-                    >
-                      {t('Restart PRISM')}
-                    </button>
                   ) : (
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => {
-                        void (async () => {
-                          try {
-                            await prism.requestPermission(grant.id);
-                          } catch (error: unknown) {
-                            setTrouble(reason(error));
-                          } finally {
-                            // Redrawn either way. The system may have granted it, refused
-                            // it, or opened its own settings pane — and only the check
-                            // afterwards says which.
-                            setAsked((was) => new Set(was).add(grant.id));
-                            setHeld(await prism.permissions());
-                          }
-                        })();
-                      }}
-                    >
-                      {t(grant.id === 'network' ? 'Open System Settings' : 'Allow')}
-                    </button>
+                    <div className="flex flex-none gap-2">
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={permissionBusy}
+                        onClick={() => { requestGrant(grant.id); }}
+                      >
+                        {t(grant.id === 'network' || asked.has(grant.id) ? 'Open System Settings' : 'Allow')}
+                      </button>
+                      {grant.id === 'screen' && asked.has(grant.id) && (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={permissionBusy}
+                          onClick={() => {
+                            void prism.restart().catch((error: unknown) => { setTrouble(reason(error)); });
+                          }}
+                        >
+                          {t('Restart PRISM')}
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               );
             })}
           </div>
-          {trouble !== '' && <p className="mt-4 text-note text-danger-ink">{trouble}</p>}
+          {trouble !== '' && (
+            <div role="alert" className="mt-4 text-center">
+              <Trouble message={trouble} />
+              <button type="button" className="btn-secondary mt-2" disabled={permissionBusy} onClick={() => {
+                setPermissionAttempt((attempt) => attempt + 1);
+              }}>
+                {t('Retry')}
+              </button>
+            </div>
+          )}
           <p className="mt-4 text-note text-dim">
             {t('You can change these later in Settings → Privacy.')}
           </p>
@@ -927,8 +1028,8 @@ function Setup(): JSX.Element {
           </h2>
           <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
             {signedIn === null
-              ? 'This machine is ready. Sign in to an account to reach it from anywhere else.'
-              : `Signed in as ${signedIn}. Every machine you sign in to this account keeps its own screen, and can reach the others.`}
+              ? t('This machine is ready. Sign in to an account to reach it from anywhere else.')
+              : t('Signed in as {email}. Every machine you sign in to this account keeps its own screen, and can reach the others.', { email: signedIn ?? '' })}
           </p>
 
           {/* What to do next, rather than a picture of something already happening. Setup can
@@ -963,9 +1064,10 @@ function Setup(): JSX.Element {
           </div>
 
           <div className="mt-[23px]">
-            <Primary keys="⌘↵" onClick={finish}>
+            <Primary keys="⌘↵" onClick={finish} disabled={finishing}>
               {t('Enter PRISM')}
             </Primary>
+            <Trouble message={finishError} className="mt-4" />
           </div>
         </section>
       )}
@@ -1042,10 +1144,49 @@ function Setup(): JSX.Element {
           takes the outermost of each and the pieces make up the rest. */}
       <div className="relative z-[1] flex h-full flex-col pt-[71px] pr-10 pb-16 pl-14">
         <div className="flex h-5 flex-none items-center justify-between">
-          <div className="ml-[21px]">
+          <div className="relative ml-[21px]">
             <Wordmark />
+            {step === 'account' && !greeted && !askingCode && !proving && enrolment === null && (
+              <button
+                type="button"
+                className="btn-ghost absolute top-full left-0 mt-5 flex items-center gap-1.5 whitespace-nowrap"
+                disabled={working}
+                onClick={() => go('welcome')}
+              >
+                <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m14 6-6 6 6 6" />
+                </svg>
+                {t('Back')}
+              </button>
+            )}
           </div>
+          <select
+            aria-label={t('Language')}
+            className="rounded-tile border border-line-2 bg-base px-2 py-1 text-fine text-ink"
+            value={languagePreference}
+            onChange={(event) => {
+              void prism.setSettings({ language: event.target.value }).catch((error: unknown) => {
+                setLoadError(reason(error));
+              });
+            }}
+          >
+            <option value="">{t('Follow the system')}</option>
+            <option value="ko">한국어</option>
+            <option value="en">English</option>
+          </select>
         </div>
+
+        {loadError !== null && (
+          <div role="alert" className="mx-auto mt-4 text-center">
+            <p>{t('Some information could not be loaded.')}</p>
+            <Trouble message={loadError} />
+            <button type="button" className="btn-secondary mt-2" onClick={() => {
+              setLoadAttempt((attempt) => attempt + 1);
+            }}>
+              {t('Retry')}
+            </button>
+          </div>
+        )}
 
         {/* Both screens are in the same cell while one is arriving and the other leaving, so
             the move is a move rather than a jump through an empty page. */}
@@ -1084,7 +1225,7 @@ function Setup(): JSX.Element {
         >
           {counted >= 0 ? <Steps at={counted} of={shownSteps.length} /> : <span />}
           {step === 'welcome' && (
-            <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>
+            <span className="ml-auto text-tiny font-medium text-dim">v{version} · {t('Beta')}</span>
           )}
           {(HAS_NEXT.has(step) || (step === 'account' && greeted)) && (
             <Primary trailing="→" onClick={advance}>
@@ -1216,7 +1357,7 @@ function CodeBoxes({
           inputMode="numeric"
           maxLength={1}
           disabled={disabled || full}
-          aria-label={`Character ${at + 1}`}
+          aria-label={t('Digit {n}', { n: at + 1 })}
           value={character}
           onChange={(event) => {
             // Digits, and nothing else. Both codes this row is used for are six digits, so
@@ -1297,7 +1438,7 @@ function CodeBoxes({
             } ${!wrong && !passed ? 'animate-[code-checking_1.1s_ease-in-out_infinite]' : ''}`}
           >
             <span className="sr-only">
-              {wrong ? 'That code was refused' : passed ? 'That code was accepted' : 'Checking'}
+              {t(wrong ? 'That code was refused' : passed ? 'That code was accepted' : 'Checking')}
             </span>
             <svg
               viewBox="0 0 28 28"

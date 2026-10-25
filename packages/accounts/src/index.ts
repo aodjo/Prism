@@ -1282,6 +1282,7 @@ async function sweep(env: Env): Promise<void> {
   await env.prism_accounts.batch([
     env.prism_accounts.prepare('DELETE FROM sessions WHERE expires_unix <= ?').bind(now),
     env.prism_accounts.prepare('DELETE FROM challenges WHERE expires_unix <= ?').bind(now),
+    env.prism_accounts.prepare('DELETE FROM pending_accounts WHERE expires_unix <= ?').bind(now),
   ]);
 }
 
@@ -1336,8 +1337,11 @@ export default {
         }
 
         const account = await env.prism_accounts
-          .prepare('SELECT salt FROM accounts WHERE email = ?')
-          .bind(email)
+          .prepare(
+            'SELECT salt FROM accounts WHERE email = ? UNION ALL ' +
+            'SELECT salt FROM pending_accounts WHERE email = ? AND expires_unix > ? LIMIT 1',
+          )
+          .bind(email, email, nowUnix())
           .first<{ salt: string }>();
 
         if (account) {
@@ -1446,8 +1450,11 @@ export default {
         await env.prism_accounts.batch([
           env.prism_accounts
             .prepare(
-              'INSERT INTO accounts (email, salt, verifier, totp_secret, sealed_key, verified,' +
-                ' relay_allowed, created_unix) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+              'INSERT INTO pending_accounts (email, salt, verifier, totp_secret, sealed_key, verified,' +
+                ' expires_unix) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(email) DO UPDATE SET ' +
+                'salt = excluded.salt, verifier = excluded.verifier, totp_secret = excluded.totp_secret,' +
+                ' sealed_key = excluded.sealed_key, verified = excluded.verified,' +
+                ' expires_unix = excluded.expires_unix',
             )
             .bind(
               email,
@@ -1456,7 +1463,7 @@ export default {
               encoded,
               sent?.sealed_key ?? '',
               verified ? 1 : 0,
-              nowUnix(),
+              nowUnix() + CHALLENGE_SECONDS,
             ),
           env.prism_accounts.prepare('DELETE FROM challenges WHERE email = ?').bind(email),
         ]);
@@ -1473,9 +1480,13 @@ export default {
           return malformed('auth');
         }
 
-        const account = await env.prism_accounts
+        const active = await env.prism_accounts
           .prepare('SELECT verifier, totp_secret, verified FROM accounts WHERE email = ?')
           .bind(email)
+          .first<{ verifier: string; totp_secret: string; verified: number }>();
+        const account = active ?? await env.prism_accounts
+          .prepare('SELECT verifier, totp_secret, verified FROM pending_accounts WHERE email = ? AND expires_unix > ?')
+          .bind(email, nowUnix())
           .first<{ verifier: string; totp_secret: string; verified: number }>();
 
         // Every wrong answer is the same answer. One that said which of the three was wrong
@@ -1493,6 +1504,31 @@ export default {
 
         if (!secret || !(await totpMatches(secret, code, nowUnix()))) {
           return fail(401, REFUSED);
+        }
+
+        if (!active) {
+          // Promote only the exact enrollment that was just proved. A concurrent retry may
+          // have replaced it while the code was being checked; that must not open a session.
+          await env.prism_accounts.batch([
+            env.prism_accounts.prepare(
+              'INSERT INTO accounts (email, salt, verifier, totp_secret, sealed_key, verified, created_unix)' +
+              ' SELECT email, salt, verifier, totp_secret, sealed_key, verified, ? FROM pending_accounts' +
+              ' WHERE email = ? AND verifier = ? AND totp_secret = ? AND expires_unix > ?' +
+              ' ON CONFLICT(email) DO NOTHING',
+            ).bind(nowUnix(), email, account.verifier, account.totp_secret, nowUnix()),
+            env.prism_accounts.prepare(
+              'DELETE FROM pending_accounts WHERE email = ? AND EXISTS' +
+              ' (SELECT 1 FROM accounts WHERE email = ? AND verifier = ? AND totp_secret = ?)',
+            ).bind(email, email, account.verifier, account.totp_secret),
+          ]);
+          const confirmed = await env.prism_accounts
+            .prepare('SELECT verifier, totp_secret FROM accounts WHERE email = ?')
+            .bind(email)
+            .first<{ verifier: string; totp_secret: string }>();
+          if (!confirmed || !sameSecret(confirmed.verifier, account.verifier) ||
+              !sameSecret(confirmed.totp_secret, account.totp_secret)) {
+            return fail(401, REFUSED);
+          }
         }
 
         const token = hex(randomBytes(TOKEN_BYTES));

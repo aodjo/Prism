@@ -184,12 +184,22 @@ impl Sealer {
         // Reserved with one atomic step so that two handles onto this direction cannot be
         // handed the same counter, and so that reaching the ceiling refuses rather than
         // wrapping past it.
-        let counter = self
-            .counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                (current < MAX_COUNTER).then_some(current + 1)
-            })
-            .map_err(|_| SealError::Exhausted)?;
+        let mut counter = self.counter.load(Ordering::Relaxed);
+        loop {
+            if counter >= MAX_COUNTER {
+                return Err(SealError::Exhausted);
+            }
+
+            match self.counter.compare_exchange_weak(
+                counter,
+                counter + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => counter = current,
+            }
+        }
 
         out[..COUNTER_LEN].copy_from_slice(&counter.to_le_bytes());
         let body = COUNTER_LEN..COUNTER_LEN + plaintext.len();
@@ -371,5 +381,41 @@ impl core::fmt::Debug for Opener {
             .field("forged", &self.forged)
             .field("replayed", &self.replayed)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Competing senders reserve the final nonce once and then refuse without wrapping.
+    #[test]
+    fn concurrent_senders_stop_at_the_counter_ceiling() {
+        let sealer = Sealer::new(&[0; 32]);
+        sealer.counter.store(MAX_COUNTER - 1, Ordering::Relaxed);
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let senders: Vec<_> = (0..8)
+            .map(|_| {
+                let mut sender = sealer.split();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let mut packet = [0; SEAL_OVERHEAD];
+                    start.wait();
+                    sender
+                        .seal(&[], &mut packet)
+                        .map(|_| u64::from_le_bytes(packet[..COUNTER_LEN].try_into().unwrap()))
+                })
+            })
+            .collect();
+        let results: Vec<_> = senders.into_iter().map(|one| one.join().unwrap()).collect();
+
+        assert_eq!(results.iter().filter(|one| one.is_ok()).count(), 1);
+        for result in results {
+            match result {
+                Ok(counter) => assert_eq!(counter, MAX_COUNTER - 1),
+                Err(error) => assert_eq!(error, SealError::Exhausted),
+            }
+        }
+        assert_eq!(sealer.sent(), MAX_COUNTER);
     }
 }
