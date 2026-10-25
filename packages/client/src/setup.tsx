@@ -246,6 +246,11 @@ function Setup(): JSX.Element {
   const [asked, setAsked] = useState<ReadonlySet<string>>(new Set());
   /** What went wrong asking the system for a grant, when something did. */
   const [trouble, setTrouble] = useState('');
+  const [permissionAttempt, setPermissionAttempt] = useState(0);
+  const [permissionBusy, setPermissionBusy] = useState(false);
+  /** Prevents duplicate requests and ignores reads superseded by a newer system reply. */
+  const permissionRequest = useRef(false);
+  const permissionRead = useRef(0);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -369,11 +374,19 @@ function Setup(): JSX.Element {
      *
      * @returns {Promise<void>}
      */
+    let active = true;
     const read = async (): Promise<void> => {
+      const attempt = ++permissionRead.current;
       try {
-        setHeld(await prism.permissions());
-      } catch {
-        setHeld({ screen: false, input: false, missing: [] });
+        const current = await prism.permissions();
+        if (active && attempt === permissionRead.current) {
+          setHeld(current);
+          setTrouble('');
+        }
+      } catch (error: unknown) {
+        if (active && attempt === permissionRead.current) {
+          setTrouble(reason(error));
+        }
       }
     };
 
@@ -400,10 +413,12 @@ function Setup(): JSX.Element {
     document.addEventListener('visibilitychange', uncovered);
 
     return () => {
+      active = false;
+      ++permissionRead.current;
       window.removeEventListener('focus', again);
       document.removeEventListener('visibilitychange', uncovered);
     };
-  }, [step]);
+  }, [step, permissionAttempt]);
 
   /**
    * Moves to another screen, and starts the one being left on its way out.
@@ -439,6 +454,29 @@ function Setup(): JSX.Element {
         return;
       }
     }
+  };
+
+  /** Requests a grant without treating a failed command as a completed permission prompt. */
+  const requestGrant = (id: string): void => {
+    if (permissionRequest.current) {
+      return;
+    }
+    permissionRequest.current = true;
+    setPermissionBusy(true);
+    setTrouble('');
+    void (async () => {
+      try {
+        const current = await prism.requestPermission(id);
+        ++permissionRead.current;
+        setHeld(current);
+        setAsked((was) => new Set(was).add(id));
+      } catch (error: unknown) {
+        setTrouble(reason(error));
+      } finally {
+        permissionRequest.current = false;
+        setPermissionBusy(false);
+      }
+    })();
   };
 
   const finish = (): void => {
@@ -924,52 +962,44 @@ function Setup(): JSX.Element {
                       <span className="text-fine">✓</span>
                       <span>{t('Granted')}</span>
                     </span>
-                  ) : grant.id === 'screen' && asked.has(grant.id) ? (
-                    // Screen recording only. It is the grant the system reads once for the
-                    // life of a process, so one given a moment ago is one this run will go
-                    // on calling missing however many times it is asked — and the way to a
-                    // machine that can be shared is through starting this one again.
-                    //
-                    // Not the others. Accessibility is read afresh every time, so allowing it
-                    // shows up in the check this window makes when it comes back, and a row
-                    // offering to restart for it would be advice that fixes nothing.
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => {
-                        void prism.restart();
-                      }}
-                    >
-                      {t('Restart PRISM')}
-                    </button>
                   ) : (
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => {
-                        void (async () => {
-                          try {
-                            await prism.requestPermission(grant.id);
-                          } catch (error: unknown) {
-                            setTrouble(reason(error));
-                          } finally {
-                            // Redrawn either way. The system may have granted it, refused
-                            // it, or opened its own settings pane — and only the check
-                            // afterwards says which.
-                            setAsked((was) => new Set(was).add(grant.id));
-                            setHeld(await prism.permissions());
-                          }
-                        })();
-                      }}
-                    >
-                      {t(grant.id === 'network' ? 'Open System Settings' : 'Allow')}
-                    </button>
+                    <div className="flex flex-none gap-2">
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={permissionBusy}
+                        onClick={() => { requestGrant(grant.id); }}
+                      >
+                        {t(grant.id === 'network' || asked.has(grant.id) ? 'Open System Settings' : 'Allow')}
+                      </button>
+                      {grant.id === 'screen' && asked.has(grant.id) && (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={permissionBusy}
+                          onClick={() => {
+                            void prism.restart().catch((error: unknown) => { setTrouble(reason(error)); });
+                          }}
+                        >
+                          {t('Restart PRISM')}
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               );
             })}
           </div>
-          {trouble !== '' && <p className="mt-4 text-note text-danger-ink">{trouble}</p>}
+          {trouble !== '' && (
+            <div role="alert" className="mt-4 text-center">
+              <p className="text-note text-danger-ink">{trouble}</p>
+              <button type="button" className="btn-secondary mt-2" disabled={permissionBusy} onClick={() => {
+                setPermissionAttempt((attempt) => attempt + 1);
+              }}>
+                {t('Retry')}
+              </button>
+            </div>
+          )}
           <p className="mt-4 text-note text-dim">
             {t('You can change these later in Settings → Privacy.')}
           </p>

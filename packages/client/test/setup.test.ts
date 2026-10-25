@@ -75,3 +75,60 @@ describe('setup startup recovery', () => {
     expect(app.state).toEqual(before);
   });
 });
+
+
+describe('permission failure recovery', () => {
+  it('keeps Allow available after a failed request and uses a successful native reply directly', async () => {
+    const app = setup();
+    app.api.accountState.mockResolvedValue({ email: 'test@example.invalid' });
+    app.effect('prism.identity')();
+    await settle();
+    app.render();
+    app.effect("step !== 'permissions'")();
+    await settle();
+    app.api.requestPermission.mockRejectedValueOnce(new Error('request refused'));
+    app.button('Allow').props.onClick();
+    await settle();
+    expect(app.state).toContain('request refused');
+    expect(app.button('Restart PRISM')).toBeUndefined();
+    const reads = app.api.permissions.mock.calls.length;
+    app.button('Allow').props.onClick();
+    await settle();
+    expect(app.api.permissions).toHaveBeenCalledTimes(reads);
+    expect(app.button('Restart PRISM')).toBeDefined();
+    expect(app.button('Open System Settings')).toBeDefined();
+  });
+
+  it('reports a failed permission read and allows retrying it', async () => {
+    const app = setup();
+    app.api.accountState.mockResolvedValue({ email: 'test@example.invalid' });
+    app.effect('prism.identity')();
+    await settle();
+    app.api.permissions.mockRejectedValueOnce(new Error('permission lookup failed'));
+    app.render();
+    app.effect("step !== 'permissions'")();
+    await settle();
+    expect(app.state).toContain('permission lookup failed');
+    app.button('Retry').props.onClick();
+    app.render();
+    app.effect("step !== 'permissions'")();
+    await settle();
+    expect(app.state).not.toContain('permission lookup failed');
+  });
+
+  it('ignores permission replies after leaving the step', async () => {
+    const app = setup();
+    app.api.accountState.mockResolvedValue({ email: 'test@example.invalid' });
+    app.effect('prism.identity')();
+    await settle();
+    let resolve!: (value: any) => void;
+    app.api.permissions.mockReturnValue(new Promise((done) => { resolve = done; }));
+    app.render();
+    const stop = app.effect("step !== 'permissions'")();
+    stop();
+    const before = [...app.state];
+    resolve({ screen: true, input: true, missing: [] });
+    await settle();
+    expect(app.state).toEqual(before);
+  });
+});
