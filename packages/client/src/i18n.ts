@@ -40,7 +40,8 @@ const KO: Record<string, string> = {
   'A few permissions first': '먼저 권한이 필요합니다',
   'PRISM needs these to capture and control this machine.':
     '이 컴퓨터의 화면을 보내고 조작하려면 필요합니다.',
-  'Nothing is sent outside your own network.': '내 네트워크 밖으로 나가지 않습니다.',
+  'Connections can use the internet and an encrypted relay when a direct connection is unavailable.':
+    '인터넷으로 연결할 수 있고, 직접 연결이 어려우면 암호화된 릴레이를 이용해요.',
   Granted: '허용됨',
   'Screen Recording': '화면 기록',
   Accessibility: '손쉬운 사용',
