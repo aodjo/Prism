@@ -14,7 +14,7 @@
 //! Nothing here is on the frame path. These are control calls, made when a window is drawn and
 //! when somebody presses a button in it.
 
-use prism_core::control::permissions::Grant;
+use prism_core::control::permissions::{Grant, Permissions};
 use serde::Serialize;
 
 /// What the window calls the local network permission when it asks for it.
@@ -95,7 +95,6 @@ pub fn permissions(held: tauri::State<'_, crate::Held>) -> Result<HostPermission
 #[tauri::command]
 pub fn request_permission(
     id: String,
-    app: tauri::AppHandle,
     held: tauri::State<'_, crate::Held>,
 ) -> Result<HostPermissions, String> {
     // Read the setting and let the lock go before asking, because the system's dialog stands
@@ -122,21 +121,34 @@ pub fn request_permission(
 
     let grant = named(&id).ok_or_else(|| format!("no such grant: {id}"))?;
 
-    if grant == Grant::Input && !prism_core::control::permissions::check().input {
-        forget_stale_grant(&app);
+    Ok(request_missing(
+        grant,
+        controlling,
+        prism_core::control::permissions::check,
+        prism_core::control::permissions::request,
+        open_settings_pane,
+    ))
+}
+
+/// Requests a grant only when the current session still needs it, preserving existing consent.
+fn request_missing(
+    grant: Grant,
+    controlling: bool,
+    mut read: impl FnMut() -> Permissions,
+    ask: impl FnOnce(Grant) -> bool,
+    open: impl FnOnce(&str),
+) -> HostPermissions {
+    let before = read();
+    if !before.missing(controlling).contains(&grant) {
+        return present(before, controlling);
     }
 
-    if !prism_core::control::permissions::request(grant) {
-        let now = look(controlling);
-
-        if let Some(missing) = now.missing.iter().find(|one| one.id == id) {
-            open_settings_pane(&missing.settings_url);
-        }
-
-        return Ok(now);
+    let granted = ask(grant);
+    let now = present(read(), controlling);
+    if !granted && let Some(missing) = now.missing.iter().find(|one| one.id == describe(grant).id) {
+        open(&missing.settings_url);
     }
-
-    Ok(look(controlling))
+    now
 }
 
 /// Starts Prism again, for a grant the system will not report until it does.
@@ -240,8 +252,11 @@ fn controlling(held: &tauri::State<'_, crate::Held>) -> Result<bool, String> {
 
 /// Reads the system's answer and dresses it up for a window.
 fn look(controlling: bool) -> HostPermissions {
-    let held = prism_core::control::permissions::check();
+    present(prism_core::control::permissions::check(), controlling)
+}
 
+/// Describes a permission snapshot without requesting or resetting any system permission.
+fn present(held: Permissions, controlling: bool) -> HostPermissions {
     HostPermissions {
         network_settings: cfg!(target_os = "macos"),
         screen: held.screen,
@@ -277,32 +292,6 @@ fn describe(grant: Grant) -> MissingGrant {
     }
 }
 
-/// Takes whatever an earlier build left on the Accessibility list under this application's name.
-///
-/// The list keeps an entry per signed copy of an application, and one made by a build signed
-/// another way stays switched on while this build is refused. From the outside that is a switch
-/// that is on and a Prism that says it is off, with nothing to be done in System Settings but to
-/// remove the entry by hand. Removing it here, before asking, is what lets the request put this
-/// build in its place.
-///
-/// Only when Accessibility is not held, so there is nothing that works to lose. `tccutil` needs
-/// no administrator for an application's own entry, and a failure changes nothing about what
-/// comes next: the request is made and the pane opened either way.
-#[cfg(target_os = "macos")]
-fn forget_stale_grant(app: &tauri::AppHandle) {
-    let _ = std::process::Command::new("/usr/bin/tccutil")
-        .args(["reset", "Accessibility", &app.config().identifier])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-/// Takes nothing, on a system with no list to take it from.
-#[cfg(not(target_os = "macos"))]
-fn forget_stale_grant(app: &tauri::AppHandle) {
-    let _ = app;
-}
-
 /// Opens the settings pane holding a grant.
 ///
 /// Handed to `open`, which is what resolves an `x-apple.systempreferences:` link to the pane it
@@ -331,6 +320,102 @@ fn open_settings_pane(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn granted_permissions_are_returned_without_prompting_or_opening_settings() {
+        for grant in [Grant::Screen, Grant::Input] {
+            let held = request_missing(
+                grant,
+                true,
+                || Permissions {
+                    screen: true,
+                    input: true,
+                },
+                |_| panic!("an existing grant must not be requested again"),
+                |_| panic!("an existing grant must not open settings"),
+            );
+            assert!(held.missing.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_session_without_control_does_not_request_accessibility() {
+        let held = request_missing(
+            Grant::Input,
+            false,
+            || Permissions {
+                screen: true,
+                input: false,
+            },
+            |_| panic!("view-only sharing must not request control"),
+            |_| panic!("view-only sharing must not open Accessibility settings"),
+        );
+        assert!(held.missing.is_empty());
+    }
+
+    #[test]
+    fn a_new_grant_is_reflected_in_the_returned_snapshot() {
+        let mut reads = 0;
+        let held = request_missing(
+            Grant::Input,
+            true,
+            || {
+                reads += 1;
+                Permissions {
+                    screen: true,
+                    input: reads > 1,
+                }
+            },
+            |grant| {
+                assert_eq!(grant, Grant::Input);
+                true
+            },
+            |_| panic!("a newly granted permission must not open settings"),
+        );
+        assert!(held.input);
+        assert!(held.missing.is_empty());
+        assert_eq!(reads, 2);
+    }
+
+    #[test]
+    fn a_standing_refusal_only_opens_the_requested_permission_pane() {
+        let mut opened = None;
+        let held = request_missing(
+            Grant::Screen,
+            true,
+            || Permissions {
+                screen: false,
+                input: true,
+            },
+            |grant| {
+                assert_eq!(grant, Grant::Screen);
+                false
+            },
+            |url| opened = Some(url.to_owned()),
+        );
+        assert_eq!(opened.as_deref(), Some(Grant::Screen.settings_url()));
+        assert_eq!(held.missing.len(), 1);
+        assert!(held.input);
+    }
+
+    #[test]
+    fn a_grant_observed_after_a_refused_request_does_not_reopen_settings() {
+        let mut reads = 0;
+        let held = request_missing(
+            Grant::Input,
+            true,
+            || {
+                reads += 1;
+                Permissions {
+                    screen: true,
+                    input: reads > 1,
+                }
+            },
+            |_| false,
+            |_| panic!("a concurrent grant must not reopen settings"),
+        );
+        assert!(held.input);
+    }
 
     #[test]
     fn the_wire_names_are_the_ones_the_window_reads() {

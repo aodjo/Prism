@@ -125,8 +125,8 @@ mod platform {
     /// Reading the trust state is not enough. The list in System Settings holds an entry per
     /// signed copy, and an entry made by an earlier build — signed another way — stays switched
     /// on while this build is refused, so turning it on does nothing. Asking with the prompt is
-    /// what adds this build to the list, where switching it on counts; clearing an entry an
-    /// earlier build left is the caller's, since it means starting a process.
+    /// what adds this build to the list, where switching it on counts. Callers preserve existing
+    /// consent; builds must keep a stable signing identity so updates match that consent.
     fn ask_for_input() -> bool {
         // SAFETY: a constant the framework defines, read once it has been linked.
         let Some(prompt) = (unsafe { kAXTrustedCheckOptionPrompt }) else {
