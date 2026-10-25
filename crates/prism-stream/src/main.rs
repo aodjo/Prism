@@ -51,6 +51,8 @@ fn serve() -> Outcome {
         Err(err) => return Outcome::Untold(format!("could not read what to stream: {err}")),
     };
 
+    prism_stream::locale::set_language(&start.language);
+
     // Behind a lock because the receive thread, the decode thread and this one all report, and
     // a message half-written by one and half by another is a message neither side can read.
     let out = Arc::new(Mutex::new(io::stdout()));

@@ -15,6 +15,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { useLanguage } from './language.js';
 import type {
   AccountEnrolmentView,
   HostPermissions,
@@ -228,6 +229,7 @@ function PrismArt(): JSX.Element {
  * @returns {JSX.Element} The whole of it.
  */
 function Setup(): JSX.Element {
+  const languagePreference = useLanguage();
   const [step, setStep] = useState<Step>('welcome');
   /** The screen on its way out, kept mounted only as long as it takes to leave. */
   const [leaving, setLeaving] = useState<Step | null>(null);
@@ -1147,6 +1149,20 @@ function Setup(): JSX.Element {
           <div className="ml-[21px]">
             <Wordmark />
           </div>
+          <select
+            aria-label={t('Language')}
+            className="rounded-tile border border-line-2 bg-base px-2 py-1 text-fine text-ink"
+            value={languagePreference}
+            onChange={(event) => {
+              void prism.setSettings({ language: event.target.value }).catch((error: unknown) => {
+                setLoadError(reason(error));
+              });
+            }}
+          >
+            <option value="">{t('Follow the system')}</option>
+            <option value="ko">한국어</option>
+            <option value="en">English</option>
+          </select>
         </div>
 
         {loadError !== null && (

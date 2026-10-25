@@ -22,3 +22,4 @@ mod audio;
 #[cfg(windowed)]
 pub mod display;
 pub mod ipc;
+pub mod locale;

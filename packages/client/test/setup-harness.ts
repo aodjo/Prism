@@ -41,6 +41,7 @@ export function setup(language = 'en') {
     requestPermission: vi.fn(async () => ({ networkSettings: true, screen: false, input: false, missing: [{ id: 'screen' }, { id: 'input' }] })),
     restart: vi.fn(async () => null),
     finishSetup: vi.fn(async () => null),
+    setSettings: vi.fn(async (next: unknown) => next),
   };
   const state: any[] = [];
   const events = new Map<string, () => void>();
@@ -53,7 +54,7 @@ export function setup(language = 'en') {
   const actualUi: Record<string, any> = {};
   vm.runInNewContext(compile('ui.tsx'), { exports: actualUi, require: (name: string) => name === './i18n.js' ? translations : ({ jsx, jsxs: jsx }) });
   const ui = new Proxy({
-    GRANTS: actualUi.GRANTS, ...translations,
+    GRANTS: actualUi.GRANTS, ...translations, useLanguage: () => language,
     reason: (error: Error) => error.message, short: (text: string) => text,
   }, { get: (target, key) => key in target ? target[key as keyof typeof target] : String(key) });
   const eventTarget = {

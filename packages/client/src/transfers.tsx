@@ -15,6 +15,7 @@ import { StrictMode, useEffect, useState } from 'react';
 import type { JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { useLanguage } from './language.js';
 import type { MovingFile, PrismApi, StreamState } from './api.js';
 import { bytes } from './format.js';
 import { t } from './i18n.js';
@@ -112,6 +113,7 @@ function Row({ file }: { file: MovingFile }): JSX.Element {
  * @returns {JSX.Element} Everything in it.
  */
 function Transfers(): JSX.Element {
+  useLanguage();
   const [stream, setStream] = useState<StreamState>(NOTHING);
   const [trouble, setTrouble] = useState<string | null>(null);
 

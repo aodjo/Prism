@@ -702,6 +702,7 @@ fn wanted(host: &str, label: &str, address: &str, settings: &Settings) -> ipc::S
     ipc::Start {
         host: host.to_owned(),
         label: label.to_owned(),
+        language: settings.language.clone(),
         // An address given by hand is one somebody has arranged to be reachable. Without one
         // the rendezvous server is asked, which is what a host behind a router requires.
         address: (!address.is_empty()).then(|| address.to_owned()),
@@ -906,6 +907,7 @@ mod tests {
     #[test]
     fn without_an_address_the_rendezvous_server_is_asked() {
         let settings = Settings {
+            language: "ko".to_owned(),
             control: false,
             smooth: true,
             rendezvous: "rv.presm.kr:47300".to_owned(),
@@ -915,6 +917,7 @@ mod tests {
 
         assert_eq!(asked.address, None);
         assert_eq!(asked.rendezvous.as_deref(), Some("rv.presm.kr:47300"));
+        assert_eq!(asked.language, "ko");
         assert!(!asked.control);
         assert!(asked.smooth);
     }

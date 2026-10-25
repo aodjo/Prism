@@ -16,8 +16,9 @@ import { StrictMode, useEffect, useState } from 'react';
 import type { JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { useLanguage } from './language.js';
 import type { PrismApi } from './api.js';
-import { speak, t } from './i18n.js';
+import { t } from './i18n.js';
 
 /** What the shell says should be showing. */
 interface Said {
@@ -49,18 +50,12 @@ const FADING = 800;
  * @returns {JSX.Element} The bar, see-through when it is not up.
  */
 function Banner(): JSX.Element {
+  useLanguage();
   const [said, setSaid] = useState<Said>({ name: '', shown: false });
 
   useEffect(() => {
     window.__banner = setSaid;
 
-    void prism
-      .getSettings()
-      .then((stored) => {
-        speak(stored.language);
-        setSaid((now) => ({ ...now }));
-      })
-      .catch(() => undefined);
 
     return () => {
       delete window.__banner;

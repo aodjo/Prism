@@ -194,6 +194,8 @@ export function installBridge(): void {
     setSettings: (next: Partial<Settings>): Promise<Settings> =>
       call<Settings>('set_settings', { next }),
 
+    onSettings: (listener, onError) => listen<Settings>('settings:changed', listener, onError),
+
     buildInfo: (): Promise<Build> => call<Build>('build_info'),
 
     checkForUpdate: (): Promise<Available | null> =>

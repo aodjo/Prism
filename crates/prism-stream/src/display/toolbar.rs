@@ -17,6 +17,8 @@
 
 #![cfg(target_os = "macos")]
 
+use crate::locale::text;
+
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ptr::NonNull;
@@ -86,12 +88,12 @@ impl Tool {
     fn label(self) -> &'static str {
         match self {
             Tool::Hands => Hands::Watching.label(),
-            Tool::Shrink => "축소",
-            Tool::Fullscreen => "전체 화면",
-            Tool::Send => "파일 보내기",
-            Tool::Fetch => "파일 가져오기",
-            Tool::Stats => "진단",
-            Tool::Disconnect => "연결 끊기",
+            Tool::Shrink => text("Minimize", "축소"),
+            Tool::Fullscreen => text("Fullscreen", "전체 화면"),
+            Tool::Send => text("Send a file", "파일 보내기"),
+            Tool::Fetch => text("Get a file", "파일 가져오기"),
+            Tool::Stats => text("Diagnostics", "진단"),
+            Tool::Disconnect => text("Disconnect", "연결 끊기"),
         }
     }
 
@@ -156,9 +158,9 @@ impl Hands {
     /// What the control is called while this is what it is doing.
     pub fn label(self) -> &'static str {
         match self {
-            Hands::Watching => "보기만",
-            Hands::Controlling => "제어 중",
-            Hands::Aiming => "게임",
+            Hands::Watching => text("View only", "보기만"),
+            Hands::Controlling => text("Controlling", "제어 중"),
+            Hands::Aiming => text("Game mode", "게임"),
         }
     }
 
@@ -462,7 +464,7 @@ impl Toolbar {
             if files.is_empty() {
                 let empty = NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(marker),
-                    &NSString::from_str("가져올 파일이 없습니다"),
+                    &NSString::from_str(text("No files are available", "가져올 파일이 없습니다")),
                     None,
                     &NSString::from_str(""),
                 );
@@ -489,7 +491,7 @@ impl Toolbar {
             if more {
                 let rest = NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(marker),
-                    &NSString::from_str("…그 밖에 더 있습니다"),
+                    &NSString::from_str(text("…More files are available", "…그 밖에 더 있습니다")),
                     None,
                     &NSString::from_str(""),
                 );
@@ -515,6 +517,10 @@ impl Toolbar {
         for (tool, item) in self.controls.ivars().items.borrow().iter() {
             if *tool == Tool::Hands {
                 item.setImage(symbol_image(hands.symbol()).as_deref());
+                item.setLabel(&label);
+                item.setToolTip(Some(&label));
+            } else {
+                let label = NSString::from_str(tool.label());
                 item.setLabel(&label);
                 item.setToolTip(Some(&label));
             }

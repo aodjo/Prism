@@ -145,10 +145,27 @@ fn get_settings(held: tauri::State<'_, Held>) -> Result<Settings, String> {
 /// Fails if there is no home directory, or the file cannot be written.
 #[tauri::command]
 fn set_settings(
+    app: tauri::AppHandle,
     next: serde_json::Map<String, serde_json::Value>,
     held: tauri::State<'_, Held>,
 ) -> Result<Settings, String> {
-    settings::update(&held.0, next, settings::save)
+    let language_changed = next.contains_key("language");
+    let saved = settings::update(&held.0, next, settings::save)?;
+    if language_changed {
+        prism_stream::locale::set_language(&saved.language);
+        if let Err(error) = tray::relabel(&app) {
+            eprintln!("tray: could not update language: {error}");
+        }
+        if let Some(stream) = app.try_state::<stream::Held>() {
+            let _ = stream.ask(&prism_stream::ipc::Command::Language {
+                language: saved.language.clone(),
+            });
+        }
+    }
+    if let Err(error) = app.emit("settings:changed", &saved) {
+        eprintln!("settings: could not announce saved settings: {error}");
+    }
+    Ok(saved)
 }
 
 /// Ends the session and undoes what signing in set up.
@@ -334,7 +351,9 @@ fn main() {
 
             windows::no_tabbing();
 
-            app.manage(Held(Mutex::new(settings::load())));
+            let stored = settings::load();
+            prism_stream::locale::set_language(&stored.language);
+            app.manage(Held(Mutex::new(stored)));
             app.manage(account::Held::new());
             app.manage(sharing::Held::new());
             // Before the stream, whose recorder looks this up when a session ends.

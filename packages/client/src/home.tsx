@@ -15,6 +15,7 @@ import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'r
 import type { JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { useLanguage } from './language.js';
 import type {
   AccountDeviceView,
   Available,
@@ -100,6 +101,7 @@ function watchable(devices: readonly AccountDeviceView[], mine: string): string[
  * @returns {JSX.Element} The whole of it.
  */
 function Home(): JSX.Element {
+  const languagePreference = useLanguage();
   const [machines, setMachines] = useState<readonly string[]>([]);
   const [devices, setDevices] = useState<readonly AccountDeviceView[]>([]);
   const [account, setAccount] = useState<{ email: string | null }>({ email: null });
@@ -462,7 +464,7 @@ function Home(): JSX.Element {
 
   const working = board.find((one) => one.id === opened) ?? null;
   const chosen = board.find((one) => one.id === picked) ?? null;
-  const language = LANGUAGES.find((one) => one.id === (settings?.language ?? '')) ?? LANGUAGES[0];
+  const language = LANGUAGES.find((one) => one.id === languagePreference) ?? LANGUAGES[0];
 
   return (
     <div className="relative h-full w-full overflow-hidden">
@@ -592,11 +594,12 @@ function Home(): JSX.Element {
                   role="menuitem"
                   className="flex w-full items-center gap-[11px] px-3.5 py-2.5 text-note font-medium text-ink-3 hover:bg-wash-2"
                   onClick={() => {
-                    const at = LANGUAGES.findIndex((one) => one.id === (settings?.language ?? ''));
+                    const at = LANGUAGES.findIndex((one) => one.id === languagePreference);
                     const next = LANGUAGES[(at + 1) % LANGUAGES.length] as { id: string };
 
-                    speak(next.id);
-                    void prism.setSettings({ language: next.id }).then(setSettings);
+                    void prism.setSettings({ language: next.id }).then(setSettings).catch((error: unknown) => {
+                      setTrouble(reason(error));
+                    });
                   }}
                 >
                   <Language size={16} />

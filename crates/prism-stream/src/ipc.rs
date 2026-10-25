@@ -38,6 +38,9 @@ pub struct Start {
     /// after the application alone, as it was.
     #[serde(default)]
     pub label: String,
+    /// The interface language: empty follows the system, otherwise `en` or `ko`.
+    #[serde(default)]
+    pub language: String,
     /// Where the host can be reached directly, when that is known.
     ///
     /// `None` means find it through the rendezvous server, which is what a host behind a
@@ -67,6 +70,11 @@ pub struct Start {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Command {
+    /// Changes native controls without interrupting the session.
+    Language {
+        /// The saved preference, including empty for the system language.
+        language: String,
+    },
     /// Offer this file to the far machine.
     Send {
         /// Where the file is on this machine.
@@ -299,6 +307,28 @@ pub fn read<T: for<'de> Deserialize<'de>>(from: &mut impl Read) -> io::Result<Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_older_shell_without_a_language_follows_the_system() {
+        let start: Start = serde_json::from_str(
+            r#"{"host":"host","control":true,"smooth":false,"idle_timeout_ms":1000,"width":1280,"height":720}"#,
+        ).expect("an older start message remains readable");
+        assert!(start.language.is_empty());
+    }
+
+    #[test]
+    fn a_language_change_survives_the_pipe_without_restarting_the_stream() {
+        let mut pipe = Vec::new();
+        write(
+            &mut pipe,
+            &Command::Language {
+                language: "ko".to_owned(),
+            },
+        )
+        .expect("writes");
+        let back: Option<Command> = read(&mut pipe.as_slice()).expect("reads");
+        assert!(matches!(back, Some(Command::Language { language }) if language == "ko"));
+    }
 
     #[test]
     fn a_message_survives_the_round_trip() {

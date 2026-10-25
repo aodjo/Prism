@@ -67,6 +67,7 @@ function home() {
   const visual = new Proxy({
     t: (text: string) => text,
     speak: () => {},
+    useLanguage: () => 'en',
     short: (text: string) => text,
     reason: (error: Error) => error.message,
   }, { get: (target, key) => key in target ? target[key as keyof typeof target] : String(key) });

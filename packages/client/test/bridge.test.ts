@@ -72,6 +72,19 @@ describe('the shell bridge', () => {
     expect(settings).toEqual({ fps: 120, bitrateBps: 80_000_000 });
   });
 
+  it('delivers saved language changes and unregisters the subscription', async () => {
+    const receive = vi.fn();
+    const stop = api.onSettings(receive);
+    await settle();
+    expect(invoke).toHaveBeenCalledWith('plugin:event|listen', expect.objectContaining({ event: 'settings:changed' }));
+    const handler = [...handlers.values()][0];
+    handler({ payload: { language: 'ko' } });
+    expect(receive).toHaveBeenCalledWith({ language: 'ko' });
+    stop();
+    await settle();
+    expect(unregister).toHaveBeenCalledOnce();
+  });
+
   it('returns setup completion failures to the screen', async () => {
     invoke.mockRejectedValueOnce(new Error('home window failed'));
     await expect(api.finishSetup()).rejects.toThrow('home window failed');

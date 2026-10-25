@@ -694,6 +694,16 @@ export interface PrismApi {
   setSettings(next: Partial<Settings>): Promise<Settings>;
 
   /**
+   * Subscribes to successfully saved settings changes from any window.
+   *
+   * @param {(settings: Settings) => void} listener - Receives the saved settings.
+   * @param {(error: unknown) => void} [onError] - Reports subscription failures.
+   * @returns {() => void} Stops the subscription.
+   */
+  onSettings(listener: (settings: Settings) => void, onError?: (error: unknown) => void): () => void;
+
+
+  /**
    * Returns what this build is: its version, which copy of it, and which line it follows.
    *
    * @async

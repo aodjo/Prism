@@ -17,6 +17,7 @@ import type {
   PrismApi,
   Settings,
 } from './api.js';
+import { useLanguage } from './language.js';
 import { speak, t } from './i18n.js';
 import { Trouble, reason, short } from './ui.js';
 
@@ -164,6 +165,7 @@ const SELECT =
  * @returns {JSX.Element} Every band of them.
  */
 export function Preferences({ onResize }: { onResize?: (height: number) => void }): JSX.Element {
+  const languagePreference = useLanguage();
   const [account, setAccount] = useState<AccountState>(UNKNOWN);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
@@ -306,18 +308,15 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
           <Row label={t('Language')}>
             <select
               className={SELECT}
-              value={settings?.language ?? ''}
+              value={languagePreference}
               onChange={(event) => {
-                void (async () => {
-                  await prism.setSettings({ language: event.target.value });
-                  speak(event.target.value);
-
-                  // Drawn again from the top, because every sentence already on screen was
-                  // built with the language before this one and React has no reason to ask for
-                  // any of them a second time. A window that is not this one keeps what it has
-                  // until it is opened again.
-                  location.reload();
-                })();
+                const language = event.target.value;
+                void prism.setSettings({ language }).then((saved) => {
+                  speak(saved.language);
+                  setSettings(saved);
+                }).catch((error: unknown) => {
+                  setTrouble(reason(error));
+                });
               }}
             >
               <option value="">{t('Follow the system')}</option>
