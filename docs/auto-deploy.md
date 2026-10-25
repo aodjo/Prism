@@ -15,16 +15,21 @@ from the public UDP probe address:
 ```
 
 `TAILSCALE_CLIENT_ID` and `TAILSCALE_AUDIENCE` identify an OIDC trust credential. It accepts
-GitHub's issuer, subject `repo:aodjo/Prism:ref:refs/heads/develop`, and the `workflow_ref` claim
+GitHub's issuer, subject
+`repo:aodjo@110667644/Prism@1358903566:ref:refs/heads/develop`, and the `workflow_ref` claim
 `aodjo/Prism/.github/workflows/ci.yml@refs/heads/develop`. Its only write scope is `auth_keys`,
 restricted to `tag:prism-deploy`. This tag can reach only Osaka's TCP 2222. Ordinary user-owned
 devices retain their existing member access. The workflow's Tailscale node is ephemeral.
+
+Use the exact subject received from GitHub, including its immutable owner and repository IDs.
+A name-only subject does not match the tokens this repository currently issues. Create a new
+trust credential when replacing a subject, then update both repository variables together.
 
 `DEPLOY_SSH_KEY` is the dedicated deployment key, and `DEPLOY_KNOWN_HOSTS` pins the existing
 management SSH host key. On Osaka, the key's `authorized_keys` entry uses:
 
 ```text
-restrict,command="sudo /usr/local/sbin/prism-deploy"
+restrict,command="sudo -n /usr/local/sbin/prism-deploy"
 ```
 
 Install `deploy/rendezvous/deploy.py` at `/usr/local/sbin/prism-deploy`, owned by root and
