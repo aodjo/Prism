@@ -1146,8 +1146,21 @@ function Setup(): JSX.Element {
           takes the outermost of each and the pieces make up the rest. */}
       <div className="relative z-[1] flex h-full flex-col pt-[71px] pr-10 pb-16 pl-14">
         <div className="flex h-5 flex-none items-center justify-between">
-          <div className="ml-[21px]">
+          <div className="relative ml-[21px]">
             <Wordmark />
+            {step === 'account' && !greeted && !askingCode && !proving && enrolment === null && (
+              <button
+                type="button"
+                className="btn-ghost absolute top-full left-0 mt-5 flex items-center gap-1.5 whitespace-nowrap"
+                disabled={working}
+                onClick={() => go('welcome')}
+              >
+                <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m14 6-6 6 6 6" />
+                </svg>
+                {t('Back')}
+              </button>
+            )}
           </div>
           <select
             aria-label={t('Language')}

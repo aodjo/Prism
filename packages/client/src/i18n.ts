@@ -87,6 +87,7 @@ const KO: Record<string, string> = {
   'Low-latency remote access for macOS, Windows, and Linux.':
     'macOS · Windows · Linux를 지연 없이 원격으로 씁니다.',
   Begin: '시작',
+  Back: '뒤로가기',
   'Already using PRISM? Sign in': '이미 쓰고 있다면 로그인',
   'One machine, every screen.': '한 대의 컴퓨터, 모든 화면.',
   'PRISM streams your desktop to any other device you own — with latency low enough that you stop noticing it’s remote.':
