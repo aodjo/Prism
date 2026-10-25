@@ -91,7 +91,7 @@ const KO: Record<string, string> = {
   'Already using PRISM? Sign in': '계정이 이미 있다면 로그인',
   'One machine, every screen.': '한 대의 컴퓨터, 모든 화면.',
   'PRISM streams your desktop to any other device you own — with latency low enough that you stop noticing it’s remote.':
-    'PRISM은 내 컴퓨터 화면을 내가 가진 다른 기기로 보냅니다. 원격이라는 걸 잊을 만큼 빠릅니다.',
+    'PRISM은 내 컴퓨터 화면을 내가 가진 다른 기기로 보냅니다.',
   'Scan this with an authenticator app, then test its code to finish creating your account. If you close this screen first, start signup again.':
     '인증 앱으로 스캔한 뒤 코드를 확인하면 가입이 완료돼요. 먼저 이 화면을 닫았다면 가입을 다시 시작해요.',
   'I have it — test it': '등록했습니다 — 확인하기',
