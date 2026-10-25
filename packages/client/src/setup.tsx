@@ -668,7 +668,7 @@ function Setup(): JSX.Element {
           ) : enrolment ? (
             <div className="card mt-9 w-[min(440px,30.6vw)] p-6">
               <p className="mx-auto max-w-[36ch] text-note leading-normal text-dim">
-            {t('Scan this with an authenticator app. It is shown once — the server keeps only enough to check codes, which is not enough to show it again.')}
+            {t('Scan this with an authenticator app, then test its code to finish creating your account. If you close this screen first, start signup again.')}
               </p>
               <img
                 src={enrolment.qr}

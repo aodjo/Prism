@@ -41,6 +41,18 @@ CREATE TABLE IF NOT EXISTS accounts (
   created_unix INTEGER NOT NULL
 );
 
+-- Unfinished signups can be replaced after proving the address again. They become accounts
+-- only when the authenticator is tested, so closing its QR screen cannot strand an account.
+CREATE TABLE IF NOT EXISTS pending_accounts (
+  email TEXT PRIMARY KEY NOT NULL,
+  salt TEXT NOT NULL,
+  verifier TEXT NOT NULL,
+  totp_secret TEXT NOT NULL,
+  sealed_key TEXT NOT NULL DEFAULT '',
+  verified INTEGER NOT NULL,
+  expires_unix INTEGER NOT NULL
+);
+
 -- One row per machine on an account. A row rather than a JSON array, so that adding a machine
 -- is an insert instead of a rewrite of everything the account knows.
 CREATE TABLE IF NOT EXISTS devices (
