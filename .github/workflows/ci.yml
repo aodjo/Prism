@@ -563,7 +563,10 @@ jobs:
   image:
     name: publish the image
     needs: [rendezvous, touched]
-    if: needs.touched.outputs.rendezvous == 'true'
+    # Allow client releases while server deployment is paused for infrastructure maintenance.
+    if: >-
+      needs.touched.outputs.rendezvous == 'true' &&
+      vars.RENDEZVOUS_DEPLOY_ENABLED != 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: read
