@@ -18,6 +18,10 @@
  */
 const KO: Record<string, string> = {
   'Some information could not be loaded.': '일부 정보를 불러오지 못했어요.',
+  'A password needs at least 8 characters.': '비밀번호는 8자 이상 입력해요.',
+  'Those two passwords are not the same': '두 비밀번호가 서로 달라요.',
+  'Send a new code': '새 코드 보내기',
+  'Edit signup details': '가입 정보 수정',
   Retry: '다시 시도',
   /* ── Setup ─────────────────────────────────────────────────────────────── */
   'Your desktop.': '내 컴퓨터를',

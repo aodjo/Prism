@@ -80,6 +80,9 @@ const HAS_NEXT: ReadonlySet<Step> = new Set<Step>(['intro', 'permissions']);
 /** How many characters a pairing code has. */
 const CODE_LENGTH = 6;
 
+/** Minimum password length, counted as Unicode characters like the native derivation. */
+const MIN_PASSWORD = 8;
+
 /** How far apart the code boxes are, centre to centre: 62 wide with 10 between. */
 const CODE_PITCH = 72;
 
@@ -262,6 +265,8 @@ function Setup(): JSX.Element {
    * factor of their choosing until the owner does something that turns it on.
    */
   const [proving, setProving] = useState(false);
+  /** Remounts email code entry after a resend, clearing the previous attempt. */
+  const [challengeAttempt, setChallengeAttempt] = useState(0);
   /**
    * Whether the second factor was set up a moment ago.
    *
@@ -291,6 +296,8 @@ function Setup(): JSX.Element {
   const [signedIn, setSignedIn] = useState<string | null>(null);
   const [enrolment, setEnrolment] = useState<AccountEnrolmentView | null>(null);
   const [working, setWorking] = useState(false);
+  /** Guards keyboard and pointer submissions before React commits the busy state. */
+  const submitting = useRef(false);
   /**
    * Which of the two account screens is showing.
    *
@@ -438,6 +445,10 @@ function Setup(): JSX.Element {
    * @param {string} code - The six digits.
    */
   const signIn = (code: string): void => {
+    if (submitting.current) {
+      return;
+    }
+    submitting.current = true;
     void (async () => {
       setWorking(true);
       setAccountTrouble(null);
@@ -464,6 +475,7 @@ function Setup(): JSX.Element {
         setAccountTrouble(reason(error));
         setRefused((was) => was + 1);
       } finally {
+        submitting.current = false;
         setWorking(false);
       }
     })();
@@ -475,12 +487,20 @@ function Setup(): JSX.Element {
    * No account is made here. That is the whole of what this step is for.
    */
   const createAccount = (): void => {
+    if (submitting.current) {
+      return;
+    }
+    if ([...password].length < MIN_PASSWORD) {
+      setAccountTrouble(t('A password needs at least 8 characters.'));
+      return;
+    }
     // Checked here because it cannot be checked anywhere else: the password never leaves this
     // machine, so a mistyped one is only ever two strings in this window that differ.
     if (password !== confirm) {
-      setAccountTrouble('Those two passwords are not the same');
+      setAccountTrouble(t('Those two passwords are not the same'));
       return;
     }
+    submitting.current = true;
 
     void (async () => {
       setWorking(true);
@@ -489,6 +509,8 @@ function Setup(): JSX.Element {
       try {
         if (await prism.accountChallenge(email.trim())) {
           setProving(true);
+          setRefused(0);
+          setChallengeAttempt((attempt) => attempt + 1);
         } else {
           // A server with no mail configured sends nothing and asks for nothing. The account
           // is made on the spot, which is what this server did before it could send at all.
@@ -498,6 +520,7 @@ function Setup(): JSX.Element {
       } catch (error) {
         setAccountTrouble(reason(error));
       } finally {
+        submitting.current = false;
         setWorking(false);
       }
     })();
@@ -509,6 +532,10 @@ function Setup(): JSX.Element {
    * @param {string} code - The six digits from the message.
    */
   const proveAddress = (code: string): void => {
+    if (submitting.current) {
+      return;
+    }
+    submitting.current = true;
     void (async () => {
       setWorking(true);
       setAccountTrouble(null);
@@ -528,6 +555,7 @@ function Setup(): JSX.Element {
         setAccountTrouble(reason(error));
         setRefused((was) => was + 1);
       } finally {
+        submitting.current = false;
         setWorking(false);
       }
     })();
@@ -658,6 +686,7 @@ function Setup(): JSX.Element {
             />
           ) : proving ? (
             <CodeBoxes
+              key={challengeAttempt}
               disabled={working}
               refused={refused}
               passed={passed}
@@ -699,6 +728,7 @@ function Setup(): JSX.Element {
                 <span className="text-fine-2 text-dim">{t('Email')}</span>
                 <input
                   type="email"
+                  disabled={working}
                   autoComplete="username"
                   spellCheck={false}
                   placeholder="you@example.com"
@@ -715,6 +745,7 @@ function Setup(): JSX.Element {
                 </span>
                 <input
                   type="password"
+                  disabled={working}
                   autoComplete={joining ? 'new-password' : 'current-password'}
                   placeholder="••••••••"
                   className={ACCOUNT_FIELD}
@@ -751,6 +782,7 @@ function Setup(): JSX.Element {
                     <span className="text-fine-2 text-dim">{t('Password again')}</span>
                     <input
                       type="password"
+                      disabled={working}
                       autoComplete="new-password"
                       placeholder="••••••••"
                       tabIndex={joining ? undefined : -1}
@@ -793,23 +825,37 @@ function Setup(): JSX.Element {
 
           <Trouble message={accountTrouble} className="mt-4" />
 
-          {askingCode && (
-            <button
-              type="button"
-              className="btn-ghost mt-5"
-              onClick={() => {
-                setAccountTrouble(null);
-                setAskingCode(false);
-              }}
-            >
-              {t('Use a different email')}
+          {proving && (
+            <button type="button" className="btn-secondary mt-5" disabled={working} onClick={createAccount}>
+              {t('Send a new code')}
             </button>
           )}
 
-          {enrolment === null && !greeted && !askingCode && (
+          {(askingCode || proving || enrolment !== null) && (
             <button
               type="button"
               className="btn-ghost mt-5"
+              disabled={working}
+              onClick={() => {
+                setAccountTrouble(null);
+                setAskingCode(false);
+                setProving(false);
+                setEnrolment(null);
+                setJoining(joining || justEnrolled);
+                setJustEnrolled(false);
+                setPassed(false);
+                setRefused(0);
+              }}
+            >
+              {t(proving || enrolment !== null || justEnrolled ? 'Edit signup details' : 'Use a different email')}
+            </button>
+          )}
+
+          {enrolment === null && !greeted && !askingCode && !proving && (
+            <button
+              type="button"
+              className="btn-ghost mt-5"
+              disabled={working}
               onClick={() => {
                 setAccountTrouble(null);
                 setConfirm('');
