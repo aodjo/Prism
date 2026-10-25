@@ -33,7 +33,7 @@
     "copyright": "Prism",
     "category": "Utility",
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "Developer ID Application"
     },
     "shortDescription": "Low-latency remote desktop",
     "longDescription": "Watch and control another machine, at a latency you can play a game through.",
