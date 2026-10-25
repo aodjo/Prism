@@ -50,6 +50,9 @@ fn refresh_account(app: &tauri::AppHandle) {
     if account::refresh(&account, &chosen).unwrap_or(false)
         && let Ok(state) = account::account_state(account, chosen)
     {
+        if let Err(error) = sharing::refresh_peers(app) {
+            eprintln!("sharing: could not refresh trusted devices: {error}");
+        }
         let _ = app.emit("account:state", state);
     }
 }
