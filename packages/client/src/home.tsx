@@ -109,6 +109,8 @@ function Home(): JSX.Element {
   /** What this machine's own session is doing, or `null` when it is not shared. */
   const [mine, setMine] = useState<HostSnapshot | null>(null);
   const [trouble, setTrouble] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   /** The blocks, as they stand. */
   const [board, setBoard] = useState<readonly Block[]>([]);
@@ -158,67 +160,88 @@ function Home(): JSX.Element {
   );
 
   useEffect(() => {
-    void (async () => {
-      const [identity, signedIn, stored, state, own, past] = await Promise.all([
-        prism.identity(),
-        prism.accountState(),
-        prism.getSettings(),
-        prism.streamState(),
-        prism.sharing(),
-        prism.sessions(),
-      ]);
+    let active = true;
+    let publicKey: string | null = null;
+    let known: readonly AccountDeviceView[] | null = null;
+    setLoadError(null);
 
-      speak(stored.language);
-      setSettings(stored);
-      setDevices(signedIn.devices);
-      setAccount({ email: signedIn.email });
-      setMine(own);
-      setStream(state);
-      setHistory(past);
-      setMachines(watchable(signedIn.devices, identity.publicKey));
-      setBoard(stored.board);
-    })();
-  }, []);
+    /** Applies each successful read independently and reports failures while mounted. */
+    const receive = <T,>(read: Promise<T>, apply: (value: T) => void): void => {
+      void read.then((value) => {
+        if (active) {
+          apply(value);
+        }
+      }).catch((error: unknown) => {
+        if (active) {
+          setLoadError(reason(error));
+        }
+      });
+    };
 
-  // Subscribing is allowed to fail without taking the window with it. An error thrown out of an
-  // effect is one React answers by unmounting everything, and what that leaves is a black
-  // rectangle — no window furniture, no message, nothing to press. A window that opened and
-  // then stopped hearing about one thing is worth far more than that, and the line below is
-  // what says which thing.
-  useEffect(() => {
-    const listen = (what: string, subscribe: () => void): void => {
-      try {
-        subscribe();
-      } catch (error: unknown) {
-        setTrouble(`${what}: ${reason(error)}`);
+    /** Resolves watchable machines once both identity and account data are available. */
+    const listMachines = (): void => {
+      if (known !== null && publicKey !== null) {
+        setMachines(watchable(known, publicKey));
       }
     };
 
-    listen('sharing', () => {
-      prism.onSharing(setMine);
+    receive(prism.identity(), (identity) => {
+      publicKey = identity.publicKey;
+      listMachines();
     });
-    listen('sessions', () => {
-      prism.onSessions(setHistory);
+    receive(prism.accountState(), (signedIn) => {
+      known = signedIn.devices;
+      setDevices(known);
+      setAccount({ email: signedIn.email });
+      listMachines();
     });
-    listen('stream', () => {
-      prism.onStream((state) => {
-        setStream(state);
+    receive(prism.getSettings(), (stored) => {
+      speak(stored.language);
+      setSettings(stored);
+      setBoard(stored.board);
+    });
+    receive(prism.streamState(), setStream);
+    receive(prism.sharing(), setMine);
+    receive(prism.sessions(), setHistory);
 
+    return () => {
+      active = false;
+    };
+  }, [loadAttempt]);
+
+  useEffect(() => {
+    const report = (error: unknown): void => {
+      setTrouble(reason(error));
+    };
+    /** Keeps one synchronous bridge failure from preventing the other subscriptions. */
+    const subscribe = (start: () => () => void): (() => void) => {
+      try {
+        return start();
+      } catch (error: unknown) {
+        report(error);
+        return () => {};
+      }
+    };
+    const stop = [
+      subscribe(() => prism.onSharing(setMine, report)),
+      subscribe(() => prism.onSessions(setHistory, report)),
+      subscribe(() => prism.onStream((state) => {
+        setStream(state);
         if (state.departed !== null && !RUNNING.has(state.phase)) {
           setGone(state.departed);
         }
-      });
-    });
-    listen('account', () => {
-      prism.onAccount((state) => {
+      }, report)),
+      subscribe(() => prism.onAccount((state) => {
         setDevices(state.devices);
         setAccount({ email: state.email });
         setMachines(watchable(state.devices, state.publicKey));
-      });
-    });
-    listen('updates', () => {
-      prism.onUpdate(setUpdate);
-    });
+      }, report)),
+      subscribe(() => prism.onUpdate(setUpdate, report)),
+    ];
+
+    return () => {
+      stop.forEach((unsubscribe) => { unsubscribe(); });
+    };
   }, []);
 
   // How wide the board is decides how many holes there are, so it is measured rather than
@@ -249,7 +272,7 @@ function Home(): JSX.Element {
   // the account and the settings have both arrived, and only when nothing is saved: a board
   // somebody built is theirs, including one they emptied.
   useEffect(() => {
-    if (settings === null || settings.board.length > 0 || board.length > 0) {
+    if (settings === null || settings.boardInitialized || settings.board.length > 0 || board.length > 0) {
       return;
     }
 
@@ -625,6 +648,16 @@ function Home(): JSX.Element {
             scrolled clear of it rather than ending underneath. */}
         <div className="h-full w-full overflow-x-hidden overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent_76px,black_100px)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <div className="flex min-h-full w-full flex-col px-8 pt-[80px] pb-[108px]">
+            {loadError !== null && (
+              <div role="alert" className="mb-4">
+                <Trouble message={`${t('Some information could not be loaded.')} ${loadError}`} />
+                <button type="button" className="btn-secondary" onClick={() => {
+                  setLoadAttempt((attempt) => attempt + 1);
+                }}>
+                  {t('Retry')}
+                </button>
+              </div>
+            )}
             <Trouble
               message={
                 trouble ??

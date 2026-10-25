@@ -12,6 +12,7 @@
  */
 
 import { StrictMode, useEffect, useState } from 'react';
+import type { JSX } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import type { MovingFile, PrismApi, StreamState } from './api.js';
@@ -115,15 +116,23 @@ function Transfers(): JSX.Element {
   const [trouble, setTrouble] = useState<string | null>(null);
 
   useEffect(() => {
-    void (async () => {
-      try {
-        setStream(await prism.streamState());
-      } catch (error: unknown) {
+    let active = true;
+    const report = (error: unknown): void => {
+      if (active) {
         setTrouble(reason(error));
       }
-    })();
+    };
+    void prism.streamState().then((state) => {
+      if (active) {
+        setStream(state);
+      }
+    }).catch(report);
+    const stop = prism.onStream(setStream, report);
 
-    prism.onStream(setStream);
+    return () => {
+      active = false;
+      stop();
+    };
   }, []);
 
   const connected = stream.phase === 'streaming';

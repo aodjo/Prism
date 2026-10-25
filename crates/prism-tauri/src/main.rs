@@ -134,23 +134,18 @@ fn get_settings(held: tauri::State<'_, Held>) -> Result<Settings, String> {
 
 /// Writes what changed and returns the settings as they now stand.
 ///
-/// Takes the whole object rather than one field, because the window already holds a copy and
-/// sending back the part it changed would mean two places deciding what the rest still is.
+/// Merges only the supplied fields while holding the settings lock, so simultaneous changes
+/// from different windows cannot overwrite one another with an older snapshot.
 ///
 /// # Errors
 ///
 /// Fails if there is no home directory, or the file cannot be written.
 #[tauri::command]
-fn set_settings(next: Settings, held: tauri::State<'_, Held>) -> Result<Settings, String> {
-    let mut settings = held
-        .0
-        .lock()
-        .map_err(|_| "the settings lock was poisoned".to_owned())?;
-
-    settings::save(&next)?;
-    *settings = next;
-
-    Ok(settings.clone())
+fn set_settings(
+    next: serde_json::Map<String, serde_json::Value>,
+    held: tauri::State<'_, Held>,
+) -> Result<Settings, String> {
+    settings::update(&held.0, next, settings::save)
 }
 
 /// Ends the session and undoes what signing in set up.

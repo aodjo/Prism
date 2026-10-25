@@ -41,6 +41,12 @@ declare global {
       invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
       /** Registers a function and returns the number the shell calls it back by. */
       transformCallback: (callback: (payload: unknown) => void) => number;
+      /** Releases a callback when its subscription ends or registration fails. */
+      unregisterCallback: (id: number) => void;
+    };
+    /** Tauri's bookkeeping for JavaScript event listeners. */
+    readonly __TAURI_EVENT_PLUGIN_INTERNALS__?: {
+      unregisterListener: (event: string, id: number) => void;
     };
   }
 }
@@ -77,20 +83,58 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
  * @template T What the event carries.
  * @param {string} event - The event's name, as `emit` spells it.
  * @param {(payload: T) => void} listener - Called with each one.
- * @returns {void}
+ * @param {(error: unknown) => void} onError - Reports registration and cleanup failures.
+ * @returns {() => void} Stops delivery and releases the subscription, even during registration.
  */
-function listen<T>(event: string, listener: (payload: T) => void): void {
+function listen<T>(
+  event: string,
+  listener: (payload: T) => void,
+  onError: (error: unknown) => void = console.error,
+): () => void {
   const internals = window.__TAURI_INTERNALS__;
 
   if (!internals) {
-    return;
+    onError(new Error(`no shell to listen for ${event} through`));
+    return () => {};
   }
 
+  let stopped = false;
+  let eventId: number | undefined;
   const handler = internals.transformCallback((message) => {
-    listener((message as { payload: T }).payload);
+    if (!stopped) {
+      listener((message as { payload: T }).payload);
+    }
   });
 
-  void internals.invoke('plugin:event|listen', { event, target: { kind: 'Any' }, handler });
+  /** Removes both Tauri's event record and the Rust subscription. */
+  const unlisten = (id: number): void => {
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__?.unregisterListener(event, id);
+    void call<void>('plugin:event|unlisten', { event, eventId: id }).catch(onError);
+  };
+
+  void call<number>('plugin:event|listen', { event, target: { kind: 'Any' }, handler })
+    .then((id) => {
+      eventId = id;
+      if (stopped) {
+        unlisten(eventId);
+      }
+    }, (error: unknown) => {
+      internals.unregisterCallback(handler);
+      if (!stopped) {
+        onError(error);
+      }
+    });
+
+  return () => {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    internals.unregisterCallback(handler);
+    if (eventId !== undefined) {
+      unlisten(eventId);
+    }
+  };
 }
 
 /** How often a window asks what the session it is handing out is doing. */
@@ -147,12 +191,8 @@ export function installBridge(): void {
 
     getSettings: (): Promise<Settings> => call<Settings>('get_settings'),
 
-    // Sent whole rather than as the field that changed, because the window already holds a copy
-    // and sending a part would leave two places deciding what the rest still is.
-    setSettings: async (next: Partial<Settings>): Promise<Settings> =>
-      call<Settings>('set_settings', {
-        next: { ...(await call<Settings>('get_settings')), ...next },
-      }),
+    setSettings: (next: Partial<Settings>): Promise<Settings> =>
+      call<Settings>('set_settings', { next }),
 
     buildInfo: (): Promise<Build> => call<Build>('build_info'),
 
@@ -183,10 +223,31 @@ export function installBridge(): void {
     // Asked for rather than announced. A session that is not running has nothing to say, and one
     // that is says the same handful of counters — so a window that wants them asks at a rate it
     // chooses, which is what keeps this under the ten-a-second ceiling by construction.
-    onSharing: (listener: (snapshot: HostSnapshot | null) => void): void => {
-      setInterval(() => {
-        void api.sharing().then(listener);
+    onSharing: (listener, onError = console.error): (() => void) => {
+      let stopped = false;
+      let pending = false;
+      const timer = setInterval(() => {
+        if (pending) {
+          return;
+        }
+        pending = true;
+        void api.sharing().then((snapshot) => {
+          if (!stopped) {
+            listener(snapshot);
+          }
+        }).catch((error: unknown) => {
+          if (!stopped) {
+            onError(error);
+          }
+        }).finally(() => {
+          pending = false;
+        });
       }, SHARING_POLL_MS);
+
+      return () => {
+        stopped = true;
+        clearInterval(timer);
+      };
     },
 
     connect: (host: string, address: string): Promise<StreamState> =>
@@ -199,28 +260,20 @@ export function installBridge(): void {
     // Announced rather than asked for. What the stream is doing changes when the client says so,
     // and a window polling for a phase change would either miss one or ask far more often than
     // anything changes.
-    onStream: (listener: (state: StreamState) => void): void => {
-      listen<StreamState>('stream:state', listener);
-    },
+    onStream: (listener, onError) => listen<StreamState>('stream:state', listener, onError),
 
     sessions: (): Promise<Session[]> => call<Session[]>('get_sessions'),
 
-    onSessions: (listener: (sessions: readonly Session[]) => void): void => {
-      listen<Session[]>('sessions:changed', listener);
-    },
+    onSessions: (listener, onError) => listen<Session[]>('sessions:changed', listener, onError),
 
     accountState: (): Promise<AccountState> => call<AccountState>('account_state'),
 
-    onAccount: (listener: (state: AccountState) => void): void => {
-      listen<AccountState>('account:state', listener);
-    },
+    onAccount: (listener, onError) => listen<AccountState>('account:state', listener, onError),
 
     // Announced rather than asked for, and announced once. The shell looks when it starts and
     // says so only when it found something, so a window that hears nothing is a window on the
     // newest build.
-    onUpdate: (listener: (available: Available) => void): void => {
-      listen<Available>('update:available', listener);
-    },
+    onUpdate: (listener, onError) => listen<Available>('update:available', listener, onError),
 
     accountChallenge: (email: string): Promise<boolean> =>
       call<boolean>('account_challenge', { email }),

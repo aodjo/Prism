@@ -17,6 +17,8 @@
  * explains itself in a clause, the Korean names the subject and says it directly.
  */
 const KO: Record<string, string> = {
+  'Some information could not be loaded.': '일부 정보를 불러오지 못했어요.',
+  Retry: '다시 시도',
   /* ── Setup ─────────────────────────────────────────────────────────────── */
   'Your desktop.': '내 컴퓨터를',
   'Everywhere.': '어디서나.',

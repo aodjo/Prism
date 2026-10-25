@@ -182,18 +182,29 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
   const body = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    void (async () => {
-      const [known, stored, made] = await Promise.all([
-        prism.accountState(),
-        prism.getSettings(),
-        prism.buildInfo(),
-      ]);
-
+    let active = true;
+    /** Applies successful initial reads without discarding them when another read fails. */
+    const receive = <T,>(read: Promise<T>, apply: (value: T) => void): void => {
+      void read.then((value) => {
+        if (active) {
+          apply(value);
+        }
+      }).catch((error: unknown) => {
+        if (active) {
+          setTrouble(reason(error));
+        }
+      });
+    };
+    receive(prism.accountState(), setAccount);
+    receive(prism.getSettings(), (stored) => {
       speak(stored.language);
-      setAccount(known);
       setSettings(stored);
-      setBuild(made);
-    })();
+    });
+    receive(prism.buildInfo(), setBuild);
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   /**
