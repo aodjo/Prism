@@ -85,10 +85,10 @@ const KO: Record<string, string> = {
   'Everywhere.': '어디서나.',
   Everywhere: '어디서나',
   'Low-latency remote access for macOS, Windows, and Linux.':
-    'macOS · Windows · Linux를 지연 없이 원격으로 씁니다.',
+    'macOS · Windows · Linux를 지연 없이 원격으로 사용하세요.',
   Begin: '시작',
   Back: '뒤로가기',
-  'Already using PRISM? Sign in': '이미 쓰고 있다면 로그인',
+  'Already using PRISM? Sign in': '계정이 이미 있다면 로그인',
   'One machine, every screen.': '한 대의 컴퓨터, 모든 화면.',
   'PRISM streams your desktop to any other device you own — with latency low enough that you stop noticing it’s remote.':
     'PRISM은 내 컴퓨터 화면을 내가 가진 다른 기기로 보냅니다. 원격이라는 걸 잊을 만큼 빠릅니다.',
