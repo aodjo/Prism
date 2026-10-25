@@ -498,9 +498,10 @@ export interface PrismApi {
    * Called once, at the end of the flow or when somebody skips it. Setup does not run again
    * unless this machine forgets everything it knows.
    *
-   * @returns {void}
+   * @returns {Promise<null>} Resolves after setup is saved and the home window is opened.
+   * @throws {Error} If saving settings or opening the home window fails.
    */
-  finishSetup(): void;
+  finishSetup(): Promise<null>;
 
   /**
    * Opens the settings window, or brings it forward if it is already open.

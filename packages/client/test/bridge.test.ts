@@ -72,6 +72,11 @@ describe('the shell bridge', () => {
     expect(settings).toEqual({ fps: 120, bitrateBps: 80_000_000 });
   });
 
+  it('returns setup completion failures to the screen', async () => {
+    invoke.mockRejectedValueOnce(new Error('home window failed'));
+    await expect(api.finishSetup()).rejects.toThrow('home window failed');
+  });
+
   it('reports asynchronous registration failures and releases their callbacks', async () => {
     const failure = new Error('registration refused');
     invoke.mockRejectedValueOnce(failure);

@@ -318,11 +318,7 @@ export function installBridge(): void {
     accountForgetDevice: (publicKey: string): Promise<AccountState> =>
       call<AccountState>('account_forget_device', { publicKey }),
 
-    // The three that move a window rather than fetch anything. None returns a value, so none is
-    // awaited: a page that asked to be resized has nothing to do with the answer.
-    finishSetup: (): void => {
-      void call('finish_setup');
-    },
+    finishSetup: (): Promise<null> => call<null>('finish_setup'),
 
     openSettings: (): void => {
       void call('open_settings');

@@ -132,3 +132,27 @@ describe('permission failure recovery', () => {
     expect(app.state).toEqual(before);
   });
 });
+
+
+describe('setup completion', () => {
+  it('reports a completion failure and allows retrying without duplicate requests', async () => {
+    const app = setup();
+    app.api.accountState.mockResolvedValue({ email: 'test@example.invalid' });
+    app.effect('prism.identity')();
+    await settle();
+    app.button('Continue').props.onClick();
+    app.api.finishSetup.mockRejectedValueOnce(new Error('home window failed'));
+    const enter = app.button('Enter PRISM');
+    enter.props.onClick();
+    enter.props.onClick();
+    expect(app.button('Enter PRISM').props.disabled).toBe(true);
+    await settle();
+    expect(app.api.finishSetup).toHaveBeenCalledOnce();
+    expect(app.state).toContain('home window failed');
+    expect(app.button('Enter PRISM').props.disabled).toBe(false);
+    app.button('Enter PRISM').props.onClick();
+    await settle();
+    expect(app.api.finishSetup).toHaveBeenCalledTimes(2);
+    expect(app.state).not.toContain('home window failed');
+  });
+});

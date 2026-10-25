@@ -331,6 +331,10 @@ function Setup(): JSX.Element {
   /** Startup failures can be retried without discarding successful account or settings reads. */
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  /** Completion stays retryable when persistence or native window creation fails. */
+  const [finishError, setFinishError] = useState<string | null>(null);
+  const [finishing, setFinishing] = useState(false);
+  const finishPending = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -479,8 +483,20 @@ function Setup(): JSX.Element {
     })();
   };
 
+  /** Completes setup once, reporting a failed save or window transition for retry. */
   const finish = (): void => {
-    prism.finishSetup();
+    if (finishPending.current) {
+      return;
+    }
+    finishPending.current = true;
+    setFinishing(true);
+    setFinishError(null);
+    void prism.finishSetup().catch((error: unknown) => {
+      setFinishError(reason(error));
+    }).finally(() => {
+      finishPending.current = false;
+      setFinishing(false);
+    });
   };
 
   /**
@@ -1049,9 +1065,10 @@ function Setup(): JSX.Element {
           </div>
 
           <div className="mt-[23px]">
-            <Primary keys="⌘↵" onClick={finish}>
+            <Primary keys="⌘↵" onClick={finish} disabled={finishing}>
               {t('Enter PRISM')}
             </Primary>
+            <Trouble message={finishError} className="mt-4" />
           </div>
         </section>
       )}
