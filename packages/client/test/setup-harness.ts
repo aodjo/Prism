@@ -29,11 +29,11 @@ export async function settle(): Promise<void> {
 }
 
 /** Runs Setup's actual event handlers with persistent hook values and isolated OS calls. */
-export function setup() {
+export function setup(language = 'en') {
   const api = {
     identity: vi.fn(async () => ({ version: 'test', publicKey: 'mine' })),
     accountState: vi.fn(async () => ({ email: null as string | null })),
-    getSettings: vi.fn(async () => ({ language: 'en' })),
+    getSettings: vi.fn(async () => ({ language })),
     accountChallenge: vi.fn(async () => true),
     accountRegister: vi.fn(async () => ({ qr: 'data:image/png;base64,test', secret: 'test' })),
     accountSignIn: vi.fn(async () => ({ email: 'test@example.invalid' })),
@@ -48,10 +48,12 @@ export function setup() {
   let effects: (() => any)[] = [];
   let component!: () => Element;
   const jsx = (type: any, props: Record<string, any>): Element => ({ type, props });
+  const translations: Record<string, any> = {};
+  vm.runInNewContext(compile('i18n.ts'), { exports: translations, navigator: { language } });
   const actualUi: Record<string, any> = {};
-  vm.runInNewContext(compile('ui.tsx'), { exports: actualUi, require: () => ({ jsx, jsxs: jsx }) });
+  vm.runInNewContext(compile('ui.tsx'), { exports: actualUi, require: (name: string) => name === './i18n.js' ? translations : ({ jsx, jsxs: jsx }) });
   const ui = new Proxy({
-    GRANTS: actualUi.GRANTS, t: (text: string) => text, speak: () => {},
+    GRANTS: actualUi.GRANTS, ...translations,
     reason: (error: Error) => error.message, short: (text: string) => text,
   }, { get: (target, key) => key in target ? target[key as keyof typeof target] : String(key) });
   const eventTarget = {

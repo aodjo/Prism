@@ -700,8 +700,7 @@ function Setup(): JSX.Element {
             {t('One machine, every screen.')}
           </h2>
           <p className="mt-4 max-w-[min(520px,36.1vw)] text-body text-muted">
-            PRISM streams your desktop to any other device you own — with latency low enough
-            that you stop noticing it&rsquo;s remote.
+            {t('PRISM streams your desktop to any other device you own — with latency low enough that you stop noticing it’s remote.')}
           </p>
         </section>
       )}
@@ -710,33 +709,33 @@ function Setup(): JSX.Element {
         <section className={cls}>
           <h2 className="max-w-[min(700px,48.6vw)] text-title font-semibold">
             {greeted
-              ? `Hello, ${signedIn ?? ''}`
+              ? t('Hello, {email}', { email: signedIn ?? '' })
               : askingCode
                 ? justEnrolled
-                  ? 'Test it once'
-                  : 'Enter your code'
+                  ? t('Test it once')
+                  : t('Enter your code')
                 : enrolment
-                  ? 'One more thing'
+                  ? t('One more thing')
                   : proving
-                    ? 'Check your email'
+                    ? t('Check your email')
                     : joining
-                      ? 'Create your account'
-                      : 'Welcome back'}
+                      ? t('Create your account')
+                      : t('Welcome back')}
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
             {greeted
-              ? 'Every machine on this account now knows about this one, and this one knows about them.'
+              ? t('Every machine on this account now knows about this one, and this one knows about them.')
               : askingCode
                 ? justEnrolled
-                  ? 'Enter what your authenticator shows now, so you know it works before you need it.'
-                  : `Six digits from your authenticator, for ${email.trim()}.`
+                  ? t('Enter what your authenticator shows now, so you know it works before you need it.')
+                  : t('Six digits from your authenticator, for {email}.', { email: email.trim() })
                 : enrolment
-                  ? 'Set up the second factor now. It is the only time it is shown.'
+                  ? t('Set up the second factor now. It is the only time it is shown.')
                   : proving
-                    ? `Six digits went to ${email.trim()}. Nothing is created until they come back.`
+                    ? t('Six digits went to {email}. Nothing is created until they come back.', { email: email.trim() })
                     : joining
-                      ? 'An account is how your machines find each other, and how this one is recognised when it asks.'
-                      : 'Sign in and every machine on your account finds this one.'}
+                      ? t('An account is how your machines find each other, and how this one is recognised when it asks.')
+                      : t('Sign in and every machine on your account finds this one.')}
           </p>
 
           {greeted ? null : askingCode ? (
@@ -805,7 +804,7 @@ function Setup(): JSX.Element {
               </label>
               <label className="flex flex-col gap-1.5">
                 <span className="text-fine-2 text-dim">
-                  {joining ? 'Password — at least eight characters' : 'Password'}
+                  {t(joining ? 'Password — at least eight characters' : 'Password')}
                 </span>
                 <input
                   type="password"
@@ -882,7 +881,7 @@ function Setup(): JSX.Element {
                       }
                 }
               >
-                {joining ? 'Create account' : 'Continue'}
+                {t(joining ? 'Create account' : 'Continue')}
               </button>
             </div>
           )}
@@ -926,7 +925,7 @@ function Setup(): JSX.Element {
                 setJoining(!joining);
               }}
             >
-              {joining ? 'I already have an account' : 'I need an account'}
+              {t(joining ? 'I already have an account' : 'I need an account')}
             </button>
           )}
         </section>
@@ -1029,8 +1028,8 @@ function Setup(): JSX.Element {
           </h2>
           <p className="mt-3 max-w-[min(640px,44.4vw)] text-lead-2 text-muted">
             {signedIn === null
-              ? 'This machine is ready. Sign in to an account to reach it from anywhere else.'
-              : `Signed in as ${signedIn}. Every machine you sign in to this account keeps its own screen, and can reach the others.`}
+              ? t('This machine is ready. Sign in to an account to reach it from anywhere else.')
+              : t('Signed in as {email}. Every machine you sign in to this account keeps its own screen, and can reach the others.', { email: signedIn ?? '' })}
           </p>
 
           {/* What to do next, rather than a picture of something already happening. Setup can
@@ -1198,7 +1197,7 @@ function Setup(): JSX.Element {
         >
           {counted >= 0 ? <Steps at={counted} of={shownSteps.length} /> : <span />}
           {step === 'welcome' && (
-            <span className="ml-auto text-tiny font-medium text-dim">v{version} · beta</span>
+            <span className="ml-auto text-tiny font-medium text-dim">v{version} · {t('Beta')}</span>
           )}
           {(HAS_NEXT.has(step) || (step === 'account' && greeted)) && (
             <Primary trailing="→" onClick={advance}>
@@ -1330,7 +1329,7 @@ function CodeBoxes({
           inputMode="numeric"
           maxLength={1}
           disabled={disabled || full}
-          aria-label={`Character ${at + 1}`}
+          aria-label={t('Digit {n}', { n: at + 1 })}
           value={character}
           onChange={(event) => {
             // Digits, and nothing else. Both codes this row is used for are six digits, so
@@ -1411,7 +1410,7 @@ function CodeBoxes({
             } ${!wrong && !passed ? 'animate-[code-checking_1.1s_ease-in-out_infinite]' : ''}`}
           >
             <span className="sr-only">
-              {wrong ? 'That code was refused' : passed ? 'That code was accepted' : 'Checking'}
+              {t(wrong ? 'That code was refused' : passed ? 'That code was accepted' : 'Checking')}
             </span>
             <svg
               viewBox="0 0 28 28"

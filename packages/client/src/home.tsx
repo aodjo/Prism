@@ -527,7 +527,7 @@ function Home(): JSX.Element {
                 type="button"
                 aria-haspopup="menu"
                 aria-expanded={menu}
-                aria-label={account.email ? `Signed in as ${account.email}` : 'Not signed in'}
+                aria-label={account.email ? t('Signed in as {email}', { email: account.email }) : t('Not signed in')}
                 onClick={() => {
                   setMenu(!menu);
                 }}
@@ -890,10 +890,10 @@ function Home(): JSX.Element {
         <div className="fixed inset-0 z-[8] grid place-items-center bg-[rgba(6,6,10,0.62)] p-6 backdrop-blur-[3px]">
           <div className="w-full max-w-[420px] rounded-card border border-line-4 bg-[rgba(20,20,26,0.97)] px-5 pt-4 pb-5 shadow-[0_24px_60px_rgba(0,0,0,0.5)]">
             <h2 className="m-0 text-[17px] leading-none font-semibold tracking-[-0.2px] text-ink">
-              새로운 빌드가 있습니다
+              {t('A new build is available')}
             </h2>
             <p className="mt-3 mb-0 text-ui text-dim">
-              {update.version} 을 설치하면 Prism이 다시 시작됩니다.
+              {t('Installing {version} will restart PRISM.', { version: update.version })}
             </p>
             {update.notes.trim() !== '' && (
               <p className="mt-2 mb-0 max-h-24 overflow-y-auto text-ui text-dim">{update.notes}</p>
@@ -909,7 +909,7 @@ function Home(): JSX.Element {
                   setUpdateError('');
                 }}
               >
-                나중에
+                {t('Later')}
               </button>
               <button
                 type="button"
@@ -928,7 +928,7 @@ function Home(): JSX.Element {
                     });
                 }}
               >
-                {installing ? '설치 중…' : '설치'}
+                {t(installing ? 'Installing…' : 'Install')}
               </button>
             </div>
           </div>

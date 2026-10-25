@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { nodes, setup, settle } from './setup-harness.js';
 
 describe('signup recovery', () => {
@@ -169,5 +169,40 @@ describe('platform permission settings', () => {
     app.effect("step !== 'permissions'")();
     await settle();
     expect(Boolean(app.button('Open System Settings'))).toBe(supported);
+  });
+});
+
+
+describe('setup language', () => {
+  it('keeps signup headings, instructions, actions and greeting in Korean', async () => {
+    vi.useFakeTimers();
+    try {
+    const app = setup('ko');
+    app.button('시작').props.onClick();
+    /** Collects rendered copy without inspecting classes or implementation details. */
+    const copy = (tree: any): string => Array.isArray(tree)
+      ? tree.map(copy).join(' ')
+      : typeof tree === 'string' ? tree : tree?.props ? copy(tree.props.children) : '';
+    expect(copy(app.render())).toContain('계정 만들기');
+    expect(copy(app.render())).toContain('계정을 만들면 내 기기끼리');
+    expect(copy(app.render())).not.toMatch(/Create|Password|Continue|account/);
+    app.fill();
+    app.button('계정 만들기').props.onClick();
+    await settle();
+    expect(copy(app.render())).toContain('메일을 확인하세요');
+    expect(copy(app.render())).toContain('test@example.invalid로 6자리 코드를');
+    nodes(app.render(), (node) => node.type?.name === 'CodeBoxes')[0].props.onComplete('123456');
+    await settle();
+    await vi.runAllTimersAsync();
+    app.button('등록했습니다 — 확인하기').props.onClick();
+    expect(copy(app.render())).toContain('한 번 확인해 봅시다');
+    nodes(app.render(), (node) => node.type?.name === 'CodeBoxes')[0].props.onComplete('123456');
+    await settle();
+    await vi.runAllTimersAsync();
+    expect(copy(app.render())).toContain('test@example.invalid님, 반가워요');
+    expect(copy(app.render())).not.toMatch(/Hello|Every machine|Test it/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

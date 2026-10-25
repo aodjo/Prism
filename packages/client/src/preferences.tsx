@@ -369,7 +369,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                     type="email"
                     spellCheck={false}
                     autoComplete="username"
-                    placeholder={t('you@example.com')}
+                    placeholder={'you@example.com'}
                     className={FIELD}
                     value={email}
                     onChange={(event) => {
@@ -419,7 +419,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
                 )}
                 <div className="mt-2.5 flex justify-end gap-2">
                   <button type="button" className="btn-secondary" disabled={busy} onClick={create}>
-                    {proof === null ? 'Create account' : 'Confirm code'}
+                    {t(proof === null ? 'Create account' : 'Confirm code')}
                   </button>
                   <button
                     type="button"
@@ -496,7 +496,7 @@ export function Preferences({ onResize }: { onResize?: (height: number) => void 
           <Row
             label={build ? build.version : '—'}
             note={
-              build ? t('build {build} · {channel}', { build: build.build, channel: build.channel }) : ''
+              build ? t('build {build} · {channel}', { build: build.build, channel: t(build.channel) }) : ''
             }
           >
             <span className="text-fine-2 text-muted-2">
