@@ -396,6 +396,8 @@ export interface MissingGrant {
  * somewhere else, and the moment to ask is once, at the start.
  */
 export interface HostPermissions {
+  /** Whether this platform has a local-network privacy settings pane. */
+  readonly networkSettings: boolean;
   /** Whether the screen may be recorded. */
   readonly screen: boolean;
   /** Whether this machine may be controlled. */

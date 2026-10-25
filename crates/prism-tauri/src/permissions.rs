@@ -49,6 +49,8 @@ pub struct MissingGrant {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostPermissions {
+    /// Whether this platform has a local-network privacy settings pane.
+    pub network_settings: bool,
     /// Whether the screen may be recorded, which also covers capturing its audio.
     pub screen: bool,
     /// Whether this machine may be controlled.
@@ -110,6 +112,9 @@ pub fn request_permission(
     // everything through the rendezvous goes on working, so a screen that ticks it green sends
     // the one person who could fix it looking somewhere else.
     if id == LOCAL_NETWORK {
+        if !cfg!(target_os = "macos") {
+            return Err("Local network privacy settings are only available on macOS.".to_owned());
+        }
         open_settings_pane(LOCAL_NETWORK_PANE);
 
         return Ok(look(controlling));
@@ -238,6 +243,7 @@ fn look(controlling: bool) -> HostPermissions {
     let held = prism_core::control::permissions::check();
 
     HostPermissions {
+        network_settings: cfg!(target_os = "macos"),
         screen: held.screen,
         input: held.input,
         missing: held
@@ -332,6 +338,14 @@ mod tests {
 
         assert!(written.contains("\"settingsUrl\""));
         assert!(!written.contains("\"settings_url\""));
+    }
+
+    #[test]
+    fn the_platform_reports_whether_network_privacy_settings_exist() {
+        let held = look(false);
+        assert_eq!(held.network_settings, cfg!(target_os = "macos"));
+        let value = serde_json::to_value(held).unwrap();
+        assert_eq!(value["networkSettings"], cfg!(target_os = "macos"));
     }
 
     #[test]

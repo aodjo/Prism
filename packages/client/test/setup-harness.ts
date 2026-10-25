@@ -37,8 +37,8 @@ export function setup() {
     accountChallenge: vi.fn(async () => true),
     accountRegister: vi.fn(async () => ({ qr: 'data:image/png;base64,test', secret: 'test' })),
     accountSignIn: vi.fn(async () => ({ email: 'test@example.invalid' })),
-    permissions: vi.fn(async () => ({ screen: false, input: false, missing: [{ id: 'screen' }, { id: 'input' }] })),
-    requestPermission: vi.fn(async () => ({ screen: false, input: false, missing: [{ id: 'screen' }, { id: 'input' }] })),
+    permissions: vi.fn(async () => ({ networkSettings: true, screen: false, input: false, missing: [{ id: 'screen' }, { id: 'input' }] })),
+    requestPermission: vi.fn(async () => ({ networkSettings: true, screen: false, input: false, missing: [{ id: 'screen' }, { id: 'input' }] })),
     restart: vi.fn(async () => null),
     finishSetup: vi.fn(async () => null),
   };

@@ -156,3 +156,18 @@ describe('setup completion', () => {
     expect(app.state).not.toContain('home window failed');
   });
 });
+
+
+describe('platform permission settings', () => {
+  it.each([true, false])('offers the local-network settings pane only when supported=%s', async (supported) => {
+    const app = setup();
+    app.api.accountState.mockResolvedValue({ email: 'test@example.invalid' });
+    app.api.permissions.mockResolvedValue({ networkSettings: supported, screen: true, input: true, missing: [] });
+    app.effect('prism.identity')();
+    await settle();
+    app.render();
+    app.effect("step !== 'permissions'")();
+    await settle();
+    expect(Boolean(app.button('Open System Settings'))).toBe(supported);
+  });
+});

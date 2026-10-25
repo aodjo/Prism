@@ -943,7 +943,7 @@ function Setup(): JSX.Element {
             {t('Nothing is sent outside your own network.')}
           </p>
           <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
-            {GRANTS.map((grant) => {
+            {GRANTS.filter((grant) => grant.id !== 'network' || held?.networkSettings === true).map((grant) => {
               // Local Network is the one the system will not answer for: there is no call
               // that asks whether it has been given. So it is shown as neither held nor
               // refused, and its button opens the pane rather than requesting anything.
