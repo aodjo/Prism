@@ -79,6 +79,11 @@ pub struct Account {
     /// test that did not exist would be a server that ate its own users.
     #[serde(default = "made_before_this_was_asked")]
     pub verified: bool,
+    /// Whether an authenticator code has confirmed this enrollment.
+    ///
+    /// Older records are treated as confirmed so upgrades cannot reopen established accounts.
+    #[serde(default = "made_before_this_was_asked")]
+    pub totp_confirmed: bool,
 }
 
 /// A code sent to an address, waiting to be typed back in.
@@ -299,13 +304,20 @@ impl Accounts {
 
     /// Says whether an address is still going spare, without doing anything about it.
     ///
+    /// An unfinished authenticator enrollment can be replaced after proving the address again.
+    /// Confirmed accounts, including records from older servers, always keep their address.
+    ///
     /// # Errors
     ///
     /// Returns [`AccountError::BadEmail`] or [`AccountError::EmailTaken`].
     pub fn check_free(&self, email: &str) -> Result<(), AccountError> {
         check_email(email)?;
 
-        if self.by_email.contains_key(email) {
+        if self
+            .by_email
+            .get(email)
+            .is_some_and(|account| account.totp_confirmed)
+        {
             return Err(AccountError::EmailTaken);
         }
 
@@ -346,11 +358,7 @@ impl Accounts {
     /// [`AccountError::EmailTaken`] if it already has an account, and
     /// [`AccountError::Store`] if the result cannot be written.
     pub fn challenge(&mut self, email: &str, now_unix: u64) -> Result<String, AccountError> {
-        check_email(email)?;
-
-        if self.by_email.contains_key(email) {
-            return Err(AccountError::EmailTaken);
-        }
+        self.check_free(email)?;
 
         let code = new_code().map_err(|err| AccountError::Store {
             doing: "seeded with randomness",
@@ -389,11 +397,7 @@ impl Accounts {
         code: &str,
         now_unix: u64,
     ) -> Result<[u8; totp::SECRET_LEN], AccountError> {
-        check_email(&registration.email)?;
-
-        if self.by_email.contains_key(&registration.email) {
-            return Err(AccountError::EmailTaken);
-        }
+        self.check_free(&registration.email)?;
 
         self.redeem(&registration.email, code, now_unix)?;
 
@@ -428,6 +432,7 @@ impl Accounts {
                 // no — see `set_relay_allowed`.
                 relay_allowed: true,
                 verified: true,
+                totp_confirmed: false,
             },
         );
 
@@ -501,9 +506,9 @@ impl Accounts {
     /// # Errors
     ///
     /// Returns [`AccountError::Refused`] for every kind of failure, including a name that does
-    /// not exist.
+    /// not exist, or [`AccountError::Store`] if confirming enrollment cannot be persisted.
     pub fn sign_in(
-        &self,
+        &mut self,
         email: &str,
         auth: &[u8; SECRET_LEN],
         code: u32,
@@ -529,11 +534,23 @@ impl Accounts {
         // that link.
         let account = account.ok_or(AccountError::Refused)?;
 
-        if account.verified {
-            Ok(account)
-        } else {
-            Err(AccountError::NotVerified)
+        if !account.verified {
+            return Err(AccountError::NotVerified);
         }
+        if !account.totp_confirmed {
+            self.by_email
+                .get_mut(email)
+                .ok_or(AccountError::Refused)?
+                .totp_confirmed = true;
+            if let Err(error) = self.save() {
+                self.by_email
+                    .get_mut(email)
+                    .ok_or(AccountError::Refused)?
+                    .totp_confirmed = false;
+                return Err(error);
+            }
+        }
+        self.by_email.get(email).ok_or(AccountError::Refused)
     }
 
     /// Returns an account by name, for a caller that has already established who they are.
@@ -826,13 +843,11 @@ mod tests {
             .register(registration("someone@example.com"), &code, 10)
             .expect("registers");
 
-        // The address is taken now, so this stops at the earlier check — but the code is gone
-        // either way, which is what keeps a leaked mail from being worth anything later.
         assert_eq!(
             accounts
                 .register(registration("someone@example.com"), &code, 10)
                 .unwrap_err(),
-            AccountError::EmailTaken,
+            AccountError::BadCode,
         );
     }
 
@@ -894,9 +909,17 @@ mod tests {
         let (mut accounts, _path) = store("code-taken");
 
         let code = accounts.challenge("a@b.co", 0).expect("sends");
-        accounts
+        let secret = accounts
             .register(registration("a@b.co"), &code, 10)
             .expect("registers");
+        accounts
+            .sign_in(
+                "a@b.co",
+                &[2; SECRET_LEN],
+                totp::code_at_time(&secret, 10),
+                10,
+            )
+            .unwrap();
 
         assert_eq!(
             accounts.challenge("a@b.co", 10).unwrap_err(),
@@ -919,6 +942,39 @@ mod tests {
         let accounts = Accounts::open(&path).expect("opens");
 
         assert!(accounts.get("aodjo").expect("exists").verified);
+        assert!(accounts.get("aodjo").expect("exists").totp_confirmed);
+    }
+
+    #[test]
+    fn an_unfinished_enrollment_can_restart_after_the_server_restarts() {
+        let (mut accounts, path) = store("unfinished-enrollment");
+        let first = accounts.challenge("someone@example.com", 10).unwrap();
+        let lost = accounts
+            .register(registration("someone@example.com"), &first, 10)
+            .unwrap();
+        drop(accounts);
+        let mut accounts = Accounts::open(&path).unwrap();
+        assert!(!accounts.get("someone@example.com").unwrap().totp_confirmed);
+        let fresh = accounts.challenge("someone@example.com", 20).unwrap();
+        let secret = accounts
+            .register(registration("someone@example.com"), &fresh, 20)
+            .unwrap();
+        assert_ne!(secret, lost);
+        assert!(
+            accounts
+                .sign_in(
+                    "someone@example.com",
+                    &[2; SECRET_LEN],
+                    totp::code_at_time(&secret, 20),
+                    20
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            accounts.check_free("someone@example.com"),
+            Err(AccountError::EmailTaken)
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1022,9 +1078,17 @@ mod tests {
     #[test]
     fn the_same_name_cannot_be_taken_twice() {
         let (mut accounts, path) = store("taken");
-        accounts
+        let secret = accounts
             .register_unproved(registration("someone@example.com"))
             .expect("registers");
+        accounts
+            .sign_in(
+                "someone@example.com",
+                &[2; SECRET_LEN],
+                totp::code_at_time(&secret, 10),
+                10,
+            )
+            .unwrap();
 
         assert_eq!(
             accounts
@@ -1146,7 +1210,7 @@ mod tests {
             .expect("adds");
         drop(accounts);
 
-        let reopened = Accounts::open(&path).expect("reopens");
+        let mut reopened = Accounts::open(&path).expect("reopens");
         let now = 1_700_000_000;
 
         assert_eq!(reopened.len(), 1);

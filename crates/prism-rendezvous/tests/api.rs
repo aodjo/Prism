@@ -120,6 +120,35 @@ async fn register(router: &axum::Router, name: &str) -> Vec<u8> {
     from_base32(&base32)
 }
 
+#[tokio::test]
+async fn losing_the_authenticator_screen_does_not_reserve_the_address() {
+    let (router, path) = service("unfinished-enrollment");
+    let lost = register(&router, "retry@example.com").await;
+    let (status, _) = send(
+        &router,
+        post(
+            "/v1/accounts/challenge",
+            json!({"email": "retry@example.com"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let fresh = register(&router, "retry@example.com").await;
+    assert_ne!(lost, fresh);
+    let token = sign_in(&router, "retry@example.com", &fresh).await;
+    assert!(!token.is_empty());
+    let (status, _) = send(
+        &router,
+        post(
+            "/v1/accounts/challenge",
+            json!({"email": "retry@example.com"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let _ = std::fs::remove_file(path);
+}
+
 /// Reads back what the API rendered, so a test uses the same secret an authenticator would.
 fn from_base32(text: &str) -> Vec<u8> {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -396,9 +425,10 @@ async fn asking_for_a_salt_does_not_say_whether_the_account_exists() {
 }
 
 #[tokio::test]
-async fn the_same_name_cannot_be_registered_twice() {
+async fn a_confirmed_account_cannot_be_registered_twice() {
     let (router, path) = service("twice");
-    register(&router, "someone@example.com").await;
+    let secret = register(&router, "someone@example.com").await;
+    sign_in(&router, "someone@example.com", &secret).await;
 
     let (status, _) = send(
         &router,
