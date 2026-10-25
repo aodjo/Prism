@@ -940,8 +940,6 @@ function Setup(): JSX.Element {
           </h2>
           <p className="mt-3.5 max-w-[min(560px,38.9vw)] text-body-2 text-muted">
             {t('PRISM needs these to capture and control this machine.')}
-            <br />
-            {t('Connections can use the internet and an encrypted relay when a direct connection is unavailable.')}
           </p>
           <div className="card mt-[63px] w-[min(620px,43.1vw)] text-left">
             {GRANTS.filter((grant) => grant.id !== 'network' || held?.networkSettings === true).map((grant) => {
